@@ -72,7 +72,7 @@ Key providers in the registry:
 | Fast general iteration | `ollama-cloud/kimi-k2.5` | `xiaomi-token-plan-ams/mimo-v2-pro` |
 | Architecture / heavy reasoning | `ollama-cloud/kimi-k2-thinking` | `xiaomi-token-plan-ams/mimo-v2-pro` |
 
-Current active env: `DR_AUTOPILOT_MODEL` and `LETTA_MAINTENANCE_MODEL` in `~/.config/opencode/opencode-runtime.env`. Set to `xiaomi-token-plan-ams/mimo-v2-pro` (200M credits) while ollama-cloud is rate-capped. Switch back to ollama-cloud models when cap resets.
+Model selection is handled by OpenCode's built-in routing and the `model-registry` plugin. At session start, call `get_quota_backoff_status` — if the preferred provider is in backoff, the plugin's `provider_order` in `config/models.jsonc` drives the fallback automatically. Do not override via env vars.
 
 ## Runtime: Model Selection
 
