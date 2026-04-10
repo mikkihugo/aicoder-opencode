@@ -22,6 +22,9 @@
     "./.agents/skills/control-plane-development-base/SKILL.md",
     "./.agents/skills/control-plane-maintenance-base/SKILL.md",
     "./targets/aicoder-opencode/overlay/.agents/skills/aicoder-unblock-and-patch/SKILL.md",
-    "./targets/aicoder-opencode/overlay/.agents/skills/aicoder-harvest-and-promote/SKILL.md"
+    "./targets/aicoder-opencode/overlay/.agents/skills/aicoder-harvest-and-promote/SKILL.md",
+    "./targets/aicoder-opencode/overlay/.agents/skills/control-plane-model-registry/SKILL.md",
+    "./targets/aicoder-opencode/overlay/.agents/skills/control-plane-target-registry/SKILL.md",
+    "./docs/targets/aicoder-opencode.md"
   ]
 }
