@@ -5,6 +5,8 @@ export const AUTOPILOT_TIMER_NAME = "dr-autopilot.timer";
 export const AUTOPILOT_STATUS_PATH = path.join(".opencode", "state", "autopilot", "status.json");
 export const AUTOPILOT_LOCK_PATH = path.join(".opencode", "state", "autopilot", "run.lock");
 export const AUTOPILOT_TIMER_INTERVAL_MINUTES = 2;
+// 5 minutes: intentionally longer than the 2-minute timer interval so sessions
+// get at least two missed cycles before being considered stale.
 export const AUTOPILOT_STALE_MILLISECONDS = 5 * 60 * 1000;
 export const AUTOPILOT_STALE_TASK_MILLISECONDS = 30 * 60 * 1000;
 export const AUTOPILOT_RUNTIME_MAX_SECONDS = 15 * 60;
@@ -74,7 +76,7 @@ export function checkpointUpdatedMilliseconds(checkpoint) {
 
 export function sessionIsStale(session, nowMilliseconds, staleMilliseconds = AUTOPILOT_STALE_MILLISECONDS) {
   if (!session?.updated) {
-    return true;
+    return false;
   }
   return nowMilliseconds - session.updated >= staleMilliseconds;
 }

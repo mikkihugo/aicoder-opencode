@@ -64,6 +64,11 @@ test("sessionIsStale_when_recently_updated_returns_false", () => {
   );
 });
 
+test("sessionIsStale_when_updated_is_missing_returns_false", () => {
+  assert.equal(sessionIsStale({}, Date.now()), false);
+  assert.equal(sessionIsStale(null, Date.now()), false);
+});
+
 test("taskStartedIsStale_when_older_than_threshold_returns_true", () => {
   const now = 2_000_000;
   assert.equal(

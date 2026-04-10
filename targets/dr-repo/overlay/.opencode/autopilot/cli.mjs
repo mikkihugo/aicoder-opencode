@@ -41,6 +41,7 @@ const USER_SYSTEMD_DIRECTORY = path.join(os.homedir(), ".config", "systemd", "us
 const DEFAULT_OPENCODE_DATA_HOME = path.join(REPO_ROOT, ".opencode", "xdg-data");
 const OPENCODE_DATA_HOME = process.env.XDG_DATA_HOME?.trim() || DEFAULT_OPENCODE_DATA_HOME;
 const OPENCODE_DB_PATH = path.join(OPENCODE_DATA_HOME, "opencode", "opencode.db");
+const COMMAND_TIMEOUT_MILLISECONDS = 60_000;
 const STALE_TASK_KILL_WAIT_MILLISECONDS = 5_000;
 const AGENT_HEALTH_DIRECTORY = path.join(REPO_ROOT, ".opencode", "state", "agent-health");
 const MAINTENANCE_PASSWORD_PATH = "/home/mhugo/code/dr-repo/.opencode/state/maintenance-web/server-password";
@@ -116,6 +117,7 @@ async function runCommand(command, args, options = {}) {
   return execFile(command, args, {
     cwd: REPO_ROOT,
     maxBuffer: 10 * 1024 * 1024,
+    timeout: COMMAND_TIMEOUT_MILLISECONDS,
     ...options,
   });
 }
@@ -297,7 +299,11 @@ async function listStaleRunningTaskCalls(sessionIDs, staleMilliseconds = AUTOPIL
         };
       })
       .filter((taskCall) => taskStartedIsStale(taskCall.timeCreated, nowMilliseconds, staleMilliseconds));
-  } catch {
+  } catch (error) {
+    await writeAutopilotStatus({
+      action: "degraded",
+      reason: `SQLite query failed: ${error?.code ?? error?.message ?? "unknown error"}. Stale-task reaping is disabled for this run.`,
+    });
     return [];
   }
 }
@@ -497,6 +503,12 @@ async function runAutopilotOnce() {
     nextStep: candidate.nextStep ?? null,
   });
 
+  const agentHealth = await loadSessionAgentHealth(candidate.sessionID);
+  const recentFailures = (agentHealth.failures ?? []).slice(-3);
+  const failureDigest = recentFailures.length > 0
+    ? `\n\nRecent failure context (last ${recentFailures.length} reaped task${recentFailures.length === 1 ? "" : "s"}):\n${recentFailures.map((f) => `- ${f.agent ?? "unknown"} agent: ${f.reason ?? "no reason"} (detected ${f.detectedAt ?? "unknown time"})`).join("\n")}`
+    : "";
+
   const attachURL = maintenanceServerBaseURL();
   const maintenancePassword = maintenanceServerPassword();
   const shouldAttach = await maintenanceServerIsReachable(attachURL);
@@ -505,7 +517,7 @@ async function runAutopilotOnce() {
     "--session",
     candidate.sessionID,
     "--command",
-    "autopilot",
+    `autopilot${failureDigest}`,
     "--agent",
     "implementation_lead",
     "--model",
@@ -541,7 +553,14 @@ async function runAutopilotOnce() {
       reject(new Error(`dr-autopilot run exited with code ${code}`));
     });
 
-    child.on("error", reject);
+    child.on("error", async (error) => {
+      await writeAutopilotStatus({
+        action: "degraded",
+        reason: `Failed to launch opencode: ${error.code === "ENOENT" ? "binary not found at " + REPO_OPENCODE : error.message}`,
+        sessionID: candidate.sessionID,
+      });
+      reject(error);
+    });
   });
 }
 
