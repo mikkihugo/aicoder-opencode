@@ -8,18 +8,18 @@
     ]
   },
   "plugin": [
-    "file:./plugins/model-registry",
-    "file:./plugins/dr-checkpoints",
-    "file:./plugins/dr-plan-context",
-    "file:./plugins/dr-context-compaction",
-    "file:./plugins/dr-session-continuation",
-    "file:./plugins/dr-verification-guard",
-    "file:./plugins/dr-json-error-recovery",
-    "file:./plugins/dr-helper-runtime-control",
-    "file:./plugins/dr-agent-babysitter",
-    "file:./plugins/dr-specialist-routing",
-    "file:./plugins/dr-memory",
-    "file:./plugins/dr-public-code-search",
-    "file:./plugins/dr-ast-grep-search"
+    "file:./.opencode/plugins/model-registry",
+    "file:./.opencode/plugins/dr-checkpoints",
+    "file:./.opencode/plugins/dr-plan-context",
+    "file:./.opencode/plugins/dr-context-compaction",
+    "file:./.opencode/plugins/dr-session-continuation",
+    "file:./.opencode/plugins/dr-verification-guard",
+    "file:./.opencode/plugins/dr-json-error-recovery",
+    "file:./.opencode/plugins/dr-helper-runtime-control",
+    "file:./.opencode/plugins/dr-agent-babysitter",
+    "file:./.opencode/plugins/dr-specialist-routing",
+    "file:./.opencode/plugins/dr-memory",
+    "file:./.opencode/plugins/dr-public-code-search",
+    "file:./.opencode/plugins/dr-ast-grep-search"
   ]
 }

@@ -10,7 +10,7 @@
     ]
   },
   "plugin": [
-    "file:./.opencode/plugins/model-registry"
+    "file:./.opencode/plugins/model-registry.ts"
   ],
   "server": {
     "port": 8080,
