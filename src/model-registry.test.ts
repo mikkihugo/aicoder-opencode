@@ -13,9 +13,11 @@ import {
   parsePositiveInteger,
   parseInteractiveRowIndex,
   parseModelSelectionOptions,
+  parseProviderRouteList,
   parseRoleList,
   renderModelRegistryJsonc,
 } from "./model-registry.js";
+import { groupVisibleRuntimeModelFamilies } from "./cli/model-commands.js";
 
 const CONTROL_PLANE_ROOT_DIRECTORY = process.cwd();
 
@@ -223,4 +225,86 @@ test("getPreferredVisibleProviderRoute_whenTopOpenRouterRoutesAreFiltered_return
   ]);
 
   assert.equal(preferredRoute?.model, "xiaomi-token-plan-ams/mimo-v2-pro");
+});
+
+test("parseProviderRouteList_whenValidRoutesProvided_returnsOrderedRoutes", () => {
+  const routes = parseProviderRouteList("ollama-cloud/glm-5,openrouter/stepfun/step-3.5-flash:free");
+
+  assert.deepEqual(routes, [
+    { provider: "ollama-cloud", model: "ollama-cloud/glm-5", priority: 1 },
+    { provider: "openrouter", model: "openrouter/stepfun/step-3.5-flash:free", priority: 2 },
+  ]);
+});
+
+test("parseProviderRouteList_whenRouteHasNoSlash_throws", () => {
+  assert.throws(
+    () => parseProviderRouteList("invalid-no-slash"),
+    /invalid provider\/model route/,
+  );
+});
+
+test("renderModelRegistryJsonc_whenRendered_indentsTopLevelFieldsAtTwoSpaces", async () => {
+  const modelRegistry = await loadModelRegistry(CONTROL_PLANE_ROOT_DIRECTORY);
+  const renderedJsonc = renderModelRegistryJsonc(modelRegistry);
+  const lines = renderedJsonc.split("\n");
+
+  // First content line after the opening brace should be a 2-space-indented comment
+  assert.equal(lines[1]?.startsWith("  //"), true);
+
+  // No line inside the braces should start with 4+ spaces for top-level keys
+  // (i.e., the "version" line should be at 2-space indent, not 4)
+  const versionLine = lines.find((line) => line.includes('"version"'));
+  assert.ok(versionLine !== undefined, "version line not found");
+  assert.equal(versionLine!.startsWith("  ") && !versionLine!.startsWith("    "), true);
+});
+
+test("filterModelRegistryEntries_whenEnabledOnlyRequested_excludesDisabledModels", async () => {
+  const modelRegistry = await loadModelRegistry(CONTROL_PLANE_ROOT_DIRECTORY);
+
+  // Temporarily disable the first model to have a known disabled entry
+  const firstEntry = modelRegistry.models[0]!;
+  const originalEnabled = firstEntry.enabled;
+  firstEntry.enabled = false;
+
+  const filteredEntries = filterModelRegistryEntries(modelRegistry.models, {
+    freeOnly: false,
+    roleFilter: null,
+    providerFilter: null,
+    enabledOnly: true,
+  });
+
+  assert.equal(
+    filteredEntries.every((modelEntry) => modelEntry.enabled),
+    true,
+  );
+  assert.equal(filteredEntries.includes(firstEntry), false);
+
+  // Restore
+  firstEntry.enabled = originalEnabled;
+});
+
+test("groupVisibleRuntimeModelFamilies_whenRoutesShareModelName_groupsThemTogether", () => {
+  const runtimeModelFamilies = groupVisibleRuntimeModelFamilies([
+    "xiaomi-token-plan-ams/mimo-v2-pro",
+    "opencode-go/mimo-v2-pro",
+    "openrouter/stepfun/step-3.5-flash:free",
+  ]);
+
+  assert.deepEqual(runtimeModelFamilies, [
+    {
+      familyId: "mimo-v2-pro",
+      preferredModelId: "xiaomi-token-plan-ams/mimo-v2-pro",
+      providerNames: ["xiaomi-token-plan-ams", "opencode-go"],
+      routes: [
+        "xiaomi-token-plan-ams/mimo-v2-pro",
+        "opencode-go/mimo-v2-pro",
+      ],
+    },
+    {
+      familyId: "step-3.5-flash:free",
+      preferredModelId: "openrouter/stepfun/step-3.5-flash:free",
+      providerNames: ["openrouter"],
+      routes: ["openrouter/stepfun/step-3.5-flash:free"],
+    },
+  ]);
 });
