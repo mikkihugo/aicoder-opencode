@@ -43,6 +43,30 @@ Use this skill when work is about:
 - Shared skill source belongs in `.agents/skills/`
 - Product repos consume shared base via repo-local shims
 
+## Runtime: Model Provider Priority
+
+Subscription providers are always preferred over pay-per-token. Current sources in priority order:
+
+| Priority | Provider | Status | Notes |
+|---|---|---|---|
+| 1 | `ollama-cloud/*` | Free (rate-capped daily) | Best models when available |
+| 2 | `minimax/*` | Subscription (minimax.io) | Reliable fallback |
+| 3 | `kimi-for-coding/*` | Subscription (api.kimi.com) | User-Agent gated, works via opencode |
+| 4 | `openrouter/*` (paid models) | Pay-per-token | Last resort only |
+
+`openrouter/:free` models are NOT available on the current paid account — they 404.
+
+### Autopilot model selection (per task matrix)
+
+| Task type | Primary | Fallback |
+|---|---|---|
+| Autonomous coding iteration (dr-repo) | `ollama-cloud/qwen3-coder:480b` | `minimax/MiniMax-M2` |
+| Maintenance / type fixes (letta-workspace) | `ollama-cloud/devstral-2:123b` | `minimax/MiniMax-M2` |
+| Fast general iteration | `ollama-cloud/kimi-k2.5` | `minimax/MiniMax-M2` |
+| Architecture / heavy reasoning | `ollama-cloud/kimi-k2-thinking` | `minimax/MiniMax-M2` |
+
+Current active env: `DR_AUTOPILOT_MODEL` and `LETTA_MAINTENANCE_MODEL` in `~/.config/opencode/opencode-runtime.env`. Set to `minimax/MiniMax-M2` while ollama-cloud is rate-capped. Switch back to ollama-cloud models when cap resets.
+
 ## Runtime: Model Selection
 
 The `model-registry` plugin exposes two tools:
@@ -66,6 +90,15 @@ These rules apply to all repo maintenance sessions (dr-repo autopilot, letta-wor
 - If confidence is low on a critical sub-decision, spawn a specialist subagent for review before proceeding — do not interrupt the human.
 - When a maintenance loop fires and finds no pending work, log and exit cleanly. Do not spin on empty queues.
 - If a session was previously interrupted, re-read the last checkpoint or session-id file before starting new work to resume cleanly.
+
+### Autopilot continuation
+
+When the autopilot timer fires:
+1. Check if the runner unit is already active — if yes, exit immediately (do not start a second runner).
+2. Check the session-id file. If it contains a valid session ID, resume that session with `--session <id>`.
+3. If no session-id file exists, start a new session with the configured title.
+4. Use `get_quota_backoff_status` before starting a long chain — if the configured model's provider is in backoff, switch to the next provider in the priority table above.
+5. On quota error (429) mid-session, the model-registry plugin records the backoff. The next timer cycle will start a fresh attempt — do not retry in a tight loop within the same session.
 
 ## Runtime: Quota and Provider Events
 
