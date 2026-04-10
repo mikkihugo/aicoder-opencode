@@ -45,16 +45,23 @@ Use this skill when work is about:
 
 ## Runtime: Model Provider Priority
 
-Subscription providers are always preferred over pay-per-token. Current sources in priority order:
+Use `config/models.jsonc` as the authoritative allowlist. Only models listed there are approved. Provider priority within each registry entry follows `provider_order[].priority`.
 
-| Priority | Provider | Status | Notes |
-|---|---|---|---|
-| 1 | `ollama-cloud/*` | Free (rate-capped daily) | Best models when available |
-| 2 | `minimax/*` | Subscription (minimax.io) | Reliable fallback |
-| 3 | `kimi-for-coding/*` | Subscription (api.kimi.com) | User-Agent gated, works via opencode |
-| 4 | `openrouter/*` (paid models) | Pay-per-token | Last resort only |
+Key providers in the registry:
 
-`openrouter/:free` models are NOT available on the current paid account — they 404.
+| Provider | Status | Notes |
+|---|---|---|
+| `ollama-cloud/*` | Free (rate-capped daily) | Best when cap not exhausted |
+| `iflowcn/*` | Free | Major free provider; priority 1 for many registry entries |
+| `mistral/*` | Subscription | codestral, devstral variants |
+| `minimax/*` | Subscription (minimax.io) | Reliable fallback |
+| `kimi-for-coding/*` | Subscription | User-Agent gated, works via opencode |
+| `xiaomi-token-plan-ams/*` | Subscription (direct) | mimo-v2-pro priority 1 via token-plan-ams.xiaomimimo.com |
+| `openrouter/:free` | Free tier | Allowed; use curated models only |
+| `openrouter/*` (paid) | Pay-per-token | Last resort; only models in registry |
+| `longcat-openai/*` | Free | Special use only — not general fallback |
+
+**Never use:** `xai/grok-*`, `openai/*` (ChatGPT), `togetherai/*`, uncurated openrouter auto-selection.
 
 ### Autopilot model selection (per task matrix)
 
