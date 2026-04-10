@@ -314,8 +314,7 @@ export function renderModelRegistryJsonc(modelRegistry: ModelRegistry): string {
     "  // Keep provider order, tiers, quotas, and role intent here.",
     ...JSON.stringify(modelRegistry, null, 2)
       .split("\n")
-      .slice(1, -1)
-      .map((line) => `  ${line}`),
+      .slice(1, -1),
     "}",
     "",
   ].join("\n");
