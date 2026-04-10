@@ -67,12 +67,12 @@ Key providers in the registry:
 
 | Task type | Primary | Fallback |
 |---|---|---|
-| Autonomous coding iteration (dr-repo) | `ollama-cloud/qwen3-coder:480b` | `minimax/MiniMax-M2` |
-| Maintenance / type fixes (letta-workspace) | `ollama-cloud/devstral-2:123b` | `minimax/MiniMax-M2` |
-| Fast general iteration | `ollama-cloud/kimi-k2.5` | `minimax/MiniMax-M2` |
-| Architecture / heavy reasoning | `ollama-cloud/kimi-k2-thinking` | `minimax/MiniMax-M2` |
+| Autonomous coding iteration (dr-repo) | `ollama-cloud/qwen3-coder:480b` | `xiaomi-token-plan-ams/mimo-v2-pro` |
+| Maintenance / type fixes (letta-workspace) | `ollama-cloud/devstral-2:123b` | `xiaomi-token-plan-ams/mimo-v2-pro` |
+| Fast general iteration | `ollama-cloud/kimi-k2.5` | `xiaomi-token-plan-ams/mimo-v2-pro` |
+| Architecture / heavy reasoning | `ollama-cloud/kimi-k2-thinking` | `xiaomi-token-plan-ams/mimo-v2-pro` |
 
-Current active env: `DR_AUTOPILOT_MODEL` and `LETTA_MAINTENANCE_MODEL` in `~/.config/opencode/opencode-runtime.env`. Set to `minimax/MiniMax-M2` while ollama-cloud is rate-capped. Switch back to ollama-cloud models when cap resets.
+Current active env: `DR_AUTOPILOT_MODEL` and `LETTA_MAINTENANCE_MODEL` in `~/.config/opencode/opencode-runtime.env`. Set to `xiaomi-token-plan-ams/mimo-v2-pro` (200M credits) while ollama-cloud is rate-capped. Switch back to ollama-cloud models when cap resets.
 
 ## Runtime: Model Selection
 
