@@ -1,0 +1,36 @@
+{
+  "name": "aicoder-opencode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript control plane for multi-repo AI coding operations.",
+  "bin": {
+    "aicoder-opencode": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "npm run build && npm test",
+    "test": "node --import tsx --test src/**/*.test.ts",
+    "list-targets": "tsx src/cli.ts list-targets",
+    "targets": "tsx src/cli.ts list-targets",
+    "show:dr-repo": "tsx src/cli.ts show-target dr-repo",
+    "show:letta-workspace": "tsx src/cli.ts show-target letta-workspace",
+    "show-instructions:dr-repo": "tsx src/cli.ts show-target-instructions dr-repo",
+    "show-instructions:letta-workspace": "tsx src/cli.ts show-target-instructions letta-workspace",
+    "validate:dr-repo": "tsx src/cli.ts validate-target dr-repo",
+    "validate:letta-workspace": "tsx src/cli.ts validate-target letta-workspace",
+    "print-launch:dr-repo": "tsx src/cli.ts print-product-launch dr-repo -- --help",
+    "debug-sandbox:dr-repo": "tsx src/cli.ts debug-product-sandbox dr-repo -- /usr/bin/env bash -lc 'pwd; for path_name in .opencode .agents .maintenance; do echo ===${path_name}===; find \"${path_name}\" -mindepth 1 -maxdepth 2 | head -20; done'",
+    "doom-loop:dr-repo": "tsx src/cli.ts check-doom-loop dr-repo"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.4.3",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.11"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

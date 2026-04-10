@@ -1,0 +1,13 @@
+version: 1
+
+control_plane:
+  name: aicoder-opencode
+  root: /home/mhugo/code/aicoder-opencode
+  maintenance_owner: letta
+  executor_surface: opencode
+
+target_registry:
+  directory: config/targets
+  supported_kinds:
+    - repo
+    - monorepo

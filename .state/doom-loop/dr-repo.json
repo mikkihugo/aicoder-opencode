@@ -1,0 +1,22 @@
+{
+  "targetName": "dr-repo",
+  "consecutiveStableIterations": 1,
+  "lastSnapshot": {
+    "targetName": "dr-repo",
+    "checkpointNames": [
+      "ses_28c0c1aadffeW6LtD2iSh45wdU.json",
+      "ses_28d8b5562ffeAsH6gNOBZDwp5h.json",
+      "ses_28d9cdaf3ffeoAaWwkCVNZACmn.json",
+      "ses_2b9b23535ffeQkIH4G2z4D07qQ.json",
+      "ses_2b9b63b6effeoM7ovvQtFArsR3.json",
+      "ses_2b9b7815effey6rTARCV8Supqv.json"
+    ],
+    "activeSlicePaths": [
+      "docs/plans/2026-04-01-replica-pki/active-slice.md",
+      "docs/plans/2026-04-09-test-reliability/active-slice.md"
+    ],
+    "checkpointDigest": "fa7224c71248b09bb87eb01731728ebf1593441a104a9c2c704cca760b49cfed",
+    "activeSliceDigest": "445f7885c980bd3082be3bf94b20fe2bfd9205d38cc1a5e9356ec9ccbb6632d3"
+  },
+  "updatedAt": "2026-04-10T00:50:57.564Z"
+}

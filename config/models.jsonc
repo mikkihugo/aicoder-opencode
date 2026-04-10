@@ -1,0 +1,613 @@
+{
+  // Canonical control-plane model registry.
+  // Keep provider order, tiers, quotas, and role intent here.
+  "version": 1,
+  "defaults": {
+    "fields": [
+      "id",
+      "description",
+      "capability_tier",
+      "cost_tier",
+      "billing_mode",
+      "latency_tier",
+      "concurrency",
+      "quota_visibility",
+      "best_for",
+      "not_for",
+      "default_roles",
+      "provider_order",
+      "notes"
+    ]
+  },
+  "models": [
+    {
+      "id": "glm-5.1",
+      "description": "Heavy reasoning and architecture lane for high-value decisions.",
+      "capability_tier": "frontier",
+      "cost_tier": "expensive",
+      "billing_mode": "quota",
+      "latency_tier": "medium",
+      "concurrency": 1,
+      "quota_visibility": "system-observed",
+      "best_for": [
+        "architecture",
+        "adversarial_review",
+        "hard_debugging",
+        "irreversible_decisions"
+      ],
+      "not_for": [
+        "routine_coding",
+        "generic_helper_fanout",
+        "bulk_retry_loops"
+      ],
+      "default_roles": [
+        "architect",
+        "deep_reviewer",
+        "oracle"
+      ],
+      "provider_order": [
+        {
+          "provider": "ollama-cloud",
+          "model": "ollama-cloud/glm-5.1",
+          "priority": 1
+        },
+        {
+          "provider": "opencode-go",
+          "model": "opencode-go/glm-5.1",
+          "priority": 2,
+          "status": "disfavored"
+        }
+      ],
+      "notes": [
+        "Treat GLM-5, GLM-5.1, and GLM-5-Turbo as the same expensive family for routing."
+      ]
+    },
+    {
+      "id": "glm-4.7",
+      "description": "Default strong coding lane for routine implementation and bounded review.",
+      "capability_tier": "strong",
+      "cost_tier": "medium",
+      "billing_mode": "quota",
+      "latency_tier": "medium",
+      "concurrency": 1,
+      "quota_visibility": "system-observed",
+      "best_for": [
+        "normal_coding",
+        "bounded_refactors",
+        "standard_review",
+        "test_fixes"
+      ],
+      "not_for": [
+        "cheapest_bulk_triage",
+        "highest_stakes_architecture"
+      ],
+      "default_roles": [
+        "coder",
+        "fixer",
+        "implementation_worker"
+      ],
+      "provider_order": [
+        {
+          "provider": "ollama-cloud",
+          "model": "ollama-cloud/glm-4.7",
+          "priority": 1
+        }
+      ],
+      "notes": [
+        "Preferred over flash variants for main execution."
+      ]
+    },
+    {
+      "id": "glm-4.7-flash",
+      "description": "Fast stronger flash lane for a single quick helper or reviewer.",
+      "capability_tier": "standard",
+      "cost_tier": "free",
+      "billing_mode": "free",
+      "latency_tier": "fast",
+      "concurrency": 1,
+      "quota_visibility": "system-observed",
+      "best_for": [
+        "quick_review",
+        "helper_pressure",
+        "fast_triage"
+      ],
+      "not_for": [
+        "main_coder",
+        "architecture",
+        "irreversible_calls"
+      ],
+      "default_roles": [
+        "fast_combatant",
+        "light_verifier"
+      ],
+      "provider_order": [
+        {
+          "provider": "z-ai",
+          "model": "glm-4.7-flash",
+          "priority": 1
+        },
+        {
+          "provider": "cloudflare-workers-ai",
+          "model": "cloudflare-workers-ai/@cf/zai-org/glm-4.7-flash",
+          "priority": 2
+        }
+      ],
+      "notes": [
+        "Use when you need one stronger flash lane, not broad parallel fanout."
+      ]
+    },
+    {
+      "id": "glm-4.5-air",
+      "description": "Lightweight free GLM lane for cheap fallback pressure.",
+      "capability_tier": "fast",
+      "cost_tier": "free",
+      "billing_mode": "free",
+      "latency_tier": "fast",
+      "concurrency": 1,
+      "quota_visibility": "manual",
+      "best_for": [
+        "cheap_fallback",
+        "lightweight_review",
+        "triage"
+      ],
+      "not_for": [
+        "main_coder",
+        "deep_review",
+        "architecture"
+      ],
+      "default_roles": [
+        "cheap_fallback"
+      ],
+      "provider_order": [
+        {
+          "provider": "z-ai",
+          "model": "glm-4.5-air",
+          "priority": 1
+        }
+      ],
+      "notes": [
+        "Keep below GLM-4.7 and GLM-4.7-Flash in routing."
+      ]
+    },
+    {
+      "id": "glm-4.5-flash",
+      "description": "Cheapest parallel GLM lane for bulk pressure and fanout.",
+      "capability_tier": "fast",
+      "cost_tier": "free",
+      "billing_mode": "free",
+      "latency_tier": "fast",
+      "concurrency": 2,
+      "quota_visibility": "system-observed",
+      "best_for": [
+        "parallel_combatants",
+        "bulk_triage",
+        "low_risk_cross_checks"
+      ],
+      "not_for": [
+        "main_coder",
+        "architecture",
+        "final_signoff"
+      ],
+      "default_roles": [
+        "bulk_combatant",
+        "triage_helper"
+      ],
+      "provider_order": [
+        {
+          "provider": "z-ai",
+          "model": "glm-4.5-flash",
+          "priority": 1
+        }
+      ],
+      "notes": [
+        "Value comes from concurrency, not from depth."
+      ]
+    },
+    {
+      "id": "devstral-medium",
+      "description": "Broad SWE and code-review lane with strong second-reviewer value.",
+      "capability_tier": "strong",
+      "cost_tier": "free",
+      "billing_mode": "subscription",
+      "latency_tier": "medium",
+      "concurrency": 1,
+      "quota_visibility": "manual",
+      "best_for": [
+        "second_review",
+        "swe_tasks",
+        "code_architecture_review",
+        "agentic_repair"
+      ],
+      "not_for": [
+        "cheapest_triage",
+        "tiny_helper_tasks"
+      ],
+      "default_roles": [
+        "second_reviewer",
+        "alternate_architect"
+      ],
+      "provider_order": [
+        {
+          "provider": "mistral",
+          "model": "mistral/devstral-medium-latest",
+          "priority": 1
+        },
+        {
+          "provider": "ollama-cloud",
+          "model": "ollama-cloud/devstral-2:123b",
+          "priority": 2
+        }
+      ],
+      "notes": [
+        "Prefer native Mistral before mirrored/shared inference."
+      ]
+    },
+    {
+      "id": "codestral",
+      "description": "Fast code-centric review and generation lane.",
+      "capability_tier": "strong",
+      "cost_tier": "free",
+      "billing_mode": "subscription",
+      "latency_tier": "fast",
+      "concurrency": 1,
+      "quota_visibility": "manual",
+      "best_for": [
+        "code_review",
+        "code_generation",
+        "test_generation",
+        "quick_code_fix"
+      ],
+      "not_for": [
+        "broad_architecture",
+        "long_agentic_repair"
+      ],
+      "default_roles": [
+        "code_reviewer",
+        "fast_coder"
+      ],
+      "provider_order": [
+        {
+          "provider": "mistral",
+          "model": "mistral/codestral-latest",
+          "priority": 1
+        }
+      ],
+      "notes": [
+        "Faster than Devstral, but not the default for broader SWE judgment."
+      ]
+    },
+    {
+      "id": "deepseek-v3.2",
+      "description": "Strong free general-purpose reasoning and coding pressure lane.",
+      "capability_tier": "strong",
+      "cost_tier": "free",
+      "billing_mode": "free",
+      "latency_tier": "medium",
+      "concurrency": 1,
+      "quota_visibility": "manual",
+      "best_for": [
+        "general_review",
+        "alternate_reasoning",
+        "debugging_pressure",
+        "cross_checks"
+      ],
+      "not_for": [
+        "vision",
+        "main_architect_when_better_long_context_exists"
+      ],
+      "default_roles": [
+        "combatant",
+        "cross_checker"
+      ],
+      "provider_order": [
+        {
+          "provider": "iflowcn",
+          "model": "iflowcn/deepseek-v3.2",
+          "priority": 1
+        },
+        {
+          "provider": "ollama-cloud",
+          "model": "ollama-cloud/deepseek-v3.2",
+          "priority": 2
+        }
+      ],
+      "notes": [
+        "Good free general pressure lane without spending GLM-5 family quota."
+      ]
+    },
+    {
+      "id": "qwen3-coder-plus",
+      "description": "Free code-specialized review and implementation pressure lane.",
+      "capability_tier": "strong",
+      "cost_tier": "free",
+      "billing_mode": "free",
+      "latency_tier": "medium",
+      "concurrency": 1,
+      "quota_visibility": "manual",
+      "best_for": [
+        "code_review",
+        "implementation_pressure",
+        "refactor_review",
+        "test_fixes"
+      ],
+      "not_for": [
+        "vision",
+        "broad_architecture"
+      ],
+      "default_roles": [
+        "code_reviewer",
+        "alternate_coder"
+      ],
+      "provider_order": [
+        {
+          "provider": "iflowcn",
+          "model": "iflowcn/qwen3-coder-plus",
+          "priority": 1
+        }
+      ],
+      "notes": [
+        "Use as a free code-focused alternate before burning expensive review lanes."
+      ]
+    },
+    {
+      "id": "kimi-k2-0905",
+      "description": "Free long-reasoning alternate pressure lane from the Kimi family.",
+      "capability_tier": "strong",
+      "cost_tier": "free",
+      "billing_mode": "free",
+      "latency_tier": "medium",
+      "concurrency": 1,
+      "quota_visibility": "manual",
+      "best_for": [
+        "deep_reasoning",
+        "combatant_review",
+        "hard_debugging"
+      ],
+      "not_for": [
+        "vision",
+        "main_fast_coder"
+      ],
+      "default_roles": [
+        "deep_combatant"
+      ],
+      "provider_order": [
+        {
+          "provider": "iflowcn",
+          "model": "iflowcn/kimi-k2-0905",
+          "priority": 1
+        }
+      ],
+      "notes": [
+        "Use when you want Kimi-family pressure without leaning on paid or quota-backed routes."
+      ]
+    },
+    {
+      "id": "qwen3-235b-thinking",
+      "description": "Free deep-thinking large-model combatant lane.",
+      "capability_tier": "frontier",
+      "cost_tier": "free",
+      "billing_mode": "free",
+      "latency_tier": "slow",
+      "concurrency": 1,
+      "quota_visibility": "manual",
+      "best_for": [
+        "deep_review",
+        "alternate_architecture_pressure",
+        "hard_reasoning"
+      ],
+      "not_for": [
+        "routine_coding",
+        "fast_helpers"
+      ],
+      "default_roles": [
+        "deep_combatant",
+        "alternate_architect"
+      ],
+      "provider_order": [
+        {
+          "provider": "iflowcn",
+          "model": "iflowcn/qwen3-235b-a22b-thinking-2507",
+          "priority": 1
+        }
+      ],
+      "notes": [
+        "Free large-model pressure lane when you want depth without spending frontier paid quota."
+      ]
+    },
+    {
+      "id": "qwen3-vl-plus",
+      "description": "Free multimodal lane for screenshots, diagrams, and visual review.",
+      "capability_tier": "strong",
+      "cost_tier": "free",
+      "billing_mode": "free",
+      "latency_tier": "medium",
+      "concurrency": 1,
+      "quota_visibility": "manual",
+      "best_for": [
+        "vision",
+        "ui_review",
+        "diagram_interpretation"
+      ],
+      "not_for": [
+        "main_text_only_coder",
+        "fast_bulk_helpers"
+      ],
+      "default_roles": [
+        "multimodal_reviewer"
+      ],
+      "provider_order": [
+        {
+          "provider": "iflowcn",
+          "model": "iflowcn/qwen3-vl-plus",
+          "priority": 1
+        }
+      ],
+      "notes": [
+        "Use only when the task actually benefits from image understanding."
+      ]
+    },
+    {
+      "id": "longcat-flash-chat",
+      "description": "Free general-purpose LongCat chat lane.",
+      "capability_tier": "standard",
+      "cost_tier": "free",
+      "billing_mode": "free",
+      "latency_tier": "fast",
+      "concurrency": 1,
+      "quota_visibility": "manual",
+      "best_for": [
+        "general_chat",
+        "cheap_combatant",
+        "fallback_review"
+      ],
+      "not_for": [
+        "frontier_architecture",
+        "vision"
+      ],
+      "default_roles": [
+        "cheap_fallback",
+        "combatant"
+      ],
+      "provider_order": [
+        {
+          "provider": "longcat-openai",
+          "model": "LongCat-Flash-Chat",
+          "priority": 1
+        },
+        {
+          "provider": "longcat-anthropic",
+          "model": "LongCat-Flash-Chat",
+          "priority": 2,
+          "status": "compatibility"
+        }
+      ],
+      "notes": [
+        "OpenAI wire format first; Anthropic format only when client compatibility matters."
+      ]
+    },
+    {
+      "id": "longcat-flash-thinking-2601",
+      "description": "Free LongCat deep-thinking lane.",
+      "capability_tier": "strong",
+      "cost_tier": "free",
+      "billing_mode": "free",
+      "latency_tier": "medium",
+      "concurrency": 1,
+      "quota_visibility": "manual",
+      "best_for": [
+        "deep_reasoning",
+        "combatant_review",
+        "fallback_architecture_pressure"
+      ],
+      "not_for": [
+        "vision",
+        "main_coder"
+      ],
+      "default_roles": [
+        "deep_combatant",
+        "alternate_reviewer"
+      ],
+      "provider_order": [
+        {
+          "provider": "longcat-openai",
+          "model": "LongCat-Flash-Thinking-2601",
+          "priority": 1
+        },
+        {
+          "provider": "longcat-anthropic",
+          "model": "LongCat-Flash-Thinking-2601",
+          "priority": 2,
+          "status": "compatibility"
+        }
+      ],
+      "notes": [
+        "Docs say both OpenAI and Anthropic formats support thinking models; prefer OpenAI format first."
+      ]
+    },
+    {
+      "id": "longcat-flash-lite",
+      "description": "Very high daily-quota cheap LongCat bulk lane.",
+      "capability_tier": "fast",
+      "cost_tier": "free",
+      "billing_mode": "free",
+      "latency_tier": "fast",
+      "concurrency": 1,
+      "quota_visibility": "manual",
+      "best_for": [
+        "bulk_triage",
+        "cheap_parallel_pressure",
+        "low_risk_cross_checks"
+      ],
+      "not_for": [
+        "main_reviewer",
+        "architecture",
+        "final_signoff"
+      ],
+      "default_roles": [
+        "bulk_combatant",
+        "triage_helper"
+      ],
+      "provider_order": [
+        {
+          "provider": "longcat-openai",
+          "model": "LongCat-Flash-Lite",
+          "priority": 1
+        },
+        {
+          "provider": "longcat-anthropic",
+          "model": "LongCat-Flash-Lite",
+          "priority": 2,
+          "status": "compatibility"
+        }
+      ],
+      "notes": [
+        "LongCat docs advertise a much larger daily free quota for Lite than the other models."
+      ]
+    },
+    {
+      "id": "mimo-v2-pro",
+      "description": "Big-context architecture and long-context reading lane.",
+      "capability_tier": "frontier",
+      "cost_tier": "expensive",
+      "billing_mode": "paid_api",
+      "latency_tier": "slow",
+      "concurrency": 1,
+      "quota_visibility": "manual",
+      "best_for": [
+        "whole_subsystem_reads",
+        "architecture",
+        "long_context_review",
+        "cross_file_synthesis"
+      ],
+      "not_for": [
+        "routine_coding",
+        "quick_helpers"
+      ],
+      "default_roles": [
+        "long_context_reader",
+        "architect"
+      ],
+      "provider_order": [
+        {
+          "provider": "xiaomi-token-plan-ams",
+          "model": "xiaomi-token-plan-ams/mimo-v2-pro",
+          "priority": 1
+        },
+        {
+          "provider": "openrouter",
+          "model": "openrouter/xiaomi/mimo-v2-pro",
+          "priority": 2
+        },
+        {
+          "provider": "opencode-go",
+          "model": "opencode-go/mimo-v2-pro",
+          "priority": 3,
+          "status": "legacy"
+        }
+      ],
+      "notes": [
+        "Use for context span, not for everyday coding loops."
+      ]
+    }
+  ]
+}

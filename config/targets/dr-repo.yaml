@@ -1,0 +1,26 @@
+name: dr-repo
+kind: repo
+root: /home/mhugo/code/dr-repo
+default_branch: main
+maintenance_owner: aicoder-opencode
+instruction_path: docs/targets/dr-repo.md
+
+product_launcher:
+  type: opencode
+  mode: product
+  executable_path: /home/mhugo/.npm-global/bin/opencode
+  sandbox_kind: bubblewrap
+
+maintenance_launcher:
+  type: opencode
+  mode: maintenance
+  executable_path: /home/mhugo/.npm-global/bin/opencode
+
+hidden_paths:
+  - .opencode
+  - .agents
+  - .maintenance
+
+notes:
+  - dr-repo should be treated as a product-only repository from the product lane.
+  - maintenance state should migrate out of the product repo over time.

@@ -1,0 +1,22 @@
+name: letta-workspace
+kind: monorepo
+root: /home/mhugo/code/letta-workspace
+default_branch: main
+maintenance_owner: aicoder-opencode
+instruction_path: docs/targets/letta-workspace.md
+
+subprojects:
+  - name: letta
+    root: /home/mhugo/code/letta-workspace/letta
+  - name: letta-code
+    root: /home/mhugo/code/letta-workspace/letta-code
+  - name: letta-fleet
+    root: /home/mhugo/code/letta-workspace/letta-fleet
+  - name: letta-selfhost
+    root: /home/mhugo/code/letta-workspace/letta-selfhost
+  - name: lettactl
+    root: /home/mhugo/code/letta-workspace/lettactl
+
+notes:
+  - letta-workspace should remain monorepo-aware.
+  - fleet and runtime maintenance should stay aligned with the monorepo structure.

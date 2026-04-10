@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CONTROL_PLANE_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+OPENPORTAL_BIN=""
+OPENPORTAL_LAUNCH_MODE=""
+
+prepend_existing_directories_to_path() {
+  local directories=("$@")
+  local directory=""
+  local prefixed_path=""
+
+  for directory in "${directories[@]}"; do
+    if [[ -d "$directory" ]]; then
+      prefixed_path="${prefixed_path:+$prefixed_path:}$directory"
+    fi
+  done
+
+  if [[ -n "$prefixed_path" ]]; then
+    export PATH="$prefixed_path:$PATH"
+  fi
+}
+
+resolve_bunx_binary() {
+  local bunx_binary=""
+
+  bunx_binary="$(command -v bunx 2>/dev/null || true)"
+  if [[ -n "$bunx_binary" ]]; then
+    printf '%s\n' "$bunx_binary"
+    return 0
+  fi
+
+  bunx_binary="$(ls -1 /nix/store/*-bun-*/bin/bunx 2>/dev/null | tail -1 || true)"
+  if [[ -n "$bunx_binary" ]]; then
+    printf '%s\n' "$bunx_binary"
+  fi
+}
+
+resolve_openportal_binary() {
+  local configured_binary="${AICODER_OPENPORTAL_EXECUTABLE:-}"
+  local openportal_binary=""
+
+  if [[ -n "$configured_binary" ]]; then
+    printf '%s\n' "$configured_binary"
+    return 0
+  fi
+
+  openportal_binary="$(command -v openportal 2>/dev/null || true)"
+  if [[ -n "$openportal_binary" ]]; then
+    printf '%s\n' "$openportal_binary"
+  fi
+}
+
+prepend_existing_directories_to_path \
+  "$HOME/.nix-profile/bin" \
+  "/nix/var/nix/profiles/default/bin" \
+  "/run/current-system/sw/bin" \
+  "$HOME/.npm-global/bin" \
+  "$HOME/.local/bin" \
+  "/usr/local/bin" \
+  "/usr/bin" \
+  "/bin"
+
+OPENPORTAL_BIN="$(resolve_openportal_binary)"
+
+if [[ -z "$OPENPORTAL_BIN" ]]; then
+  OPENPORTAL_BIN="$(resolve_bunx_binary)"
+  if [[ -n "$OPENPORTAL_BIN" ]]; then
+    OPENPORTAL_LAUNCH_MODE="bunx"
+  else
+    echo "aicoder-opencode-openportal: openportal is not installed and bunx is unavailable" >&2
+    exit 1
+  fi
+else
+  OPENPORTAL_LAUNCH_MODE="binary"
+fi
+
+DEFAULT_PORT="${AICODER_OPENPORTAL_PORT:-3091}"
+DEFAULT_OPENCODE_PORT="${AICODER_OPENPORTAL_OPENCODE_PORT:-4091}"
+DEFAULT_HOSTNAME="${AICODER_OPENPORTAL_HOSTNAME:-127.0.0.1}"
+DEFAULT_NAME="${AICODER_OPENPORTAL_NAME:-aicoder-opencode}"
+
+cd "$CONTROL_PLANE_ROOT"
+if [[ "$OPENPORTAL_LAUNCH_MODE" == "bunx" ]]; then
+  exec "$OPENPORTAL_BIN" openportal \
+    --directory "$CONTROL_PLANE_ROOT" \
+    --name "$DEFAULT_NAME" \
+    --hostname "$DEFAULT_HOSTNAME" \
+    --port "$DEFAULT_PORT" \
+    --opencode-port "$DEFAULT_OPENCODE_PORT" \
+    "$@"
+fi
+
+exec "$OPENPORTAL_BIN" \
+  --directory "$CONTROL_PLANE_ROOT" \
+  --name "$DEFAULT_NAME" \
+  --hostname "$DEFAULT_HOSTNAME" \
+  --port "$DEFAULT_PORT" \
+  --opencode-port "$DEFAULT_OPENCODE_PORT" \
+  "$@"
