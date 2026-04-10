@@ -1,0 +1,25 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "watcher": {
+    "ignore": [
+      ".git/**",
+      ".opencode/node_modules/**",
+      ".opencode/state/**"
+    ]
+  },
+  "plugin": [
+    "file:./plugins/model-registry",
+    "file:./plugins/dr-checkpoints",
+    "file:./plugins/dr-plan-context",
+    "file:./plugins/dr-context-compaction",
+    "file:./plugins/dr-session-continuation",
+    "file:./plugins/dr-verification-guard",
+    "file:./plugins/dr-json-error-recovery",
+    "file:./plugins/dr-helper-runtime-control",
+    "file:./plugins/dr-agent-babysitter",
+    "file:./plugins/dr-specialist-routing",
+    "file:./plugins/dr-memory",
+    "file:./plugins/dr-public-code-search",
+    "file:./plugins/dr-ast-grep-search"
+  ]
+}
