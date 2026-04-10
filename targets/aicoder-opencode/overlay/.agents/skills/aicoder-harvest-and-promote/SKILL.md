@@ -1,3 +1,9 @@
+---
+name: aicoder-harvest-and-promote
+description: Harvest learnings from target sessions and promote proven overlay patterns to the shared control-plane base
+user-invocable: false
+---
+
 # aicoder-harvest-and-promote
 
 Improvement and harvest workflow for the `aicoder-opencode` control plane.

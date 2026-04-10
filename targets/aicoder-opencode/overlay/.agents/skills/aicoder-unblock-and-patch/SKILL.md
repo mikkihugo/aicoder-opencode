@@ -1,3 +1,9 @@
+---
+name: aicoder-unblock-and-patch
+description: Self-health check, doom-loop recovery, and patch propagation workflow for the aicoder-opencode control plane
+user-invocable: false
+---
+
 # aicoder-unblock-and-patch
 
 Maintenance and unblock workflow for the `aicoder-opencode` control plane.
