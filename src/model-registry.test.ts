@@ -17,7 +17,11 @@ import {
   parseRoleList,
   renderModelRegistryJsonc,
 } from "./model-registry.js";
-import { groupVisibleRuntimeModelFamilies } from "./cli/model-commands.js";
+import {
+  enrichRuntimeModelFamiliesFromRegistry,
+  groupVisibleRuntimeModelFamilies,
+  renderRuntimeModelFamily,
+} from "./cli/model-commands.js";
 
 const CONTROL_PLANE_ROOT_DIRECTORY = process.cwd();
 
@@ -307,4 +311,36 @@ test("groupVisibleRuntimeModelFamilies_whenRoutesShareModelName_groupsThemTogeth
       routes: ["openrouter/stepfun/step-3.5-flash:free"],
     },
   ]);
+});
+
+test("enrichRuntimeModelFamiliesFromRegistry_whenRegistryHasMatchingFamilyIds_populatesRuntimeFamilyMetadata", async () => {
+  const modelRegistry = await loadModelRegistry(CONTROL_PLANE_ROOT_DIRECTORY);
+
+  const runtimeFamilies = enrichRuntimeModelFamiliesFromRegistry(
+    [
+      {
+        familyId: "glm-5.1",
+        preferredModelId: "opencode/glm-5.1",
+        providerNames: ["opencode"],
+        routes: ["opencode/glm-5.1"],
+      },
+      {
+        familyId: "step-3.5-flash:free",
+        preferredModelId: "openrouter/stepfun/step-3.5-flash:free",
+        providerNames: ["openrouter"],
+        routes: ["openrouter/stepfun/step-3.5-flash:free"],
+      },
+    ],
+    modelRegistry,
+  );
+
+  assert.equal(runtimeFamilies[0]?.capabilityTier, "frontier");
+  assert.equal(runtimeFamilies[0]?.costTier, "expensive");
+  assert.deepEqual(runtimeFamilies[0]?.defaultRoles, ["architect", "deep_reviewer", "oracle"]);
+  assert.equal(runtimeFamilies[1]?.capabilityTier, undefined);
+
+  assert.equal(
+    renderRuntimeModelFamily(runtimeFamilies[0]!),
+    "glm-5.1\tpreferred=opencode/glm-5.1\tproviders=opencode\troutes=opencode/glm-5.1\ttier=frontier/expensive\troles=architect,deep_reviewer,oracle",
+  );
 });

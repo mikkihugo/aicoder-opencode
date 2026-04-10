@@ -39,6 +39,9 @@ type RuntimeModelFamily = {
   preferredModelId: string;
   providerNames: string[];
   routes: string[];
+  capabilityTier?: string;
+  costTier?: string;
+  defaultRoles?: string[];
 };
 
 type InteractiveFilters = {
@@ -195,6 +198,40 @@ export function groupVisibleRuntimeModelFamilies(
 }
 
 /**
+ * Enrich grouped runtime families with registry-defined metadata when available.
+ *
+ * Args:
+ *   families: Runtime model families grouped from live runtime model ids.
+ *   registry: Loaded model registry document.
+ *
+ * Returns:
+ *   Families with optional capability/cost tiers and default roles populated from registry.
+ */
+export function enrichRuntimeModelFamiliesFromRegistry(
+  families: RuntimeModelFamily[],
+  registry: Awaited<ReturnType<typeof loadModelRegistry>>,
+): RuntimeModelFamily[] {
+  const modelsById = new Map<string, (typeof registry.models)[number]>();
+  for (const modelEntry of registry.models) {
+    modelsById.set(modelEntry.id, modelEntry);
+  }
+
+  return families.map((runtimeFamily) => {
+    const registryModel = modelsById.get(runtimeFamily.familyId);
+    if (!registryModel) {
+      return runtimeFamily;
+    }
+
+    return {
+      ...runtimeFamily,
+      capabilityTier: registryModel.capability_tier,
+      costTier: registryModel.cost_tier,
+      defaultRoles: registryModel.default_roles,
+    };
+  });
+}
+
+/**
  * Load grouped runtime model families from the live OpenCode catalog.
  *
  * Args:
@@ -215,7 +252,9 @@ export async function loadVisibleRuntimeModelFamilies(
     optionValues,
     opencodeExecutablePath,
   );
-  return groupVisibleRuntimeModelFamilies(visibleRuntimeModelIds);
+  const groupedRuntimeModelFamilies = groupVisibleRuntimeModelFamilies(visibleRuntimeModelIds);
+  const modelRegistry = await loadModelRegistry(resolveModelRegistryPath(controlPlaneRootDirectory));
+  return enrichRuntimeModelFamiliesFromRegistry(groupedRuntimeModelFamilies, modelRegistry);
 }
 
 /**
@@ -228,12 +267,25 @@ export async function loadVisibleRuntimeModelFamilies(
  *   Tab-separated summary containing family, preferred route, providers, and routes.
  */
 export function renderRuntimeModelFamily(runtimeModelFamily: RuntimeModelFamily): string {
-  return [
+  const parts = [
     runtimeModelFamily.familyId,
     `preferred=${runtimeModelFamily.preferredModelId}`,
     `providers=${runtimeModelFamily.providerNames.join(",")}`,
     `routes=${runtimeModelFamily.routes.join(" | ")}`,
-  ].join("\t");
+  ];
+
+  const tierParts = [
+    runtimeModelFamily.capabilityTier,
+    runtimeModelFamily.costTier,
+  ].filter((value): value is string => value !== undefined);
+  if (tierParts.length > 0) {
+    parts.push(`tier=${tierParts.join("/")}`);
+  }
+  if (runtimeModelFamily.defaultRoles && runtimeModelFamily.defaultRoles.length > 0) {
+    parts.push(`roles=${runtimeModelFamily.defaultRoles.join(",")}`);
+  }
+
+  return parts.join("\t");
 }
 
 function buildInteractiveModelScreen(
