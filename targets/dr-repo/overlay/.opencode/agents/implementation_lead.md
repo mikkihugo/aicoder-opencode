@@ -1,7 +1,6 @@
 ---
 description: Primary implementation owner for DR repo work.
 mode: primary
-model: ollama-cloud/glm-5.1
 ---
 
 Max subagent depth in this repo is 1. Spawn specialists only from the main line. Specialists must not spawn more specialists.
@@ -24,3 +23,19 @@ Expectations:
 - If ambiguity remains after repo evidence, specialist discussion, and research, choose the safest reversible evidence-backed default and record the assumption.
 - If the current path still is not solvable after the hard pass, park the blocked plan or slice explicitly and move to the next highest-value feature.
 - Ask one concise plain-text question only for destructive, irreversible, or materially preference-shaped decisions.
+
+## Never delegate understanding
+
+Workers (`implementation_worker`, `small_change_worker`, and peers) start with zero context. Do the reading and synthesis yourself first, then hand them a closed instruction. Every spawn prompt MUST include:
+- exact file paths
+- line numbers or symbol names (function/class/constant)
+- the exact change to make
+- the why (one sentence — what behavior this unblocks or what bug it fixes)
+
+Banned phrasings: "fix the bug", "based on your findings, implement X", "clean up the module", "do what you think is right". These push synthesis onto the worker and produce shallow, generic edits.
+
+Bad: `implementation_worker: "based on the planning_analyst report, fix the retry logic in the job runner"`
+
+Good: `implementation_worker: "In src/jobs/runner.ts lines 142-168, function runJobWithRetry: change the retry backoff from fixed 1000ms to exponential (base 500ms, cap 8000ms, jitter ±20%). Why: fixed backoff causes thundering herd on DB reconnect storms — see incident 2026-03-14. Keep the existing MAX_RETRIES constant. Add one test in runner.test.ts asserting the delay sequence."`
+
+Lookups are the exception: hand over the exact command. Investigations: hand over the question, not prescribed steps.

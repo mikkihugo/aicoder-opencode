@@ -2,6 +2,12 @@
 name: control-plane-maintenance-base
 description: Shared maintenance topology and policy for aicoder-opencode — one server per repo, shared plugins, overlay-first changes
 user-invocable: false
+models:
+  - ollama-cloud/kimi-k2-thinking
+  - ollama-cloud/glm-5.1
+  - ollama-cloud/minimax-m2.7
+routing_role: architect
+routing_complexity: large
 ---
 
 # control-plane-maintenance-base
@@ -72,7 +78,7 @@ Key providers in the registry:
 | Fast general iteration | `ollama-cloud/kimi-k2.5` | `xiaomi-token-plan-ams/mimo-v2-pro` |
 | Architecture / heavy reasoning | `ollama-cloud/kimi-k2-thinking` | `xiaomi-token-plan-ams/mimo-v2-pro` |
 
-Model selection is handled by OpenCode's built-in routing and the `model-registry` plugin. At session start, call `get_quota_backoff_status` — if the preferred provider is in backoff, the plugin's `provider_order` in `config/models.jsonc` drives the fallback automatically. Do not override via env vars.
+Model selection is handled by OpenCode plus the `model-registry` plugin. The plugin can reroute task launches when the requested provider is in quota backoff, when an agent exposes ordered `models:` metadata, or when the task falls back to curated registry routing. Do not override model choice with env vars.
 
 ## Runtime: Model Selection
 
@@ -82,7 +88,7 @@ The `model-registry` plugin exposes two tools:
 - `get_quota_backoff_status` — providers currently in quota backoff and when they expire
 
 Rules:
-- Before starting a long autonomous task, call `get_quota_backoff_status`. If a needed provider is in backoff, pick a curated fallback from the same registry entry's `provider_order`.
+- Before starting a long autonomous task, call `get_quota_backoff_status`. If a needed provider is in backoff, let the plugin reroute task launches using the current agent `models:` list or the curated registry fallback.
 - Never fall back to `longcat`, `claude`, `gpt`, or `grok` models automatically. These are subscription-gated or architecturally undesirable as automatic fallbacks.
 - Free providers (ollama-cloud, openrouter free-tier) are preferred for autonomous/maintenance loops. Paid providers (openrouter paid models) only when no free alternative covers the capability tier.
 - Temperature is set automatically by the `model-registry` plugin based on the model's `capability_tier`. Do not override temperature in prompts.
@@ -112,6 +118,17 @@ When the autopilot timer fires:
 The plugin tracks quota events automatically and backs off providers for 1 hour on HTTP 429 or quota-keyword errors. No manual action is needed during normal operation.
 
 If you observe a provider persistently failing (beyond the 1-hour window), call `get_quota_backoff_status` and route around it using the curated fallback in `provider_order`.
+
+## Verification contract
+
+Downstream skills and agents that consume this base inherit the following verification rules:
+
+- Every verification report ends with a final line: `VERDICT: PASS`, `VERDICT: FAIL`, or `VERDICT: PARTIAL`. Plain text, no markdown, no hedging.
+- PARTIAL is reserved for environmental blockers only (tool missing, service will not start, no test framework). Ambiguous findings are FAIL, not PARTIAL.
+- A PASS requires at least one executed adversarial probe across concurrency, boundary values, idempotency, or orphan/dangling state — reading code is not verification.
+- Each check must record the exact command run and the observed output. Uncited claims do not count as verified.
+
+See `targets/dr-repo/overlay/.opencode/agents/verifier.md` for the full probe checklist and output block format.
 
 ## Avoid
 
