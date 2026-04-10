@@ -27,11 +27,18 @@ import {
   resolveModelRegistryPath,
 } from "../model-registry.js";
 
-const DEFAULT_OPENCODE_EXECUTABLE_PATH = "/home/mhugo/.npm-global/bin/opencode";
+export const DEFAULT_OPENCODE_EXECUTABLE_PATH = "/home/mhugo/.npm-global/bin/opencode";
 
 type RuntimeModelFilterValues = {
   freeOnly: boolean;
   providerFilter: string | null;
+};
+
+type RuntimeModelFamily = {
+  familyId: string;
+  preferredModelId: string;
+  providerNames: string[];
+  routes: string[];
 };
 
 type InteractiveFilters = {
@@ -119,11 +126,114 @@ export async function loadVisibleRuntimeModelIds(
     if (optionValues.providerFilter && providerName !== optionValues.providerFilter) {
       return false;
     }
-    if (optionValues.freeOnly && !modelId.includes("free")) {
+    if (optionValues.freeOnly && !modelId.endsWith(":free")) {
       return false;
     }
     return true;
   });
+}
+
+/**
+ * Build a stable family identifier from one runtime model id.
+ *
+ * Args:
+ *   runtimeModelId: Raw `provider/model` id from `opencode models`.
+ *
+ * Returns:
+ *   The route-independent family id used for grouped operator views.
+ */
+function buildRuntimeModelFamilyId(runtimeModelId: string): string {
+  const modelPathSegments = runtimeModelId.split("/");
+  if (modelPathSegments.length < 2) {
+    return runtimeModelId;
+  }
+
+  return modelPathSegments.at(-1) ?? runtimeModelId;
+}
+
+/**
+ * Group visible runtime model ids into route families.
+ *
+ * Args:
+ *   runtimeModelIds: Visible live model ids from `opencode models`.
+ *
+ * Returns:
+ *   Stable family rows with first-seen preferred routes and all visible routes.
+ */
+export function groupVisibleRuntimeModelFamilies(
+  runtimeModelIds: string[],
+): RuntimeModelFamily[] {
+  const modelFamiliesById = new Map<string, RuntimeModelFamily>();
+
+  for (const runtimeModelId of runtimeModelIds) {
+    const familyId = buildRuntimeModelFamilyId(runtimeModelId);
+    const providerSeparatorIndex = runtimeModelId.indexOf("/");
+    const providerName = providerSeparatorIndex === -1
+      ? runtimeModelId
+      : runtimeModelId.slice(0, providerSeparatorIndex);
+    const existingFamily = modelFamiliesById.get(familyId);
+
+    if (existingFamily) {
+      existingFamily.routes.push(runtimeModelId);
+      if (!existingFamily.providerNames.includes(providerName)) {
+        existingFamily.providerNames.push(providerName);
+      }
+      continue;
+    }
+
+    modelFamiliesById.set(familyId, {
+      familyId,
+      preferredModelId: runtimeModelId,
+      providerNames: [providerName],
+      routes: [runtimeModelId],
+    });
+  }
+
+  return [...modelFamiliesById.values()].sort(
+    (leftFamily, rightFamily) => leftFamily.familyId.localeCompare(rightFamily.familyId),
+  );
+}
+
+/**
+ * Load grouped runtime model families from the live OpenCode catalog.
+ *
+ * Args:
+ *   controlPlaneRootDirectory: Root of this repository.
+ *   optionValues: CLI filter flags for the visible model list.
+ *   opencodeExecutablePath: Command used to invoke `opencode models`.
+ *
+ * Returns:
+ *   Grouped visible model families for operator-facing inspection.
+ */
+export async function loadVisibleRuntimeModelFamilies(
+  controlPlaneRootDirectory: string,
+  optionValues: RuntimeModelFilterValues,
+  opencodeExecutablePath = DEFAULT_OPENCODE_EXECUTABLE_PATH,
+): Promise<RuntimeModelFamily[]> {
+  const visibleRuntimeModelIds = await loadVisibleRuntimeModelIds(
+    controlPlaneRootDirectory,
+    optionValues,
+    opencodeExecutablePath,
+  );
+  return groupVisibleRuntimeModelFamilies(visibleRuntimeModelIds);
+}
+
+/**
+ * Render one runtime model family in a compact operator-facing format.
+ *
+ * Args:
+ *   runtimeModelFamily: Grouped family row to render.
+ *
+ * Returns:
+ *   Tab-separated summary containing family, preferred route, providers, and routes.
+ */
+export function renderRuntimeModelFamily(runtimeModelFamily: RuntimeModelFamily): string {
+  return [
+    runtimeModelFamily.familyId,
+    `preferred=${runtimeModelFamily.preferredModelId}`,
+    `providers=${runtimeModelFamily.providerNames.join(",")}`,
+    `routes=${runtimeModelFamily.routes.join(" | ")}`,
+  ].join("\t");
 }
 
 function buildInteractiveModelScreen(
@@ -157,7 +267,7 @@ function buildInteractiveModelScreen(
     "  description <row> <text...>",
     `  capability <row> <${listCapabilityTierValues().join("|")}>`,
     `  cost <row> <${listCostTierValues().join("|")}>`,
-    "  billing <row> <free|subscription|quota|paid_api>",
+    `  billing <row> <${listBillingModeValues().join("|")}>`,
     "  quota <row> <system-observed|manual>",
     "  concurrency <row> <positive-integer>",
     "  roles <row> <comma,separated,roles>",

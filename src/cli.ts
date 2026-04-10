@@ -9,9 +9,18 @@ import { z } from "zod";
 import { parseModelSelectionOptions } from "./model-registry.js";
 import {
   buildRoleRecommendations,
+  DEFAULT_OPENCODE_EXECUTABLE_PATH,
+  loadVisibleRuntimeModelFamilies,
   loadVisibleRuntimeModelIds,
+  renderRuntimeModelFamily,
   runModelRegistryEditor,
 } from "./cli/model-commands.js";
+import {
+  backupOpencodeDatabase,
+  checkpointOpencodeDatabase,
+  parseOpencodeDatabaseMaintenanceMode,
+  vacuumOpencodeDatabase,
+} from "./opencode-database-maintenance.js";
 
 const CONTROL_PLANE_ROOT_DIRECTORY = process.cwd();
 const TARGET_CONFIGURATION_DIRECTORY = path.join(
@@ -25,7 +34,6 @@ const OPENCODE_LAUNCHER_TYPE = "opencode";
 const PRODUCT_LAUNCHER_MODE = "product";
 const MAINTENANCE_LAUNCHER_MODE = "maintenance";
 const BUBBLEWRAP_EXECUTABLE_PATH = "/usr/bin/bwrap";
-const DEFAULT_OPENCODE_EXECUTABLE_PATH = "/home/mhugo/.npm-global/bin/opencode";
 const HIDDEN_PATH_OVERLAY_DIRECTORY = "/tmp/aicoder-opencode-empty";
 const STATE_DIRECTORY = path.join(CONTROL_PLANE_ROOT_DIRECTORY, ".state");
 const LOOP_GUARD_DIRECTORY = path.join(STATE_DIRECTORY, "doom-loop");
@@ -131,6 +139,9 @@ async function listTargetNames(): Promise<string[]> {
  *   Error: When the target file cannot be read.
  */
 async function loadTargetConfiguration(targetName: string): Promise<TargetConfiguration> {
+  if (targetName.includes("/") || targetName.includes("\\") || targetName.includes("..")) {
+    throw new Error(`invalid target name: ${targetName}`);
+  }
   const targetConfigurationPath = path.join(
     TARGET_CONFIGURATION_DIRECTORY,
     `${targetName}.yaml`,
@@ -314,9 +325,11 @@ async function buildLoopSnapshot(targetName: string, targetConfiguration: Target
   const checkpointFileNames = await listCheckpointFiles(targetConfiguration);
   const activeSlicePaths = await listActiveSliceFiles(targetConfiguration);
 
+  const checkpointDirectory = checkpointDirectoryForTarget(targetConfiguration);
   const checkpointPayload = await Promise.all(
     checkpointFileNames.map(async (fileName) => {
-      const checkpointPath = path.join(targetConfiguration.root, ".opencode", "state", "checkpoints", fileName);
+      // checkpointDirectory is guaranteed non-null here since we already have checkpointFileNames
+      const checkpointPath = path.join(checkpointDirectory!, fileName);
       const checkpointContent = await readFile(checkpointPath, "utf8");
       return `${fileName}\n${checkpointContent}`;
     }),
@@ -440,6 +453,9 @@ async function buildSandboxedCommand(
   ];
 
   for (const hiddenPath of hiddenPaths) {
+    if (path.isAbsolute(hiddenPath)) {
+      throw new Error(`hidden_paths entries must be relative: ${hiddenPath}`);
+    }
     bubblewrapArguments.push(
       "--bind",
       HIDDEN_PATH_OVERLAY_DIRECTORY,
@@ -506,7 +522,9 @@ function printUsageAndExit(): never {
       "|print-product-launch <name> [-- <args...>]|launch-product <name> [-- <args...>]",
       "|debug-product-sandbox <name> [-- <command...>]|check-doom-loop <name> [threshold]",
       "|list-models [--free] [--provider <provider>] [--enabled]",
-      "|select-models <role> [--free] [--provider <provider>]|manage-models\n",
+      "|list-model-families [--free] [--provider <provider>]",
+      "|select-models <role> [--free] [--provider <provider>]",
+      "|manage-models|opencode-database-maintenance <checkpoint|backup|vacuum>\n",
     ].join(""),
   );
   process.exit(1);
@@ -670,6 +688,19 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (commandName === "list-model-families") {
+    const optionValues = parseModelSelectionOptions(process.argv.slice(3));
+    const visibleRuntimeModelFamilies = await loadVisibleRuntimeModelFamilies(
+      CONTROL_PLANE_ROOT_DIRECTORY,
+      {
+        freeOnly: optionValues.freeOnly,
+        providerFilter: optionValues.providerFilter,
+      },
+    );
+    process.stdout.write(`${visibleRuntimeModelFamilies.map(renderRuntimeModelFamily).join("\n")}\n`);
+    return;
+  }
+
   if (commandName === "select-models") {
     const roleName = process.argv[3];
     if (!roleName) {
@@ -690,6 +721,22 @@ async function main(): Promise<void> {
 
   if (commandName === "manage-models") {
     await runModelRegistryEditor(CONTROL_PLANE_ROOT_DIRECTORY);
+    return;
+  }
+
+  if (commandName === "opencode-database-maintenance") {
+    const maintenanceMode = parseOpencodeDatabaseMaintenanceMode(process.argv[3]);
+    if (!maintenanceMode) {
+      printUsageAndExit();
+    }
+
+    const maintenanceResult = maintenanceMode === "checkpoint"
+      ? await checkpointOpencodeDatabase()
+      : maintenanceMode === "backup"
+        ? await backupOpencodeDatabase()
+        : await vacuumOpencodeDatabase();
+
+    process.stdout.write(`${JSON.stringify(maintenanceResult, null, 2)}\n`);
     return;
   }
 
