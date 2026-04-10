@@ -1,0 +1,17 @@
+name: aicoder-opencode
+kind: repo
+root: /home/mhugo/code/aicoder-opencode
+default_branch: main
+maintenance_owner: aicoder-opencode
+instruction_path: docs/targets/aicoder-opencode.md
+
+maintenance_launcher:
+  type: opencode
+  mode: maintenance
+  executable_path: /home/mhugo/.npm-global/bin/opencode
+
+notes:
+  - aicoder-opencode is the control plane and supervises itself as a target.
+  - maintenance and workflow skills live in targets/aicoder-opencode/overlay/.
+  - no product/maintenance split — the whole repo is the maintenance surface.
+  - no doom-loop guard — the control plane does not use checkpoint/active-slice state.

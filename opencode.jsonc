@@ -1,6 +1,27 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "watcher": {
+    "ignore": [
+      ".git/**",
+      ".opencode/node_modules/**",
+      ".opencode/state/**",
+      "node_modules/**",
+      "dist/**"
+    ]
+  },
+  "plugin": [
+    "file:./.opencode/plugins/model-registry"
+  ],
   "server": {
     "port": 8080,
   },
+  "instructions": [
+    "./AGENTS.md",
+    "./docs/ARCHITECTURE.md",
+    "./docs/TARGET_MODEL.md",
+    "./.agents/skills/control-plane-development-base/SKILL.md",
+    "./.agents/skills/control-plane-maintenance-base/SKILL.md",
+    "./targets/aicoder-opencode/overlay/.agents/skills/aicoder-unblock-and-patch/SKILL.md",
+    "./targets/aicoder-opencode/overlay/.agents/skills/aicoder-harvest-and-promote/SKILL.md"
+  ]
 }

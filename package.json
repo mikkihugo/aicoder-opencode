@@ -3,13 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "packageManager": "bun@1.3.3",
   "description": "TypeScript control plane for multi-repo AI coding operations.",
   "bin": {
     "aicoder-opencode": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "check": "npm run build && npm test",
+    "check": "bun run build && bun test",
     "test": "node --import tsx --test src/**/*.test.ts",
     "list-targets": "tsx src/cli.ts list-targets",
     "targets": "tsx src/cli.ts list-targets",
@@ -21,7 +22,10 @@
     "validate:letta-workspace": "tsx src/cli.ts validate-target letta-workspace",
     "print-launch:dr-repo": "tsx src/cli.ts print-product-launch dr-repo -- --help",
     "debug-sandbox:dr-repo": "tsx src/cli.ts debug-product-sandbox dr-repo -- /usr/bin/env bash -lc 'pwd; for path_name in .opencode .agents .maintenance; do echo ===${path_name}===; find \"${path_name}\" -mindepth 1 -maxdepth 2 | head -20; done'",
-    "doom-loop:dr-repo": "tsx src/cli.ts check-doom-loop dr-repo"
+    "doom-loop:dr-repo": "tsx src/cli.ts check-doom-loop dr-repo",
+    "show:aicoder-opencode": "tsx src/cli.ts show-target aicoder-opencode",
+    "show-instructions:aicoder-opencode": "tsx src/cli.ts show-target-instructions aicoder-opencode",
+    "validate:aicoder-opencode": "tsx src/cli.ts validate-target aicoder-opencode"
   },
   "dependencies": {
     "@opencode-ai/plugin": "^1.4.3",
