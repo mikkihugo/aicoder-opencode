@@ -7,6 +7,11 @@
       ".opencode/state/**"
     ]
   },
+  "instructions": [
+    "./AGENTS.md",
+    "./.agents/skills/control-plane-development-base/SKILL.md",
+    "./.agents/skills/control-plane-maintenance-base/SKILL.md"
+  ],
   "plugin": [
     "file:./.opencode/plugins/model-registry",
     "file:./.opencode/plugins/dr-checkpoints",

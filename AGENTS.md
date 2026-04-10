@@ -23,7 +23,11 @@ Current seeded targets:
 ## Rules
 
 - Do not copy product trees into this repository.
+- Shared development and maintenance bases live here.
 - Shared maintenance logic lives here.
+- Move slowly and iteratively.
+- Prefer the smallest working control-plane change that improves one real target
+  repo path.
 - Product decisions stay in the target repository's own plans, tests, and docs.
 - Cross-repo lessons may live here only when they are maintenance/runtime lessons rather than product behavior.
 

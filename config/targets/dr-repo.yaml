@@ -23,4 +23,5 @@ hidden_paths:
 
 notes:
   - dr-repo should be treated as a product-only repository from the product lane.
-  - maintenance state should migrate out of the product repo over time.
+  - runtime source of truth lives in aicoder-opencode at targets/dr-repo/overlay.
+  - local dr-repo .opencode paths should be thin entrypoints plus runtime state only.

@@ -33,7 +33,18 @@ second.
 
 `dr-repo` should stop hosting its own maintenance runtime over time.
 
-The control plane should migrate:
+The control plane now owns the repo-operating source at:
+
+- `targets/dr-repo/overlay/.opencode/`
+- `targets/dr-repo/overlay/.agents/`
+
+`dr-repo` should keep only:
+
+- product code and product docs
+- runtime state and caches under local `.opencode/` paths
+- thin repo-local entrypoints required for OpenCode path discovery
+
+The control plane owns:
 
 - `.opencode/`
 - `.agents/`

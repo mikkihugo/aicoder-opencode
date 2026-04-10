@@ -5,7 +5,6 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 AUTOPILOT_BIN="$REPO_ROOT/.opencode/bin/dr-autopilot"
 MAINTENANCE_WEB_SERVICE_NAME="${DR_REPO_MAINTENANCE_SERVICE_NAME:-aicoder-opencode-main.service}"
-OPENCODE_BIN="$REPO_ROOT/.opencode/bin/opencode"
 MAINTENANCE_SERVER_URL="${DR_REPO_MAINTENANCE_SERVER_URL:-${DR_MAINTENANCE_SERVER_URL:-http://127.0.0.1:8080}}"
 MAINTENANCE_AUTOMATION_USERNAME="${DR_REPO_MAINTENANCE_AUTOMATION_USERNAME:-${DR_MAINTENANCE_AUTOMATION_USERNAME:-opencode}}"
 MAINTENANCE_PASSWORD_PATH="${DR_REPO_MAINTENANCE_PASSWORD_PATH:-$REPO_ROOT/.opencode/state/maintenance-web/server-password}"
@@ -16,6 +15,18 @@ AUTONOMOUS_SESSION_TITLE="${DR_REPO_MAINTENANCE_AUTONOMOUS_SESSION_TITLE:-${DR_M
 GENERIC_AUTONOMOUS_TITLE_REGEX="${DR_REPO_MAINTENANCE_GENERIC_AUTONOMOUS_TITLE_REGEX:-${DR_MAINTENANCE_GENERIC_AUTONOMOUS_TITLE_REGEX:-autonomous iteration|dr autonomous iteration mode}}"
 SESSION_ID_FILE="$LOG_DIRECTORY/maintenance-autonomous-session-id"
 AUTONOMOUS_MODEL="${DR_REPO_MAINTENANCE_AUTONOMOUS_MODEL:-${DR_AUTOPILOT_MODEL:-ollama-cloud/glm-5.1}}"
+RUNNER_UNIT_NAME="${DR_REPO_MAINTENANCE_RUNNER_UNIT_NAME:-dr-repo-maintenance-run.service}"
+
+resolve_real_opencode_binary() {
+  PATH="$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" command -v opencode 2>/dev/null || true
+}
+
+OPENCODE_BIN="$(resolve_real_opencode_binary)"
+
+if [[ -z "$OPENCODE_BIN" ]]; then
+  echo "dr-maintenance-autonomous: could not find real opencode binary" >&2
+  exit 1
+fi
 
 maintenance_automation_url() {
   if [[ -n "${DR_REPO_MAINTENANCE_AUTOMATION_URL:-}" ]]; then
@@ -48,6 +59,91 @@ port = f":{parts.port}" if parts.port else ""
 userinfo = f"{quote(username, safe='')}:{quote(password, safe='')}"
 netloc = f"{userinfo}@{host}{port}"
 print(urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment)))
+PY
+}
+
+list_remote_sessions() {
+  python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" "$REPO_ROOT" <<'PY'
+import base64
+import json
+import sys
+import urllib.request
+from pathlib import Path
+from urllib.parse import quote
+
+server_url = sys.argv[1].rstrip("/")
+username = sys.argv[2]
+password_path = Path(sys.argv[3])
+repo_root = sys.argv[4]
+request = urllib.request.Request(f"{server_url}/session?directory={quote(repo_root, safe='/')}")
+
+if password_path.exists():
+    password = password_path.read_text(encoding="utf-8").strip()
+    if password:
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        request.add_header("Authorization", f"Basic {token}")
+
+with urllib.request.urlopen(request, timeout=5) as response:
+    payload = response.read().decode("utf-8")
+    print(payload)
+PY
+}
+
+delete_remote_session() {
+  local session_id="$1"
+  python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" "$session_id" <<'PY'
+import base64
+import sys
+import urllib.request
+from pathlib import Path
+
+server_url = sys.argv[1].rstrip("/")
+username = sys.argv[2]
+password_path = Path(sys.argv[3])
+session_id = sys.argv[4]
+request = urllib.request.Request(f"{server_url}/session/{session_id}", method="DELETE")
+
+if password_path.exists():
+    password = password_path.read_text(encoding="utf-8").strip()
+    if password:
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        request.add_header("Authorization", f"Basic {token}")
+
+with urllib.request.urlopen(request, timeout=5):
+    pass
+PY
+}
+
+wait_for_remote_server() {
+  python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" <<'PY'
+import base64
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+server_url = sys.argv[1].rstrip("/")
+username = sys.argv[2]
+password_path = Path(sys.argv[3])
+request = urllib.request.Request(f"{server_url}/session")
+
+if password_path.exists():
+    password = password_path.read_text(encoding="utf-8").strip()
+    if password:
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        request.add_header("Authorization", f"Basic {token}")
+
+deadline = time.time() + 30
+last_error = None
+while time.time() < deadline:
+    try:
+        with urllib.request.urlopen(request, timeout=2):
+            sys.exit(0)
+    except Exception as exc:
+        last_error = exc
+        time.sleep(1)
+
+raise SystemExit(f"dr-maintenance-autonomous: shared server not ready: {last_error}")
 PY
 }
 
@@ -85,28 +181,25 @@ mkdir -p "$LOG_DIRECTORY"
 systemctl --user start "$MAINTENANCE_WEB_SERVICE_NAME" >/dev/null
 "$AUTOPILOT_BIN" start >/dev/null
 MAINTENANCE_AUTOMATION_URL="$(maintenance_automation_url)"
+wait_for_remote_server >/dev/null
+REMOTE_SESSIONS_JSON="$(list_remote_sessions)"
 
-SESSION_SELECTION_JSON="$(python3 - "$OPENCODE_BIN" "$AUTONOMOUS_SESSION_TITLE" "$GENERIC_AUTONOMOUS_TITLE_REGEX" <<'PY'
+SESSION_SELECTION_JSON="$(python3 - "$REMOTE_SESSIONS_JSON" "$AUTONOMOUS_SESSION_TITLE" "$GENERIC_AUTONOMOUS_TITLE_REGEX" "$REPO_ROOT" <<'PY'
 import json
 import re
-import subprocess
 import sys
 
-opencode_bin = sys.argv[1]
+sessions = json.loads(sys.argv[1]) if sys.argv[1].strip() else []
 session_title = sys.argv[2]
 generic_autonomous_title_regex = re.compile(sys.argv[3], re.IGNORECASE)
-result = subprocess.run(
-    [opencode_bin, "session", "list", "--format", "json"],
-    check=True,
-    capture_output=True,
-    text=True,
-)
-stdout = result.stdout.strip()
-sessions = json.loads(stdout) if stdout else []
+repo_root = sys.argv[4]
 matching_sessions = [
-    session for session in sessions if str(session.get("title", "")) == session_title
+    session
+    for session in sessions
+    if str(session.get("title", "")) == session_title
+    and str(session.get("directory", "")) == repo_root
 ]
-matching_sessions.sort(key=lambda item: int(item.get("updated", 0)), reverse=True)
+matching_sessions.sort(key=lambda item: int(item.get("time", {}).get("updated", 0)), reverse=True)
 selected = matching_sessions[0]["id"] if matching_sessions else ""
 duplicates = [session["id"] for session in matching_sessions[1:]]
 generic_conflicts = [
@@ -158,56 +251,67 @@ cleanup_session_ids() {
     if [[ -z "$session_id" ]]; then
       continue
     fi
-    "$OPENCODE_BIN" session delete "$session_id" >/dev/null
+    delete_remote_session "$session_id"
   done <<<"$session_ids"
 }
 
 cleanup_session_ids "$DUPLICATE_SESSION_IDS"
 cleanup_session_ids "$GENERIC_CONFLICT_SESSION_IDS"
 
+start_runner() {
+  if systemctl --user is-active --quiet "$RUNNER_UNIT_NAME"; then
+    RUNNER_WAS_STARTED=0
+    echo "dr-maintenance-autonomous: runner already active on $MAINTENANCE_SERVER_URL"
+    echo "log: $LOG_PATH"
+    return 0
+  fi
+
+  RUNNER_WAS_STARTED=1
+  systemd-run \
+    --user \
+    --unit "$RUNNER_UNIT_NAME" \
+    --collect \
+    --quiet \
+    --working-directory="$REPO_ROOT" \
+    -p "StandardOutput=append:$LOG_PATH" \
+    -p "StandardError=append:$LOG_PATH" \
+    "$OPENCODE_BIN" run \
+      --attach "$MAINTENANCE_AUTOMATION_URL" \
+      --dir "$REPO_ROOT" \
+      --model "$AUTONOMOUS_MODEL" \
+      "$@" \
+      --command autopilot \
+      --agent implementation_lead \
+      "$START_MESSAGE"
+}
+
+RUNNER_WAS_STARTED=0
+
 if [[ -n "$SELECTED_SESSION_ID" ]]; then
   printf '%s\n' "$SELECTED_SESSION_ID" >"$SESSION_ID_FILE"
   write_autonomous_checkpoint "$SELECTED_SESSION_ID"
-  nohup "$OPENCODE_BIN" run \
-    --attach "$MAINTENANCE_AUTOMATION_URL" \
-    --model "$AUTONOMOUS_MODEL" \
-    --session "$SELECTED_SESSION_ID" \
-    --command autopilot \
-    --agent implementation_lead \
-    "$START_MESSAGE" \
-    >"$LOG_PATH" 2>&1 &
+  start_runner --session "$SELECTED_SESSION_ID"
   echo "dr-maintenance-autonomous: resumed $SELECTED_SESSION_ID via $MAINTENANCE_SERVER_URL"
   echo "log: $LOG_PATH"
   exit 0
 fi
 
-nohup "$OPENCODE_BIN" run \
-  --attach "$MAINTENANCE_AUTOMATION_URL" \
-  --model "$AUTONOMOUS_MODEL" \
-  --command autopilot \
-  --agent implementation_lead \
-  --title "$AUTONOMOUS_SESSION_TITLE" \
-  "$START_MESSAGE" \
-  >"$LOG_PATH" 2>&1 &
+start_runner --title "$AUTONOMOUS_SESSION_TITLE"
+
+if [[ "$RUNNER_WAS_STARTED" -ne 1 ]]; then
+  exit 0
+fi
 
 sleep 2
-NEW_SESSION_ID="$(python3 - "$OPENCODE_BIN" "$AUTONOMOUS_SESSION_TITLE" <<'PY'
+NEW_SESSION_ID="$(python3 - "$(list_remote_sessions)" "$AUTONOMOUS_SESSION_TITLE" "$REPO_ROOT" <<'PY'
 import json
-import subprocess
 import sys
 
-opencode_bin = sys.argv[1]
+sessions = json.loads(sys.argv[1]) if sys.argv[1].strip() else []
 session_title = sys.argv[2]
-result = subprocess.run(
-    [opencode_bin, "session", "list", "--format", "json"],
-    check=True,
-    capture_output=True,
-    text=True,
-)
-stdout = result.stdout.strip()
-sessions = json.loads(stdout) if stdout else []
+repo_root = sys.argv[3]
 for session in sessions:
-    if session.get("title") == session_title:
+    if session.get("title") == session_title and session.get("directory") == repo_root:
         print(session["id"])
         break
 PY

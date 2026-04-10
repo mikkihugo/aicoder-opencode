@@ -2,12 +2,27 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
-MAINTENANCE_SERVER_HOST="${DR_REPO_MAINTENANCE_SERVER_HOST:-${DR_MAINTENANCE_SERVER_HOST:-127.0.0.1}}"
-MAINTENANCE_SERVER_PORT="${DR_REPO_MAINTENANCE_SERVER_PORT:-${DR_MAINTENANCE_SERVER_PORT:-8283}}"
-MAINTENANCE_PASSWORD_DIRECTORY="$REPO_ROOT/.opencode/state/maintenance-web"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+MAINTENANCE_SERVER_HOST="${AICODER_OPENCODE_MAINTENANCE_SERVER_HOST:-127.0.0.1}"
+MAINTENANCE_SERVER_PORT="${AICODER_OPENCODE_MAINTENANCE_SERVER_PORT:-8091}"
+MAINTENANCE_PASSWORD_DIRECTORY="$REPO_ROOT/.state/maintenance-web"
 MAINTENANCE_PASSWORD_PATH="$MAINTENANCE_PASSWORD_DIRECTORY/server-password"
-OPENCODE_BIN="$REPO_ROOT/.opencode/bin/opencode"
+DEFAULT_OPENCODE_BIN="$HOME/.npm-global/bin/opencode"
+
+resolve_opencode_bin() {
+  if command -v opencode >/dev/null 2>&1; then
+    command -v opencode
+    return 0
+  fi
+
+  if [[ -x "$DEFAULT_OPENCODE_BIN" ]]; then
+    printf '%s\n' "$DEFAULT_OPENCODE_BIN"
+    return 0
+  fi
+
+  echo "aicoder-opencode-maintenance-web: missing opencode binary" >&2
+  exit 1
+}
 
 ensure_maintenance_server_password() {
   if [[ -n "${OPENCODE_SERVER_PASSWORD:-}" ]]; then
@@ -30,10 +45,7 @@ PY
   OPENCODE_SERVER_PASSWORD="$(tr -d '\r\n' < "$MAINTENANCE_PASSWORD_PATH")"
 }
 
-if [[ ! -x "$OPENCODE_BIN" ]]; then
-  echo "dr-maintenance-web: missing repo opencode wrapper at $OPENCODE_BIN" >&2
-  exit 1
-fi
-
+OPENCODE_BIN="$(resolve_opencode_bin)"
 ensure_maintenance_server_password
+cd "$REPO_ROOT"
 exec "$OPENCODE_BIN" serve --hostname "$MAINTENANCE_SERVER_HOST" --port "$MAINTENANCE_SERVER_PORT"

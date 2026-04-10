@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+USER_SYSTEMD_DIRECTORY="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+CONTROL_PLANE_ROOT_DIRECTORY="/home/mhugo/code/aicoder-opencode"
+CLI_BIN="$CONTROL_PLANE_ROOT_DIRECTORY/bin/aicoder-opencode"
+CHECKPOINT_SERVICE_NAME="aicoder-opencode-opencode-database-checkpoint.service"
+CHECKPOINT_TIMER_NAME="aicoder-opencode-opencode-database-checkpoint.timer"
+BACKUP_SERVICE_NAME="aicoder-opencode-opencode-database-backup.service"
+BACKUP_TIMER_NAME="aicoder-opencode-opencode-database-backup.timer"
+CHECKPOINT_SERVICE_PATH="$USER_SYSTEMD_DIRECTORY/$CHECKPOINT_SERVICE_NAME"
+CHECKPOINT_TIMER_PATH="$USER_SYSTEMD_DIRECTORY/$CHECKPOINT_TIMER_NAME"
+BACKUP_SERVICE_PATH="$USER_SYSTEMD_DIRECTORY/$BACKUP_SERVICE_NAME"
+BACKUP_TIMER_PATH="$USER_SYSTEMD_DIRECTORY/$BACKUP_TIMER_NAME"
+
+install_systemd_units() {
+  mkdir -p "$USER_SYSTEMD_DIRECTORY"
+
+  cat >"$CHECKPOINT_SERVICE_PATH" <<EOF
+[Unit]
+Description=OpenCode SQLite checkpoint maintenance
+
+[Service]
+Type=oneshot
+WorkingDirectory=$CONTROL_PLANE_ROOT_DIRECTORY
+ExecStart=$CLI_BIN opencode-database-maintenance checkpoint
+Nice=15
+StandardOutput=journal
+StandardError=journal
+EOF
+
+  cat >"$CHECKPOINT_TIMER_PATH" <<EOF
+[Unit]
+Description=Run OpenCode SQLite checkpoint maintenance hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=300
+Unit=$CHECKPOINT_SERVICE_NAME
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  cat >"$BACKUP_SERVICE_PATH" <<EOF
+[Unit]
+Description=OpenCode SQLite online backup maintenance
+
+[Service]
+Type=oneshot
+WorkingDirectory=$CONTROL_PLANE_ROOT_DIRECTORY
+ExecStart=$CLI_BIN opencode-database-maintenance backup
+Nice=15
+StandardOutput=journal
+StandardError=journal
+EOF
+
+  cat >"$BACKUP_TIMER_PATH" <<EOF
+[Unit]
+Description=Run OpenCode SQLite backup maintenance daily
+
+[Timer]
+OnCalendar=*-*-* 03:25:00
+Persistent=true
+RandomizedDelaySec=900
+Unit=$BACKUP_SERVICE_NAME
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl --user daemon-reload
+}
+
+case "${1:-status}" in
+  install-systemd)
+    install_systemd_units
+    echo "aicoder-opencode-opencode-database-maintenance: installed units"
+    ;;
+  start)
+    install_systemd_units
+    systemctl --user enable --now "$CHECKPOINT_TIMER_NAME" "$BACKUP_TIMER_NAME"
+    echo "aicoder-opencode-opencode-database-maintenance: enabled timers"
+    ;;
+  stop)
+    systemctl --user disable --now "$CHECKPOINT_TIMER_NAME" "$BACKUP_TIMER_NAME"
+    echo "aicoder-opencode-opencode-database-maintenance: disabled timers"
+    ;;
+  restart)
+    install_systemd_units
+    systemctl --user restart "$CHECKPOINT_TIMER_NAME" "$BACKUP_TIMER_NAME"
+    echo "aicoder-opencode-opencode-database-maintenance: restarted timers"
+    ;;
+  status)
+    systemctl --user status \
+      "$CHECKPOINT_SERVICE_NAME" \
+      "$CHECKPOINT_TIMER_NAME" \
+      "$BACKUP_SERVICE_NAME" \
+      "$BACKUP_TIMER_NAME" \
+      --no-pager
+    ;;
+  checkpoint-now)
+    install_systemd_units
+    systemctl --user start "$CHECKPOINT_SERVICE_NAME"
+    ;;
+  backup-now)
+    install_systemd_units
+    systemctl --user start "$BACKUP_SERVICE_NAME"
+    ;;
+  *)
+    echo "usage: aicoder-opencode-opencode-database-maintenance-service [install-systemd|start|stop|restart|status|checkpoint-now|backup-now]" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+USER_SYSTEMD_DIRECTORY="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+SERVICE_NAME="aicoder-opencode-maintenance.service"
+SERVICE_PATH="$USER_SYSTEMD_DIRECTORY/$SERVICE_NAME"
+MAINTENANCE_WEB_BIN="/home/mhugo/code/aicoder-opencode/bin/aicoder-opencode-maintenance-web"
+
+install_systemd_unit() {
+  mkdir -p "$USER_SYSTEMD_DIRECTORY"
+  cat >"$SERVICE_PATH" <<EOF
+[Unit]
+Description=shared maintenance OpenCode server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/mhugo/code/aicoder-opencode
+ExecStart=$MAINTENANCE_WEB_BIN
+Restart=on-failure
+RestartSec=5
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload
+}
+
+case "${1:-status}" in
+  install-systemd)
+    install_systemd_unit
+    echo "aicoder-opencode-maintenance: installed $SERVICE_NAME"
+    ;;
+  start)
+    install_systemd_unit
+    systemctl --user enable --now "$SERVICE_NAME"
+    echo "aicoder-opencode-maintenance: enabled $SERVICE_NAME"
+    ;;
+  stop)
+    systemctl --user disable --now "$SERVICE_NAME"
+    echo "aicoder-opencode-maintenance: disabled $SERVICE_NAME"
+    ;;
+  restart)
+    install_systemd_unit
+    systemctl --user restart "$SERVICE_NAME"
+    echo "aicoder-opencode-maintenance: restarted $SERVICE_NAME"
+    ;;
+  status)
+    systemctl --user status "$SERVICE_NAME" --no-pager
+    ;;
+  *)
+    echo "usage: aicoder-opencode-maintenance-service [install-systemd|start|stop|restart|status]" >&2
+    exit 2
+    ;;
+esac

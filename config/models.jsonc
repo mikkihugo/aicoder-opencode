@@ -189,57 +189,58 @@
         "final_signoff"
       ],
       "default_roles": [
-        "bulk_combatant",
-        "triage_helper"
-      ],
-      "provider_order": [
-        {
-          "provider": "z-ai",
-          "model": "glm-4.5-flash",
-          "priority": 1
-        }
-      ],
-      "notes": [
-        "Value comes from concurrency, not from depth."
-      ]
-    },
-    {
-      "id": "devstral-medium",
-      "description": "Broad SWE and code-review lane with strong second-reviewer value.",
-      "capability_tier": "strong",
-      "cost_tier": "free",
-      "billing_mode": "subscription",
-      "latency_tier": "medium",
-      "concurrency": 1,
-      "quota_visibility": "manual",
-      "best_for": [
-        "second_review",
-        "swe_tasks",
-        "code_architecture_review",
-        "agentic_repair"
-      ],
-      "not_for": [
-        "cheapest_triage",
-        "tiny_helper_tasks"
-      ],
-      "default_roles": [
-        "second_reviewer",
+        "deep_combatant",
         "alternate_architect"
       ],
       "provider_order": [
         {
-          "provider": "mistral",
-          "model": "mistral/devstral-medium-latest",
+          "provider": "iflowcn",
+          "model": "iflowcn/qwen3-235b-a22b-thinking-2507",
+          "priority": 1
+        }
+      ],
+      "notes": [
+        "Free large-model pressure lane when you want depth without spending frontier paid quota."
+      ]
+    },
+    {
+      "id": "qwen3-5-397b",
+      "description": "Strong free code-specialized implementation and review lane.",
+      "capability_tier": "strong",
+      "cost_tier": "free",
+      "billing_mode": "free",
+      "latency_tier": "medium",
+      "concurrency": 1,
+      "quota_visibility": "manual",
+      "best_for": [
+        "normal_coding",
+        "code_review",
+        "implementation_pressure",
+        "test_fixes"
+      ],
+      "not_for": [
+        "vision",
+        "broad_architecture"
+      ],
+      "default_roles": [
+        "coder",
+        "fixer",
+        "code_reviewer"
+      ],
+      "provider_order": [
+        {
+          "provider": "iflowcn",
+          "model": "iflowcn/qwen3.5:397b",
           "priority": 1
         },
         {
           "provider": "ollama-cloud",
-          "model": "ollama-cloud/devstral-2:123b",
+          "model": "ollama-cloud/qwen3.5:397b",
           "priority": 2
         }
       ],
       "notes": [
-        "Prefer native Mistral before mirrored/shared inference."
+        "Use for routine coding work as an alternative to GLM-4.7 when quota allows."
       ]
     },
     {
@@ -343,6 +344,11 @@
           "provider": "iflowcn",
           "model": "iflowcn/qwen3-coder-plus",
           "priority": 1
+        },
+        {
+          "provider": "ollama-cloud",
+          "model": "ollama-cloud/qwen3-coder-next",
+          "priority": 2
         }
       ],
       "notes": [
@@ -375,6 +381,11 @@
           "provider": "iflowcn",
           "model": "iflowcn/kimi-k2-0905",
           "priority": 1
+        },
+        {
+          "provider": "kimi-for-coding",
+          "model": "kimi-for-coding/kimi-k2-thinking",
+          "priority": 2
         }
       ],
       "notes": [
@@ -594,15 +605,25 @@
           "priority": 1
         },
         {
+          "provider": "minimax",
+          "model": "minimax/MiniMax-M2.7",
+          "priority": 2
+        },
+        {
           "provider": "openrouter",
           "model": "openrouter/xiaomi/mimo-v2-pro",
-          "priority": 2
+          "priority": 3
         },
         {
           "provider": "opencode-go",
           "model": "opencode-go/mimo-v2-pro",
-          "priority": 3,
+          "priority": 4,
           "status": "legacy"
+        },
+        {
+          "provider": "opencode-go",
+          "model": "opencode-go/mimo-v2-omni",
+          "priority": 5
         }
       ],
       "notes": [
