@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
+LOCK_FILE="$REPO_ROOT/.opencode/state/autopilot/run.lock"
+AUTOPILOT_CLI="$REPO_ROOT/.opencode/autopilot/cli.mjs"
+
+mkdir -p "$(dirname "$LOCK_FILE")"
+
+case "${1:-status}" in
+  run-once)
+    exec flock -n "$LOCK_FILE" node "$AUTOPILOT_CLI" "$@"
+    ;;
+  *)
+    exec node "$AUTOPILOT_CLI" "$@"
+    ;;
+esac

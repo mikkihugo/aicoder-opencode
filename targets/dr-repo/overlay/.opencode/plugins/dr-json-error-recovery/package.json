@@ -1,0 +1,9 @@
+{
+  "name": "dr-json-error-recovery",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./index.ts",
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.2.27"
+  }
+}

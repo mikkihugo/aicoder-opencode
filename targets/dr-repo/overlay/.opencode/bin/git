@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "dr-repo autonomous lane: raw git is blocked; use jj." >&2
+exit 64

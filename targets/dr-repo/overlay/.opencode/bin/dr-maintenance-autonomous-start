@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
+AUTOPILOT_BIN="$REPO_ROOT/.opencode/bin/dr-autopilot"
+MAINTENANCE_WEB_SERVICE_NAME="${DR_REPO_MAINTENANCE_SERVICE_NAME:-aicoder-opencode-main.service}"
+OPENCODE_BIN="$REPO_ROOT/.opencode/bin/opencode"
+MAINTENANCE_SERVER_URL="${DR_REPO_MAINTENANCE_SERVER_URL:-${DR_MAINTENANCE_SERVER_URL:-http://127.0.0.1:8080}}"
+MAINTENANCE_AUTOMATION_USERNAME="${DR_REPO_MAINTENANCE_AUTOMATION_USERNAME:-${DR_MAINTENANCE_AUTOMATION_USERNAME:-opencode}}"
+MAINTENANCE_PASSWORD_PATH="${DR_REPO_MAINTENANCE_PASSWORD_PATH:-$REPO_ROOT/.opencode/state/maintenance-web/server-password}"
+LOG_DIRECTORY="$REPO_ROOT/.opencode/state/autopilot"
+LOG_PATH="$LOG_DIRECTORY/maintenance-autonomous-start.log"
+START_MESSAGE="${1:-Start autonomous iteration for dr-repo and continue until done.}"
+AUTONOMOUS_SESSION_TITLE="${DR_REPO_MAINTENANCE_AUTONOMOUS_SESSION_TITLE:-${DR_MAINTENANCE_AUTONOMOUS_SESSION_TITLE:-dr-maintenance-autonomous}}"
+GENERIC_AUTONOMOUS_TITLE_REGEX="${DR_REPO_MAINTENANCE_GENERIC_AUTONOMOUS_TITLE_REGEX:-${DR_MAINTENANCE_GENERIC_AUTONOMOUS_TITLE_REGEX:-autonomous iteration|dr autonomous iteration mode}}"
+SESSION_ID_FILE="$LOG_DIRECTORY/maintenance-autonomous-session-id"
+AUTONOMOUS_MODEL="${DR_REPO_MAINTENANCE_AUTONOMOUS_MODEL:-${DR_AUTOPILOT_MODEL:-ollama-cloud/glm-5.1}}"
+
+maintenance_automation_url() {
+  if [[ -n "${DR_REPO_MAINTENANCE_AUTOMATION_URL:-}" ]]; then
+    printf '%s\n' "$DR_REPO_MAINTENANCE_AUTOMATION_URL"
+    return 0
+  fi
+
+  if [[ -n "${DR_MAINTENANCE_AUTOMATION_URL:-}" ]]; then
+    printf '%s\n' "$DR_MAINTENANCE_AUTOMATION_URL"
+    return 0
+  fi
+
+  if [[ ! -s "$MAINTENANCE_PASSWORD_PATH" ]]; then
+    printf '%s\n' "$MAINTENANCE_SERVER_URL"
+    return 0
+  fi
+
+  python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" <<'PY'
+import sys
+from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit
+
+server_url = sys.argv[1]
+username = sys.argv[2]
+password_path = Path(sys.argv[3])
+password = password_path.read_text(encoding="utf-8").strip()
+parts = urlsplit(server_url)
+host = parts.hostname or "127.0.0.1"
+port = f":{parts.port}" if parts.port else ""
+userinfo = f"{quote(username, safe='')}:{quote(password, safe='')}"
+netloc = f"{userinfo}@{host}{port}"
+print(urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment)))
+PY
+}
+
+write_autonomous_checkpoint() {
+  local session_id="$1"
+  python3 - "$REPO_ROOT" "$session_id" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+repo_root = sys.argv[1]
+session_id = sys.argv[2]
+checkpoint_dir = os.path.join(repo_root, ".opencode", "state", "checkpoints")
+checkpoint_path = os.path.join(checkpoint_dir, f"{session_id}.json")
+os.makedirs(checkpoint_dir, exist_ok=True)
+
+existing = {"sessionID": session_id}
+if os.path.exists(checkpoint_path):
+    with open(checkpoint_path, "r", encoding="utf-8") as handle:
+        existing = json.load(handle)
+
+existing["sessionID"] = session_id
+existing["autonomousIteration"] = True
+existing["status"] = existing.get("status") or "in_progress"
+existing["updatedAt"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+with open(checkpoint_path, "w", encoding="utf-8") as handle:
+    json.dump(existing, handle, indent=2)
+    handle.write("\n")
+PY
+}
+
+mkdir -p "$LOG_DIRECTORY"
+systemctl --user start "$MAINTENANCE_WEB_SERVICE_NAME" >/dev/null
+"$AUTOPILOT_BIN" start >/dev/null
+MAINTENANCE_AUTOMATION_URL="$(maintenance_automation_url)"
+
+SESSION_SELECTION_JSON="$(python3 - "$OPENCODE_BIN" "$AUTONOMOUS_SESSION_TITLE" "$GENERIC_AUTONOMOUS_TITLE_REGEX" <<'PY'
+import json
+import re
+import subprocess
+import sys
+
+opencode_bin = sys.argv[1]
+session_title = sys.argv[2]
+generic_autonomous_title_regex = re.compile(sys.argv[3], re.IGNORECASE)
+result = subprocess.run(
+    [opencode_bin, "session", "list", "--format", "json"],
+    check=True,
+    capture_output=True,
+    text=True,
+)
+stdout = result.stdout.strip()
+sessions = json.loads(stdout) if stdout else []
+matching_sessions = [
+    session for session in sessions if str(session.get("title", "")) == session_title
+]
+matching_sessions.sort(key=lambda item: int(item.get("updated", 0)), reverse=True)
+selected = matching_sessions[0]["id"] if matching_sessions else ""
+duplicates = [session["id"] for session in matching_sessions[1:]]
+generic_conflicts = [
+    session["id"]
+    for session in sessions
+    if str(session.get("title", "")) != session_title
+    and generic_autonomous_title_regex.search(str(session.get("title", "")))
+]
+print(json.dumps({"selected": selected, "duplicates": duplicates, "genericConflicts": generic_conflicts}))
+PY
+)"
+
+SELECTED_SESSION_ID="$(python3 - "$SESSION_SELECTION_JSON" <<'PY'
+import json
+import sys
+
+selection = json.loads(sys.argv[1])
+print(selection.get("selected", ""))
+PY
+)"
+
+DUPLICATE_SESSION_IDS="$(python3 - "$SESSION_SELECTION_JSON" <<'PY'
+import json
+import sys
+
+selection = json.loads(sys.argv[1])
+for session_id in selection.get("duplicates", []):
+    print(session_id)
+PY
+)"
+
+GENERIC_CONFLICT_SESSION_IDS="$(python3 - "$SESSION_SELECTION_JSON" <<'PY'
+import json
+import sys
+
+selection = json.loads(sys.argv[1])
+for session_id in selection.get("genericConflicts", []):
+    print(session_id)
+PY
+)"
+
+cleanup_session_ids() {
+  local session_ids="${1:-}"
+  if [[ -z "$session_ids" ]]; then
+    return
+  fi
+
+  while IFS= read -r session_id; do
+    if [[ -z "$session_id" ]]; then
+      continue
+    fi
+    "$OPENCODE_BIN" session delete "$session_id" >/dev/null
+  done <<<"$session_ids"
+}
+
+cleanup_session_ids "$DUPLICATE_SESSION_IDS"
+cleanup_session_ids "$GENERIC_CONFLICT_SESSION_IDS"
+
+if [[ -n "$SELECTED_SESSION_ID" ]]; then
+  printf '%s\n' "$SELECTED_SESSION_ID" >"$SESSION_ID_FILE"
+  write_autonomous_checkpoint "$SELECTED_SESSION_ID"
+  nohup "$OPENCODE_BIN" run \
+    --attach "$MAINTENANCE_AUTOMATION_URL" \
+    --model "$AUTONOMOUS_MODEL" \
+    --session "$SELECTED_SESSION_ID" \
+    --command autopilot \
+    --agent implementation_lead \
+    "$START_MESSAGE" \
+    >"$LOG_PATH" 2>&1 &
+  echo "dr-maintenance-autonomous: resumed $SELECTED_SESSION_ID via $MAINTENANCE_SERVER_URL"
+  echo "log: $LOG_PATH"
+  exit 0
+fi
+
+nohup "$OPENCODE_BIN" run \
+  --attach "$MAINTENANCE_AUTOMATION_URL" \
+  --model "$AUTONOMOUS_MODEL" \
+  --command autopilot \
+  --agent implementation_lead \
+  --title "$AUTONOMOUS_SESSION_TITLE" \
+  "$START_MESSAGE" \
+  >"$LOG_PATH" 2>&1 &
+
+sleep 2
+NEW_SESSION_ID="$(python3 - "$OPENCODE_BIN" "$AUTONOMOUS_SESSION_TITLE" <<'PY'
+import json
+import subprocess
+import sys
+
+opencode_bin = sys.argv[1]
+session_title = sys.argv[2]
+result = subprocess.run(
+    [opencode_bin, "session", "list", "--format", "json"],
+    check=True,
+    capture_output=True,
+    text=True,
+)
+stdout = result.stdout.strip()
+sessions = json.loads(stdout) if stdout else []
+for session in sessions:
+    if session.get("title") == session_title:
+        print(session["id"])
+        break
+PY
+)"
+if [[ -n "$NEW_SESSION_ID" ]]; then
+  printf '%s\n' "$NEW_SESSION_ID" >"$SESSION_ID_FILE"
+  write_autonomous_checkpoint "$NEW_SESSION_ID"
+fi
+
+echo "dr-maintenance-autonomous: seeded via $MAINTENANCE_SERVER_URL"
+echo "log: $LOG_PATH"

@@ -1,0 +1,19 @@
+{
+  "skills": [
+    "dr-repo-reference",
+    "dr-session-pickup",
+    "dr-autonomous-iteration",
+    "dr-production-readiness",
+    "dr-clarify-spec",
+    "dr-design-and-planning",
+    "dr-generate-tasks",
+    "dr-spec-first-tdd",
+    "dr-wave-implementation",
+    "dr-systematic-debugging",
+    "dr-code-review",
+    "dr-finish-and-verify",
+    "dr-agent-windows",
+    "dr-portal-ui-and-handlers",
+    "dr-security-review"
+  ]
+}

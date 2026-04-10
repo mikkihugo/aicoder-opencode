@@ -1,0 +1,25 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "MiniMax": {
+      "type": "local",
+      "command": [
+        "openchamber-minimax-mcp"
+      ],
+      "environment": {
+        "MINIMAX_API_HOST": "https://api.minimax.io"
+      },
+      "enabled": true
+    },
+    "exa": {
+      "type": "remote",
+      "url": "https://mcp.exa.ai/mcp?exaApiKey=e9f259a8-1e04-48e8-b30c-d16d9bde946c",
+      "enabled": true
+    },
+    "DeepWiki": {
+      "type": "remote",
+      "url": "https://mcp.deepwiki.com/mcp",
+      "enabled": true
+    }
+  }
+}

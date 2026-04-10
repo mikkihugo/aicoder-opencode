@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
+REPO_XDG_CONFIG_HOME="$REPO_ROOT/.opencode/xdg-config"
+REPO_XDG_CACHE_HOME="$REPO_ROOT/.opencode/xdg-cache"
+REPO_XDG_DATA_HOME="$REPO_ROOT/.opencode/xdg-data"
+REPO_XDG_STATE_HOME="$REPO_ROOT/.opencode/xdg-state"
+
+prepend_existing_directories_to_path() {
+  local directories=("$@")
+  local directory=""
+  local prefixed_path=""
+
+  for directory in "${directories[@]}"; do
+    if [[ -d "$directory" ]]; then
+      prefixed_path="${prefixed_path:+$prefixed_path:}$directory"
+    fi
+  done
+
+  if [[ -n "$prefixed_path" ]]; then
+    export PATH="$prefixed_path:$PATH"
+  fi
+}
+
+prepend_directory_to_path() {
+  local directory="${1:-}"
+  if [[ -n "$directory" && -d "$directory" ]]; then
+    export PATH="$directory:$PATH"
+  fi
+}
+
+build_path_without_wrapper_dir() {
+  local original_path="${1:-}"
+  local path_entries=()
+  local path_entry=""
+
+  IFS=: read -r -a path_entries <<< "$original_path"
+  for path_entry in "${path_entries[@]}"; do
+    if [[ "$path_entry" == "$SCRIPT_DIR" ]]; then
+      continue
+    fi
+    printf '%s\n' "$path_entry"
+  done | paste -sd: -
+}
+
+resolve_real_opencode_binary() {
+  local fallback_path=""
+  local candidate_path=""
+
+  fallback_path="$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+  candidate_path="$(build_path_without_wrapper_dir "${PATH:-}")"
+  PATH="$fallback_path:$candidate_path" command -v opencode 2>/dev/null || true
+}
+
+resolve_go_binary() {
+  local go_binary=""
+  local fallback_go_binary=""
+
+  go_binary="$(command -v go 2>/dev/null || true)"
+  if [[ -n "$go_binary" ]]; then
+    printf '%s\n' "$go_binary"
+    return 0
+  fi
+
+  fallback_go_binary="$(ls -1 /nix/store/*-go-*/bin/go 2>/dev/null | tail -1 || true)"
+  if [[ -n "$fallback_go_binary" ]]; then
+    printf '%s\n' "$fallback_go_binary"
+  fi
+}
+
+load_repo_opencode_environment() {
+  local dotfiles_root="${DOTFILES_ROOT:-$HOME/.dotfiles}"
+
+  if [[ -f "$dotfiles_root/shell/bash/bashrc" ]]; then
+    # shellcheck source=/dev/null
+    source "$dotfiles_root/shell/bash/bashrc" >/dev/null 2>&1 || true
+    if type _load_sops_secrets >/dev/null 2>&1; then
+      _load_sops_secrets >/dev/null 2>&1 || true
+    fi
+  fi
+
+  export MINIMAX_API_HOST="${MINIMAX_API_HOST:-https://api.minimax.io}"
+  export XDG_CONFIG_HOME="$REPO_XDG_CONFIG_HOME"
+  export XDG_CACHE_HOME="$REPO_XDG_CACHE_HOME"
+  export XDG_DATA_HOME="$REPO_XDG_DATA_HOME"
+  export XDG_STATE_HOME="$REPO_XDG_STATE_HOME"
+  prepend_directory_to_path "$SCRIPT_DIR"
+  prepend_existing_directories_to_path \
+    "$HOME/.nix-profile/bin" \
+    "/nix/var/nix/profiles/default/bin" \
+    "/run/current-system/sw/bin" \
+    "$HOME/go/bin" \
+    "$HOME/.cargo/bin" \
+    "$HOME/.npm-global/bin" \
+    "$HOME/.local/bin" \
+    "/usr/local/bin" \
+    "/usr/bin" \
+    "/bin"
+
+  local go_binary=""
+  local go_directory=""
+  go_binary="$(resolve_go_binary)"
+  if [[ -n "$go_binary" ]]; then
+    go_directory="$(dirname "$go_binary")"
+    export PATH="$go_directory:$PATH"
+  fi
+}
+
+cleanup_terminal_modes() {
+  if [[ ! -t 0 && ! -t 1 && ! -t 2 ]]; then
+    return
+  fi
+
+  printf '\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l\033[?2004l\033[?1049l\033[?25h' >/dev/tty 2>/dev/null || true
+}
+
+run_opencode_with_cleanup() {
+  "$@"
+  local exit_code=$?
+  cleanup_terminal_modes
+  return "$exit_code"
+}
+
+REAL_OPENCODE="$(resolve_real_opencode_binary)"
+
+if [[ -z "$REAL_OPENCODE" ]]; then
+  echo "repo opencode wrapper: could not find real opencode binary" >&2
+  exit 1
+fi
+
+load_repo_opencode_environment
+
+for argument in "$@"; do
+  if [[ "$argument" == "--pure" ]]; then
+    run_opencode_with_cleanup "$REAL_OPENCODE" "$@"
+    exit $?
+  fi
+done
+
+for argument in "$@"; do
+  if [[ "$argument" == "serve" || "$argument" == "web" ]]; then
+    run_opencode_with_cleanup "$REAL_OPENCODE" "$@"
+    exit $?
+  fi
+done
+
+run_opencode_with_cleanup "$REAL_OPENCODE" --pure "$@"

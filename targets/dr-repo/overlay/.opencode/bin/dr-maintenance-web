@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
+MAINTENANCE_SERVER_HOST="${DR_REPO_MAINTENANCE_SERVER_HOST:-${DR_MAINTENANCE_SERVER_HOST:-127.0.0.1}}"
+MAINTENANCE_SERVER_PORT="${DR_REPO_MAINTENANCE_SERVER_PORT:-${DR_MAINTENANCE_SERVER_PORT:-8283}}"
+MAINTENANCE_PASSWORD_DIRECTORY="$REPO_ROOT/.opencode/state/maintenance-web"
+MAINTENANCE_PASSWORD_PATH="$MAINTENANCE_PASSWORD_DIRECTORY/server-password"
+OPENCODE_BIN="$REPO_ROOT/.opencode/bin/opencode"
+
+ensure_maintenance_server_password() {
+  if [[ -n "${OPENCODE_SERVER_PASSWORD:-}" ]]; then
+    return
+  fi
+
+  mkdir -p "$MAINTENANCE_PASSWORD_DIRECTORY"
+  chmod 700 "$MAINTENANCE_PASSWORD_DIRECTORY"
+
+  if [[ ! -s "$MAINTENANCE_PASSWORD_PATH" ]]; then
+    python3 - <<'PY' >"$MAINTENANCE_PASSWORD_PATH"
+import secrets
+
+print(secrets.token_urlsafe(32))
+PY
+    chmod 600 "$MAINTENANCE_PASSWORD_PATH"
+  fi
+
+  export OPENCODE_SERVER_PASSWORD
+  OPENCODE_SERVER_PASSWORD="$(tr -d '\r\n' < "$MAINTENANCE_PASSWORD_PATH")"
+}
+
+if [[ ! -x "$OPENCODE_BIN" ]]; then
+  echo "dr-maintenance-web: missing repo opencode wrapper at $OPENCODE_BIN" >&2
+  exit 1
+fi
+
+ensure_maintenance_server_password
+exec "$OPENCODE_BIN" serve --hostname "$MAINTENANCE_SERVER_HOST" --port "$MAINTENANCE_SERVER_PORT"

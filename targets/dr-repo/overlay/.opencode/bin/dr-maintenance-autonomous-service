@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
+USER_SYSTEMD_DIRECTORY="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+SERVICE_NAME="dr-repo-maintenance.service"
+SERVICE_PATH="$USER_SYSTEMD_DIRECTORY/$SERVICE_NAME"
+AUTONOMOUS_START_BIN="$REPO_ROOT/.opencode/bin/dr-maintenance-autonomous-start"
+
+install_systemd_unit() {
+  mkdir -p "$USER_SYSTEMD_DIRECTORY"
+  cat >"$SERVICE_PATH" <<EOF
+[Unit]
+Description=dr-repo maintenance session bootstrap
+After=network-online.target aicoder-opencode-main.service
+Wants=network-online.target aicoder-opencode-main.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=$REPO_ROOT
+ExecStart=$AUTONOMOUS_START_BIN
+Nice=10
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload
+}
+
+case "${1:-status}" in
+  install-systemd)
+    install_systemd_unit
+    echo "dr-repo-maintenance: installed $SERVICE_NAME"
+    ;;
+  start)
+    install_systemd_unit
+    systemctl --user enable --now "$SERVICE_NAME"
+    echo "dr-repo-maintenance: enabled $SERVICE_NAME"
+    ;;
+  stop)
+    systemctl --user disable --now "$SERVICE_NAME"
+    echo "dr-repo-maintenance: disabled $SERVICE_NAME"
+    ;;
+  restart)
+    install_systemd_unit
+    systemctl --user restart "$SERVICE_NAME"
+    echo "dr-repo-maintenance: restarted $SERVICE_NAME"
+    ;;
+  status)
+    systemctl --user status "$SERVICE_NAME" --no-pager
+    ;;
+  *)
+    echo "usage: dr-maintenance-autonomous-service [install-systemd|start|stop|restart|status]" >&2
+    exit 2
+    ;;
+esac

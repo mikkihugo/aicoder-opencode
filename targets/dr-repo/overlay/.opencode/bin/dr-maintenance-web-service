@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec /home/mhugo/code/aicoder-opencode/bin/aicoder-opencode-maintenance-service "$@"

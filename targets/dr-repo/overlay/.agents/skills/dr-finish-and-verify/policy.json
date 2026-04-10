@@ -1,0 +1,24 @@
+{
+  "skill_name": "dr-finish-and-verify",
+  "triggers": {
+    "task_types": [
+      "verification",
+      "deployment",
+      "manual_command",
+      "infrastructure"
+    ]
+  },
+  "required_steps": [
+    "run_component_verification",
+    "inspect_diff",
+    "use_git_when_requested",
+    "run_runtime_checks_when_requested"
+  ],
+  "evidence_requirements": [
+    "test_results",
+    "lint_results",
+    "build_results",
+    "runtime_observation"
+  ],
+  "enforcement_level": "mandatory"
+}
