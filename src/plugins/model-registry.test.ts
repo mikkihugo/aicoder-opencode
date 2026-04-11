@@ -40,6 +40,7 @@ import {
   findLiveRoutePenalty,
   lookupRouteHealthByIdentifiers,
   isAgentVisibleLivePenalty,
+  recordModelNotFoundRouteHealthByIdentifiers,
   recordProviderHealthPenalty,
   recordRouteHealthByIdentifiers,
   recordRouteHealthPenalty,
@@ -1718,6 +1719,96 @@ test("recordRouteHealthByIdentifiers_whenCalled_invokesPersistFnThroughM68Record
     "glm-5",
     "timeout",
     60 * 60 * 1000,
+    0,
+    (providerMap, routeMap) => {
+      persistCalls += 1;
+      observedProviderMap = providerMap;
+      observedRouteMap = routeMap;
+    },
+  );
+
+  assert.equal(persistCalls, 1);
+  assert.equal(observedProviderMap, providerHealthMap);
+  assert.equal(observedRouteMap, modelRouteHealthMap);
+});
+
+test("recordModelNotFoundRouteHealthByIdentifiers_whenCalled_writesSixHourModelNotFoundEntry", () => {
+  // M76: the model-not-found sibling must thread (providerID, modelID)
+  // into `buildModelNotFoundRouteHealth`, which bakes in `"model_not_found"`
+  // state and the dedicated 6h `ROUTE_MODEL_NOT_FOUND_DURATION_MS`. A
+  // future refactor that accidentally called `buildRouteHealthEntry` with
+  // the quota duration would produce a 1h window — exactly the bug
+  // `buildModelNotFoundRouteHealth` was introduced to prevent.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+
+  recordModelNotFoundRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "openrouter",
+    "xiaomi/gone-tomorrow",
+    42_000,
+    () => {},
+  );
+
+  const entry = modelRouteHealthMap.get("openrouter/xiaomi/gone-tomorrow");
+  assert.ok(entry, "entry must be written under composite route key");
+  assert.equal(entry!.state, "model_not_found");
+  assert.equal(entry!.until, 42_000 + ROUTE_MODEL_NOT_FOUND_DURATION_MS);
+  assert.equal(entry!.retryCount, 1);
+});
+
+test("recordModelNotFoundRouteHealthByIdentifiers_whenExistingQuotaEntryShorter_overridesWithLongerModelNotFound", () => {
+  // M76 + M43: the wrapper must thread the existing entry through
+  // `buildModelNotFoundRouteHealth`, which inherits the preserve-longer
+  // merge from `buildRouteHealthEntry`. A pre-existing 1h quota penalty
+  // must lose to an incoming 6h model_not_found penalty (the incoming
+  // penalty has the longer `until`). This pins the lookup-wiring + merge
+  // path for the model-not-found branch.
+  const now = 1_000;
+  const shorterExistingUntil = now + 60 * 60 * 1000; // 1h
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    [
+      "openrouter/xiaomi/gone-tomorrow",
+      { state: "quota", until: shorterExistingUntil, retryCount: 3 },
+    ],
+  ]);
+  const providerHealthMap = new Map<string, ProviderHealth>();
+
+  recordModelNotFoundRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "openrouter",
+    "xiaomi/gone-tomorrow",
+    now,
+    () => {},
+  );
+
+  const entry = modelRouteHealthMap.get("openrouter/xiaomi/gone-tomorrow");
+  assert.ok(entry);
+  // Longer penalty dominates: 6h wins over 1h, state flips, retryCount
+  // increments off the 3 the prior entry had.
+  assert.equal(entry!.state, "model_not_found");
+  assert.equal(entry!.until, now + ROUTE_MODEL_NOT_FOUND_DURATION_MS);
+  assert.equal(entry!.retryCount, 4);
+});
+
+test("recordModelNotFoundRouteHealthByIdentifiers_whenCalled_invokesPersistFnThroughM68RecordWrapper", () => {
+  // M76 + M68: the wrapper must delegate to `recordRouteHealthPenalty`
+  // so the durability-pair invariant holds for the model-not-found
+  // branch. A spy asserts persistFn fires exactly once with reference
+  // equality to both live maps — same shape as the M75 persist pin.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  let persistCalls = 0;
+  let observedProviderMap: Map<string, ProviderHealth> | null = null;
+  let observedRouteMap: Map<string, ModelRouteHealth> | null = null;
+
+  recordModelNotFoundRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "iflowcn",
+    "phantom-model-v2",
     0,
     (providerMap, routeMap) => {
       persistCalls += 1;

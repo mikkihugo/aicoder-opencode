@@ -908,6 +908,81 @@ export function recordRouteHealthByIdentifiers(
 }
 
 /**
+ * Model-not-found sibling of `recordRouteHealthByIdentifiers` — performs
+ * the same three-step write ritual (`lookup` → `buildModelNotFoundRouteHealth`
+ * → `recordRouteHealthPenalty`) for the `session.error` branch that
+ * classifies a 0/404/500 + "model not found" keyword response as a
+ * structural missing-model penalty.
+ *
+ * ## Why a separate helper (not a branch on `recordRouteHealthByIdentifiers`)
+ *
+ * The M75 wrapper takes `(state, durationMs)` as explicit parameters and
+ * feeds them into `buildRouteHealthEntry`. The model-not-found path
+ * doesn't have those degrees of freedom — the state is always
+ * `"model_not_found"` and the duration is always the dedicated
+ * `ROUTE_MODEL_NOT_FOUND_DURATION_MS` (6h, vs 1h for quota/timeout).
+ * Folding this into M75 would require either:
+ *
+ *   1. An overload with a `state: "model_not_found"` discriminator that
+ *      silently ignored the `durationMs` argument (bug-prone: a caller
+ *      passing 1h would get 6h with no warning), or
+ *   2. A union-typed builder parameter that blurred the clean
+ *      `buildRouteHealthEntry` / `buildModelNotFoundRouteHealth` split
+ *      M43 established.
+ *
+ * Keeping a dedicated wrapper preserves the contract that each builder
+ * has one caller shape, and the shared drift target (the three-step
+ * ritual) still collapses to one named operation per branch.
+ *
+ * ## Drift shape this closes
+ *
+ * Identical to M75: pre-fix, the `session.error` model-not-found branch
+ * inlined the exact same three-step composition by hand. M75 extracted
+ * the wrapper for the `buildRouteHealthEntry` flavor and explicitly
+ * left this branch for M76 ("keeps its own inline shape"). M76 closes
+ * that last inline site so every route-level write path in the plugin
+ * routes through a named wrapper with compiler-enforced argument shape.
+ *
+ * Args:
+ *   modelRouteHealthMap: Live route-level health map.
+ *   providerHealthMap: Live provider-level health map (threaded for the
+ *     atomic-snapshot shape).
+ *   providerID: Provider identifier from the runtime session.
+ *   modelID: Model identifier from the runtime session.
+ *   now: Wall-clock timestamp; injected so tests can pin arithmetic
+ *     without stubbing `Date.now`.
+ *   persistFn: Injected persister (production passes
+ *     `persistProviderHealth`; tests pass a spy).
+ */
+export function recordModelNotFoundRouteHealthByIdentifiers(
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  providerHealthMap: Map<string, ProviderHealth>,
+  providerID: string,
+  modelID: string,
+  now: number,
+  persistFn: PersistProviderHealthFn,
+): void {
+  const existing = lookupRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerID,
+    modelID,
+  );
+  const { routeKey, health } = buildModelNotFoundRouteHealth(
+    providerID,
+    modelID,
+    existing,
+    now,
+  );
+  recordRouteHealthPenalty(
+    modelRouteHealthMap,
+    providerHealthMap,
+    routeKey,
+    health,
+    persistFn,
+  );
+}
+
+/**
  * Return `true` when a provider+model pair must be excluded from fallback
  * routing. Exported so the regex semantics can be unit-tested directly
  * without constructing the plugin closure.
@@ -3743,17 +3818,12 @@ export const ModelRegistryPlugin: Plugin = async () => {
         const isModelNotFound =
           modelID !== undefined && shouldClassifyAsModelNotFound(statusCode, message);
         if (isModelNotFound && modelID) {
-          const { routeKey, health } = buildModelNotFoundRouteHealth(
-            providerID,
-            modelID,
-            lookupRouteHealthByIdentifiers(modelRouteHealthMap, providerID, modelID),
-            Date.now(),
-          );
-          recordRouteHealthPenalty(
+          recordModelNotFoundRouteHealthByIdentifiers(
             modelRouteHealthMap,
             providerHealthMap,
-            routeKey,
-            health,
+            providerID,
+            modelID,
+            Date.now(),
             persistProviderHealth,
           );
           return;
