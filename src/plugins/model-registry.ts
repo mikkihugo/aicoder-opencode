@@ -9,6 +9,7 @@ import {
   type CapabilityTier,
   type ModelRegistry,
   type ModelRegistryEntry,
+  type ProviderRoute,
   filterModelRegistryEntries,
   loadModelRegistry,
   filterVisibleProviderRoutes,
@@ -1336,15 +1337,104 @@ export function findCuratedFallbackRoute(
 }
 
 /**
- * Compute a health report for the first visible route of a registry entry.
+ * Return the first visible route of a registry entry that is currently
+ * routable — neither provider-level nor route-level penalty active. Pure
+ * so it can be unit-tested independently of the reader sites below.
  *
- * Used by `list_curated_models` tool output so the agent sees route-level
- * penalties (model_not_found, zero-token quota) on its primary route, not
- * just provider-level ones. Previously the tool read `provider_order[0]`
- * raw and only checked provider health — a route with a dead model_id
- * underneath a healthy provider reported as "healthy" and the agent kept
- * routing there. Returns null when the primary visible route is fully
- * healthy, or when no visible route exists at all.
+ * Exists because two different readers need the same "is this entry
+ * routable via any of its visible routes" question answered with
+ * identical semantics: `computeRegistryEntryHealthReport` (for the
+ * agent-facing `list_curated_models` tool output) and, historically, the
+ * per-entry loop inside `buildAvailableModelsSystemPrompt`. Keeping the
+ * predicate in one named helper prevents the two sites from drifting on
+ * edge cases like key_missing providers with healthy visible siblings,
+ * or route-level penalties that block some routes but not all.
+ *
+ * Args:
+ *   modelRegistryEntry: Registry row to scan.
+ *   providerHealthMap: Live provider-keyed health map.
+ *   modelRouteHealthMap: Live composite-route-keyed health map.
+ *   now: Wall-clock ms.
+ *
+ * Returns:
+ *   The first visible route whose provider is healthy and whose
+ *   composite-route entry is not penalized, or `null` when every
+ *   visible route is blocked (or when there are no visible routes at all).
+ */
+export function findFirstHealthyRouteInEntry(
+  modelRegistryEntry: ModelRegistryEntry,
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  now: number,
+): ProviderRoute | null {
+  const visibleRoutes = filterVisibleProviderRoutes(modelRegistryEntry.provider_order);
+  for (const route of visibleRoutes) {
+    if (!isProviderHealthy(providerHealthMap, route.provider, now)) continue;
+    const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
+    if (routeHealth && routeHealth.until > now) continue;
+    return route;
+  }
+  return null;
+}
+
+/**
+ * Compute a health report for a registry entry as seen by the
+ * agent-facing `list_curated_models` tool.
+ *
+ * Semantic: report the entry as blocked ONLY when EVERY visible route is
+ * blocked. If ANY visible route is currently routable, return `null` —
+ * the entry is usable, because the router (via `findCuratedFallbackRoute`,
+ * `findFirstHealthyVisibleRoute`, and the live-route selection in
+ * `provider.models`) will transparently walk past a blocked primary to a
+ * healthy sibling without the caller's knowledge.
+ *
+ * History:
+ *   - M29: previously the tool read `provider_order[0]` raw and only
+ *     consulted provider-level health, so a route with a dead model_id
+ *     underneath a healthy provider reported "healthy" and the router
+ *     kept re-picking it. Fix walked `filterVisibleProviderRoutes`
+ *     and consulted `modelRouteHealthMap`.
+ *   - M30: composite-key normalization (`composeRouteKey`) so longcat's
+ *     unprefixed entries could be looked up.
+ *   - M61: this rewrite. Pre-M61 the function reported the PRIMARY
+ *     visible route's state in isolation, ignoring sibling visible
+ *     routes. That was fine when every blocked state was transient and
+ *     the agent wanted early warning of a degraded primary. It broke
+ *     post-M58 (9b125b5), when `initializeProviderHealthState` started
+ *     installing `key_missing` entries at boot for every uncredentialed
+ *     curated provider. For any entry whose primary route happens to
+ *     live on an uncredentialed provider (very common on a default
+ *     install — `opencode/glm-5.1-free` primary with `iflowcn/glm-5.1`
+ *     sibling is the shape in the shipping `config/models.jsonc`), the
+ *     report became `{state: "key_missing", until: "never", scope:
+ *     "provider"}` even though the router was happily serving traffic
+ *     via the healthy sibling. Agents calling `list_curated_models` saw
+ *     entire classes of routable models marked permanently blocked and
+ *     avoided them, silently downgrading quality on every turn. The
+ *     M59/M60 key_missing noise filter applies to the system-prompt
+ *     builders but does NOT touch `list_curated_models`, which is a
+ *     tool the agent explicitly calls and reads as authoritative.
+ *
+ *     The fix is to flip the question from "what's wrong with the
+ *     primary route" to "is this entry routable at all" — using
+ *     `findFirstHealthyRouteInEntry` to ask the same question the
+ *     router would ask when selecting a route. When any route is live,
+ *     return null (entry is fine). When every route is blocked, keep
+ *     the legacy behavior and report the primary's state so the agent
+ *     understands WHY the entry is unusable.
+ *
+ * Args:
+ *   modelRegistryEntry: Registry row to report on.
+ *   providerHealthMap: Live provider-keyed health map.
+ *   modelRouteHealthMap: Live composite-route-keyed health map.
+ *   now: Wall-clock ms.
+ *
+ * Returns:
+ *   `null` when any visible route is routable. Otherwise a
+ *   `{state, until, scope}` record describing why the primary visible
+ *   route is blocked (provider-scope preferred, route-scope when the
+ *   provider itself is fine but the route-level penalty is the only
+ *   block).
  */
 export function computeRegistryEntryHealthReport(
   modelRegistryEntry: ModelRegistryEntry,
@@ -1355,6 +1445,17 @@ export function computeRegistryEntryHealthReport(
   const visibleRoutes = filterVisibleProviderRoutes(modelRegistryEntry.provider_order);
   const primaryRoute = visibleRoutes[0] ?? null;
   if (!primaryRoute) return null;
+
+  // M61: if any visible route (including the primary) is currently
+  // routable, the entry is healthy — the router will transparently use
+  // it regardless of whether the primary has a key_missing, transient
+  // quota, or route-level penalty. Only report a blocked state when no
+  // route is routable. See the function docstring for the post-M58
+  // bug this prevents.
+  if (findFirstHealthyRouteInEntry(modelRegistryEntry, providerHealthMap, modelRouteHealthMap, now)) {
+    return null;
+  }
+
   const providerHealth = providerHealthMap.get(primaryRoute.provider);
   if (providerHealth && providerHealth.until > now) {
     return {

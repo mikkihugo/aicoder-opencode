@@ -12,6 +12,7 @@ import {
   buildModelNotFoundRouteHealth,
   classifyProviderApiError,
   isFallbackBlocked,
+  findFirstHealthyRouteInEntry,
   findFirstHealthyVisibleRoute,
   findPreferredHealthyRoute,
   isAgentVisibleHealthState,
@@ -1398,6 +1399,236 @@ test("computeRegistryEntryHealthReport_whenLongcatEntryIsUnprefixed_detectsRoute
   assert.ok(report);
   assert.equal(report.state, "model_not_found");
   assert.equal(report.scope, "route");
+});
+
+test("findFirstHealthyRouteInEntry_whenNoVisibleRoutes_returnsNull", () => {
+  // Entry with only hidden paid routes — filterVisibleProviderRoutes
+  // removes them all, so the helper has nothing to scan.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "hidden-only",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "xai", model: "xai/grok-4", priority: 1 },
+      { provider: "cerebras", model: "cerebras/llama4", priority: 2 },
+    ],
+  );
+  assert.equal(
+    findFirstHealthyRouteInEntry(entry, new Map(), new Map(), now),
+    null,
+  );
+});
+
+test("findFirstHealthyRouteInEntry_whenPrimaryHealthy_returnsPrimary", () => {
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+    ],
+  );
+  const route = findFirstHealthyRouteInEntry(entry, new Map(), new Map(), now);
+  assert.ok(route);
+  assert.equal(route.provider, "opencode");
+});
+
+test("findFirstHealthyRouteInEntry_whenPrimaryBlockedButSiblingHealthy_returnsSibling", () => {
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+    ],
+  );
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+  ]);
+  const route = findFirstHealthyRouteInEntry(
+    entry,
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+  assert.ok(route);
+  assert.equal(route.provider, "iflowcn");
+});
+
+test("findFirstHealthyRouteInEntry_whenEveryVisibleRouteBlocked_returnsNull", () => {
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+    ],
+  );
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+    [
+      "iflowcn",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  assert.equal(
+    findFirstHealthyRouteInEntry(entry, providerHealthMap, new Map(), now),
+    null,
+  );
+});
+
+test("findFirstHealthyRouteInEntry_whenPrimaryProviderHealthyButRouteLevelBlocked_returnsSibling", () => {
+  // Route-level penalty (model_not_found, zero-token-quota, timeout)
+  // must skip past the primary even though the primary's PROVIDER is
+  // healthy. Regression shape for the M29/M30 class at this helper.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+    ],
+  );
+  const modelRouteHealthMap = new Map([
+    [
+      "opencode/glm-5.1-free",
+      { state: "model_not_found" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  const route = findFirstHealthyRouteInEntry(
+    entry,
+    new Map(),
+    modelRouteHealthMap,
+    now,
+  );
+  assert.ok(route);
+  assert.equal(route.provider, "iflowcn");
+});
+
+test("computeRegistryEntryHealthReport_whenPrimaryKeyMissingButSiblingHealthy_returnsNull", () => {
+  // Headline integration pin for M61. Post-M58 shape: a curated entry
+  // whose primary visible route lives on an uncredentialed provider
+  // (opencode in this test — freshly-booted plugin with no oauth) and
+  // whose secondary visible route lives on a credentialed provider
+  // (iflowcn). The router would transparently use iflowcn. Pre-M61,
+  // the report returned `{state: "key_missing", until: "never", scope:
+  // "provider"}` and any agent calling `list_curated_models` saw the
+  // entry as permanently blocked. Post-M61, return null — the entry
+  // is routable, there is nothing to report.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+    ],
+  );
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+  ]);
+  const report = computeRegistryEntryHealthReport(
+    entry,
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+  assert.equal(
+    report,
+    null,
+    "entry with a healthy visible sibling must not be reported as blocked",
+  );
+});
+
+test("computeRegistryEntryHealthReport_whenEveryVisibleRouteKeyMissing_reportsProviderScope", () => {
+  // Sibling pin for M61. All visible routes' providers are key_missing —
+  // the entry is genuinely unusable, and the report must surface that
+  // so the agent understands WHY it can't be routed to. Prevents the
+  // fix from regressing into "always return null when any key_missing
+  // is present on the primary".
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+    ],
+  );
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+    [
+      "iflowcn",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+  ]);
+  const report = computeRegistryEntryHealthReport(
+    entry,
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+  assert.ok(report);
+  assert.equal(report.state, "key_missing");
+  assert.equal(report.until, "never");
+  assert.equal(report.scope, "provider");
+});
+
+test("computeRegistryEntryHealthReport_whenPrimaryTransientQuotaButSiblingHealthy_returnsNull", () => {
+  // M61 behavior change: transient penalties on the primary ALSO stop
+  // being reported when a healthy sibling exists. The rationale is the
+  // same as the key_missing case — the router is actually going to
+  // use the sibling, so the entry is functionally healthy. An agent
+  // reading `list_curated_models` cares about "can I route to this"
+  // not "which specific route is alive right now". Prevents a subtle
+  // regression where the M61 fix was narrowed to only filter
+  // key_missing and transient penalties continued to over-report.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+    ],
+  );
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  const report = computeRegistryEntryHealthReport(
+    entry,
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+  assert.equal(report, null);
 });
 
 test("selectBestModelForRoleAndTask_whenLongTaskPromptContainsBestForToken_keepsMatchingCandidate", () => {
