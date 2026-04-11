@@ -792,6 +792,122 @@ export function recordProviderHealthPenalty(
 }
 
 /**
+ * Look up the existing route-health entry, build the updated entry via
+ * `buildRouteHealthEntry` (which enforces the M43 preserve-longer merge
+ * invariant), and write it through `recordRouteHealthPenalty` — as one
+ * atomic write-ritual.
+ *
+ * ## Drift shape this closes
+ *
+ * Two hooks in the plugin (`session.error` zero-token-quota classifier
+ * and `chat.params` early-timeout branch) inlined the exact same
+ * three-step sequence by hand:
+ *
+ *     const { routeKey, health } = buildRouteHealthEntry(
+ *       providerID,
+ *       model.id,
+ *       <state>,
+ *       <durationMs>,
+ *       lookupRouteHealthByIdentifiers(
+ *         modelRouteHealthMap, providerID, model.id,
+ *       ),
+ *       Date.now(),
+ *     );
+ *     recordRouteHealthPenalty(
+ *       modelRouteHealthMap,
+ *       providerHealthMap,
+ *       routeKey,
+ *       health,
+ *       persistProviderHealth,
+ *     );
+ *
+ * Every future route-level writer that wants to quarantine a route must
+ * perform all three steps — look up the existing entry (so the M43
+ * preserve-longer merge has its input), build the new entry (so the
+ * merge fires), and write through `recordRouteHealthPenalty` (so the
+ * M68 durability pair fires). Omitting any of the three produces a
+ * subtle bug:
+ *
+ *   - Skipping the lookup → the merge runs with `undefined` as
+ *     `existing`, so a fresh short penalty silently overrides an active
+ *     longer one (the exact M43 drift shape at the route layer).
+ *   - Skipping the build → no merge, the caller writes a raw entry that
+ *     may shrink an active penalty.
+ *   - Skipping the record wrapper → the M68 persist pair is broken, the
+ *     penalty lives in memory but vanishes on plugin reload.
+ *
+ * A third future writer (new classifier, retry-count-based escalation,
+ * shim-level override) copy-pasting the pattern inherits all three
+ * bug classes unless the ritual is a single named call.
+ *
+ * ## Why a wrapper, not a shared inline snippet
+ *
+ * The three steps have no independent semantic meaning at the call site
+ * — they always fire together, in order, with the same arguments
+ * threaded through. The call-site arity collapses from ~11 lines to one
+ * invocation with seven arguments (the same seven the inline version
+ * already threads). That is a pure readability-and-drift-safety win,
+ * not an abstraction cost.
+ *
+ * ## Not for `buildModelNotFoundRouteHealth`
+ *
+ * The `session.error` model-not-found branch uses a different builder
+ * (`buildModelNotFoundRouteHealth`) with a hard-coded 6h duration and no
+ * state parameter. That branch stays inline for now — adding it here
+ * would require either a union-typed parameter or an overload, both of
+ * which blur the state+duration contract the wrapper enforces. The
+ * model-not-found path is its own small ritual and keeps its own
+ * inline shape.
+ *
+ * Args:
+ *   modelRouteHealthMap: Live route-level health map.
+ *   providerHealthMap: Live provider-level health map (threaded to
+ *     `recordRouteHealthPenalty` so the atomic-snapshot shape is
+ *     preserved — a route write also re-serializes pending provider
+ *     entries).
+ *   providerID: Provider identifier.
+ *   modelID: Model identifier.
+ *   state: Penalty classification (any `ProviderHealthState` except
+ *     `model_not_found`, which has its own builder).
+ *   durationMs: Penalty window in milliseconds.
+ *   now: Wall-clock timestamp; injected so tests can pin arithmetic
+ *     without stubbing `Date.now`.
+ *   persistFn: Injected persister (production always passes
+ *     `persistProviderHealth`; tests pass a spy).
+ */
+export function recordRouteHealthByIdentifiers(
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  providerHealthMap: Map<string, ProviderHealth>,
+  providerID: string,
+  modelID: string,
+  state: ProviderHealthState,
+  durationMs: number,
+  now: number,
+  persistFn: PersistProviderHealthFn,
+): void {
+  const existing = lookupRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerID,
+    modelID,
+  );
+  const { routeKey, health } = buildRouteHealthEntry(
+    providerID,
+    modelID,
+    state,
+    durationMs,
+    existing,
+    now,
+  );
+  recordRouteHealthPenalty(
+    modelRouteHealthMap,
+    providerHealthMap,
+    routeKey,
+    health,
+    persistFn,
+  );
+}
+
+/**
  * Return `true` when a provider+model pair must be excluded from fallback
  * routing. Exported so the regex semantics can be unit-tested directly
  * without constructing the plugin closure.
@@ -3699,19 +3815,14 @@ export const ModelRegistryPlugin: Plugin = async () => {
         if (isZeroTokenQuotaSignal(tokens as Record<string, unknown>)) {
           if (!providerID || !model) return;
 
-          const { routeKey, health } = buildRouteHealthEntry(
+          recordRouteHealthByIdentifiers(
+            modelRouteHealthMap,
+            providerHealthMap,
             providerID,
             model.id,
             "quota",
             QUOTA_BACKOFF_DURATION_MS,
-            lookupRouteHealthByIdentifiers(modelRouteHealthMap, providerID, model.id),
             Date.now(),
-          );
-          recordRouteHealthPenalty(
-            modelRouteHealthMap,
-            providerHealthMap,
-            routeKey,
-            health,
             persistProviderHealth,
           );
         }
@@ -3749,19 +3860,14 @@ export const ModelRegistryPlugin: Plugin = async () => {
           const providerID = input.provider.info.id;
           const model = input.model;
           if (providerID && model) {
-            const { routeKey, health } = buildRouteHealthEntry(
+            recordRouteHealthByIdentifiers(
+              modelRouteHealthMap,
+              providerHealthMap,
               providerID,
               model.id,
               "timeout",
               QUOTA_BACKOFF_DURATION_MS,
-              lookupRouteHealthByIdentifiers(modelRouteHealthMap, providerID, model.id),
               Date.now(),
-            );
-            recordRouteHealthPenalty(
-              modelRouteHealthMap,
-              providerHealthMap,
-              routeKey,
-              health,
               persistProviderHealth,
             );
           }

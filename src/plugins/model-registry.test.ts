@@ -41,6 +41,7 @@ import {
   lookupRouteHealthByIdentifiers,
   isAgentVisibleLivePenalty,
   recordProviderHealthPenalty,
+  recordRouteHealthByIdentifiers,
   recordRouteHealthPenalty,
   computeProviderHealthUpdate,
   computeRegistryEntryHealthReport,
@@ -1630,6 +1631,104 @@ test("recordProviderHealthPenalty_whenMapHasExistingEntry_overwritesItBeforePers
   // By the time the persister fires, the overwrite is already visible.
   assert.deepEqual(snapshotAtPersist, newHealth);
   assert.deepEqual(providerHealthMap.get("openrouter"), newHealth);
+});
+
+test("recordRouteHealthByIdentifiers_whenCalled_writesEntryUnderCompositeRouteKey", () => {
+  // M75: the wrapper must thread (providerID, modelID) through
+  // `buildRouteHealthEntry` so the write lands under the composite route
+  // key. A future refactor that forgot to pass the builder's result into
+  // `recordRouteHealthPenalty` would produce a no-op write that this pin
+  // catches.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+
+  recordRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "iflowcn",
+    "kimi-k2-0905",
+    "quota",
+    60 * 60 * 1000,
+    10_000,
+    () => {},
+  );
+
+  const entry = modelRouteHealthMap.get("iflowcn/kimi-k2-0905");
+  assert.ok(entry, "entry must be written under composite route key");
+  assert.equal(entry!.state, "quota");
+  assert.equal(entry!.until, 10_000 + 60 * 60 * 1000);
+  assert.equal(entry!.retryCount, 1);
+});
+
+test("recordRouteHealthByIdentifiers_whenExistingEntryHasLongerUntil_preservesM43MergeInvariant", () => {
+  // M75 + M43: the wrapper must feed `buildRouteHealthEntry` the result
+  // of `lookupRouteHealthByIdentifiers` so the preserve-longer merge
+  // fires. A refactor that inlined the build but skipped the lookup
+  // (passing `undefined` as `existing`) would silently shrink an active
+  // longer penalty — the exact M43 bug at the route layer. This pin
+  // simulates a pre-existing `model_not_found` entry (6h) and asserts a
+  // shorter quota (1h) incoming penalty loses the merge.
+  const existingLongerUntil = 5_000 + 6 * 60 * 60 * 1000;
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    [
+      "openrouter/xiaomi/mimo-v2-pro",
+      { state: "model_not_found", until: existingLongerUntil, retryCount: 1 },
+    ],
+  ]);
+  const providerHealthMap = new Map<string, ProviderHealth>();
+
+  recordRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "openrouter",
+    "xiaomi/mimo-v2-pro",
+    "quota",
+    60 * 60 * 1000,
+    5_000,
+    () => {},
+  );
+
+  const entry = modelRouteHealthMap.get("openrouter/xiaomi/mimo-v2-pro");
+  assert.ok(entry);
+  // Longer penalty dominates: state and until stay at the pre-existing
+  // `model_not_found` values, retryCount increments so repeat failures
+  // remain observable.
+  assert.equal(entry!.state, "model_not_found");
+  assert.equal(entry!.until, existingLongerUntil);
+  assert.equal(entry!.retryCount, 2);
+});
+
+test("recordRouteHealthByIdentifiers_whenCalled_invokesPersistFnThroughM68RecordWrapper", () => {
+  // M75 + M68: the wrapper must delegate the write-and-persist pair to
+  // `recordRouteHealthPenalty`, not a raw `map.set`. A refactor that
+  // inlined the set but skipped the M68 helper would break the
+  // durability-pair invariant — the penalty would live in memory but
+  // vanish on plugin reload. A spy asserts persistFn fires exactly once
+  // with reference equality to both live maps.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  let persistCalls = 0;
+  let observedProviderMap: Map<string, ProviderHealth> | null = null;
+  let observedRouteMap: Map<string, ModelRouteHealth> | null = null;
+
+  recordRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "ollama-cloud",
+    "glm-5",
+    "timeout",
+    60 * 60 * 1000,
+    0,
+    (providerMap, routeMap) => {
+      persistCalls += 1;
+      observedProviderMap = providerMap;
+      observedRouteMap = routeMap;
+    },
+  );
+
+  assert.equal(persistCalls, 1);
+  assert.equal(observedProviderMap, providerHealthMap);
+  assert.equal(observedRouteMap, modelRouteHealthMap);
 });
 
 test("lookupRouteHealthByIdentifiers_whenEntryStoredUnderCompositeKey_returnsEntry", () => {
