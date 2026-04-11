@@ -2567,6 +2567,59 @@ export function buildModelNotFoundRouteHealth(
  * Returns:
  *   `true` when all numeric counters (top-level and one-level nested)
  *   are zero. `false` otherwise.
+ *
+ * ## Drift surfaces (M109 PDD)
+ *
+ * The nine pre-existing pins cover the primary-axis short-circuit, the
+ * top-level sibling counter check (reasoning), nested cache.read /
+ * cache.write counters, the nested-empty-object-is-true path, and a
+ * top-level non-numeric string field. Three surfaces have zero direct
+ * coverage and each has a plausible regression:
+ *
+ * 1. **Nested `value && typeof === "object"` guards against `null`.**
+ *    The inner walk iterates `Object.values(tokens)` and descends into
+ *    any value that is both truthy AND `typeof === "object"`. The
+ *    truthy guard is load-bearing: `typeof null === "object"` in
+ *    JavaScript, so without the `value &&` short-circuit a `cache:
+ *    null` token field would invoke `Object.values(null)` and throw
+ *    `TypeError: Cannot convert undefined or null to object` from
+ *    inside the `assistant.message.completed` hook — which the plugin
+ *    catches via `logPluginHookFailure` and swallows, but the effect
+ *    is that the quota classifier silently no-ops on any event whose
+ *    `tokens` field contains a null nested record. A refactor that
+ *    "simplified" the guard to `typeof value === "object"` (dropping
+ *    the `value &&` half because "typeof already handles objects")
+ *    would flip every null-containing token payload from a
+ *    well-defined `true` return to a silent exception. The nine
+ *    existing pins all use concrete objects or omit the nested field;
+ *    none exercises the null-typeof-object foot-gun.
+ *
+ * 2. **NaN top-level counter is treated as non-zero → `false`.** The
+ *    top-level number check is `if (value !== 0) return false;` —
+ *    `NaN !== 0` evaluates to `true` (NaN is not equal to anything,
+ *    including itself), so a NaN reasoning counter hits the `return
+ *    false` path. The current semantic is "any ambiguous top-level
+ *    number is conservatively treated as real activity and the
+ *    quota penalty is NOT applied." A defensive refactor that added
+ *    `Number.isFinite(value) && value !== 0` to "skip NaN because it
+ *    represents a missing counter" would flip the behavior: NaN
+ *    fields would be ignored, and a session whose only non-zero
+ *    counter was NaN would be classified as silent quota exhaustion
+ *    and quarantine a healthy route. None of the existing pins uses
+ *    NaN at any position — the `!== 0` semantic over NaN is unpinned.
+ *
+ * 3. **Nested non-numeric field is ignored, not rejected.** The
+ *    nested walker checks `if (typeof nestedValue === "number" &&
+ *    nestedValue !== 0) return false;` — anything that is NOT a number
+ *    (string, boolean, nested object, null) is skipped without
+ *    affecting the return value. Pin #8 (top-level string) exercises
+ *    the analogous top-level branch, but the nested branch's
+ *    non-number skip is untested: a `cache: { backend: "redis" }`
+ *    field must NOT cause the classifier to think the cache had
+ *    activity just because the field is truthy. A future refactor
+ *    that "tightened" the nested walker to reject any unexpected type
+ *    as a safety measure would silently flip every debug/metadata
+ *    field in nested token records from inert to quota-penalizing.
  */
 export function isZeroTokenQuotaSignal(tokens: Record<string, unknown>): boolean {
   if (tokens.input !== 0 || tokens.output !== 0) {

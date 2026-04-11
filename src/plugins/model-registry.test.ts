@@ -5574,6 +5574,50 @@ test("isZeroTokenQuotaSignal_whenTopLevelSiblingCounterIsNonZero_returnsFalse", 
   );
 });
 
+test("isZeroTokenQuotaSignal_whenNestedFieldIsNull_returnsTrueWithoutThrowing", () => {
+  // M109 PDD surface 1: the nested walk's `value && typeof === "object"`
+  // guards against `null` because `typeof null === "object"` in JavaScript.
+  // A refactor to bare `typeof value === "object"` would invoke
+  // `Object.values(null)` and throw from inside the hook handler — the
+  // plugin's logPluginHookFailure would swallow the throw but the
+  // classifier would silently no-op on every null-containing payload.
+  assert.equal(
+    isZeroTokenQuotaSignal({ input: 0, output: 0, cache: null }),
+    true,
+  );
+});
+
+test("isZeroTokenQuotaSignal_whenTopLevelCounterIsNaN_returnsFalse", () => {
+  // M109 PDD surface 2: the top-level number check is `if (value !== 0)
+  // return false;` and NaN !== 0 evaluates to true, so NaN is
+  // conservatively treated as real activity and the quota signal is
+  // suppressed. A defensive `Number.isFinite(value) && value !== 0`
+  // refactor would skip NaN, return true, and quarantine a healthy
+  // route on any session whose counter was ambiguously NaN.
+  assert.equal(
+    isZeroTokenQuotaSignal({ input: 0, output: 0, reasoning: Number.NaN }),
+    false,
+  );
+});
+
+test("isZeroTokenQuotaSignal_whenNestedFieldIsNonNumericString_returnsTrue", () => {
+  // M109 PDD surface 3: the nested walker skips non-number values
+  // (string, boolean, nested object, null) without affecting the
+  // return. A debug / metadata field like `cache: { backend: "redis" }`
+  // must NOT cause the classifier to think the cache had activity. A
+  // tighter walker that rejected unexpected types as a safety measure
+  // would silently flip metadata-bearing payloads from inert to
+  // quota-penalizing.
+  assert.equal(
+    isZeroTokenQuotaSignal({
+      input: 0,
+      output: 0,
+      cache: { backend: "redis", read: 0, write: 0 },
+    }),
+    true,
+  );
+});
+
 // M53: `parseAgentFrontmatter` + `stripYamlScalarQuotes` — the agent
 // frontmatter parser historically kept literal YAML quote chars in scalar
 // values (`model:`, `routing_role:`, `routing_complexity:`), so any agent
