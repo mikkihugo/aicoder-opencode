@@ -303,6 +303,62 @@ export function formatHealthExpiry(until: number): string {
  *   `{ state, until, retryCount }` with `until` normalized to `number`
  *   (`"never"` → `Number.POSITIVE_INFINITY`), or `null` on any validation
  *   failure or expiry.
+ *
+ * ## Drift surfaces (M108 PDD)
+ *
+ * The eight pre-existing pins cover the happy path, the "never" literal,
+ * null entry, unknown state, corrupt-string until, NaN until, past
+ * until, and missing retryCount — good breadth, but the three input-
+ * validation boundaries below have zero direct coverage and each has a
+ * plausible regression:
+ *
+ * 1. **`until === now` exact boundary — `<= now` not `< now`.** The
+ *    expiry check is `if (until <= now) return null;` — an entry whose
+ *    until lands on the CURRENT wall-clock ms is treated as already-
+ *    expired, not "still live for this tick." This matters because
+ *    `loadPersistedProviderHealth` calls this helper with a single
+ *    `now` shared across every entry, and on a fast-enough machine a
+ *    penalty written in the same ms as the next plugin-boot read-back
+ *    would land on the boundary. A drift to `if (until < now)` would
+ *    keep the entry alive, re-apply a stale penalty across plugin
+ *    restarts whose semantics were "already expired at the time of
+ *    persist," and feed that ghost penalty to callers who rely on
+ *    `findLive*Penalty`'s `<= now` convention (M103). The existing
+ *    "past" pin uses `now - 1000` — strictly less — so both `<` and
+ *    `<=` behave identically for it and neither path is actually pinned.
+ *
+ * 2. **Negative retryCount rejected via `|| retryCount < 0`.** The
+ *    retryCount guard is a three-clause disjunction: `typeof !==
+ *    "number"`, `!Number.isFinite`, and `< 0`. The missing-retryCount
+ *    pin exercises the `typeof` clause (undefined fails the typeof
+ *    check). Nothing exercises the sign clause. A negative retryCount
+ *    in the on-disk state file — plausibly produced by a hand-edit, a
+ *    future refactor that introduces signed delta accounting, or a
+ *    corrupted write that flips a sign bit — would be silently
+ *    accepted if someone "simplified" the guard to drop the `< 0`
+ *    clause as "defensive paranoia." Downstream `retryCount++` logic
+ *    in `computeProviderHealthUpdate` and `buildRouteHealthEntry`
+ *    assumes non-negative; a negative seed would quietly shift the
+ *    entire retry escalation ladder and could make `retryCount > 0`
+ *    display checks in `computeRegistryEntryHealthReport` lie about
+ *    whether a penalty is "fresh" or "repeated."
+ *
+ * 3. **Non-finite retryCount rejected via `!Number.isFinite`.** The
+ *    second guard clause rejects `Infinity` / `-Infinity` / `NaN` for
+ *    retryCount. Pin #8 (missing) fails on `typeof !== "number"` and
+ *    never touches this clause. Pin #6 (NaN until) is the UNTIL
+ *    finite-check, a completely separate branch — it does not
+ *    transitively exercise the retryCount finite-check. A hand-edited
+ *    or corrupt persisted file with `retryCount: Infinity` (or the
+ *    JSON `"retryCount": null` which V8 coerces to 0 under sloppy
+ *    parsers but a strict parser leaves as null → typeof object →
+ *    caught by the `typeof` clause; Infinity specifically survives
+ *    the typeof check and needs its own guard) would pass a
+ *    `typeof === "number"` check, fail only the `Number.isFinite`
+ *    clause, and silently propagate Infinity retryCounts if that
+ *    clause were ever dropped. `computeProviderHealthUpdate` then
+ *    computes `Infinity + 1 === Infinity` and the retry escalation
+ *    ladder is broken forever on that entry.
  */
 export function parsePersistedHealthEntry(
   rawEntry: unknown,

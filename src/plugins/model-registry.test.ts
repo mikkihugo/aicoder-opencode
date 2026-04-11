@@ -4300,6 +4300,53 @@ test("parsePersistedHealthEntry_whenUntilIsAlreadyInThePast_returnsNullAsExpired
   assert.equal(parsed, null);
 });
 
+test("parsePersistedHealthEntry_whenUntilEqualsNowExactly_returnsNullAtBoundary", () => {
+  // M108 PDD surface 1: the expiry check uses `until <= now` so an
+  // entry whose `until` lands on the exact wall-clock ms is treated as
+  // already-expired. A drift to `until < now` would keep the entry
+  // alive on the boundary and replay a stale penalty across plugin
+  // restarts whose semantics were "already expired at persist time."
+  const now = 1_700_000_000_000;
+  const entry = { state: "quota", until: now, retryCount: 1 };
+
+  const parsed = parsePersistedHealthEntry(entry, now);
+
+  assert.equal(parsed, null);
+});
+
+test("parsePersistedHealthEntry_whenRetryCountIsNegative_returnsNullRejectingSignedRecord", () => {
+  // M108 PDD surface 2: the retryCount guard's `|| retryCount < 0`
+  // clause rejects negative values. The missing-retryCount pin only
+  // exercises the `typeof !== "number"` clause; nothing else guards
+  // against a hand-edited or corrupt on-disk entry with a negative
+  // retryCount, which would quietly shift every downstream escalation
+  // ladder if the sign clause were dropped as "defensive paranoia."
+  const entry = { state: "quota", until: Date.now() + 60_000, retryCount: -1 };
+
+  const parsed = parsePersistedHealthEntry(entry, Date.now());
+
+  assert.equal(parsed, null);
+});
+
+test("parsePersistedHealthEntry_whenRetryCountIsInfinity_returnsNullRejectingNonFiniteCount", () => {
+  // M108 PDD surface 3: the retryCount guard's `|| !Number.isFinite`
+  // clause rejects Infinity / -Infinity / NaN. None of the existing
+  // pins touches this clause — pin #8 fails on `typeof` and pin #6
+  // tests the UNTIL finite-check on a different branch. A silent
+  // Infinity retryCount would make `computeProviderHealthUpdate`
+  // compute `Infinity + 1 === Infinity` and break the escalation
+  // ladder forever on that entry.
+  const entry = {
+    state: "quota",
+    until: Date.now() + 60_000,
+    retryCount: Number.POSITIVE_INFINITY,
+  };
+
+  const parsed = parsePersistedHealthEntry(entry, Date.now());
+
+  assert.equal(parsed, null);
+});
+
 test("parsePersistedHealthEntry_whenRetryCountIsMissing_returnsNull", () => {
   // Disk schema drift: old plugin version that didn't persist
   // retryCount. Reject rather than synthesize a default — the test
