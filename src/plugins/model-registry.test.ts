@@ -15,6 +15,7 @@ import {
   findCuratedFallbackRoute,
   inferTaskComplexity,
   recommendTaskModelRoute,
+  selectBestModelForRoleAndTask,
 } from "./model-registry.js";
 
 function buildModelRegistryEntry(
@@ -967,4 +968,71 @@ test("computeRegistryEntryHealthReport_whenLongcatEntryIsUnprefixed_detectsRoute
   assert.ok(report);
   assert.equal(report.state, "model_not_found");
   assert.equal(report.scope, "route");
+});
+
+test("selectBestModelForRoleAndTask_whenCandidateHasDeadVisibleRoutes_ranksLowerThanCandidateWithLiveRoutes", () => {
+  // Regression (M31): ranking previously only counted provider-level
+  // unhealthy routes. Two candidates at the same capability tier and
+  // billing mode — one with its single visible route dead at the route
+  // level (model_not_found) and one with its single visible route fully
+  // live — were ranked equal, and sort stability picked the first. With
+  // route health in the counter, the all-live candidate wins correctly.
+  const now = Date.now();
+  const deadCandidate: ModelRegistryEntry = {
+    id: "dead-route-strong",
+    enabled: true,
+    description: "dead-route-strong",
+    capability_tier: "strong",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: ["coding"],
+    not_for: [],
+    default_roles: ["implementation_worker"],
+    provider_order: [
+      { provider: "iflowcn", model: "iflowcn/dead-strong", priority: 1 },
+    ],
+    notes: [],
+  };
+  const liveCandidate: ModelRegistryEntry = {
+    id: "live-route-strong",
+    enabled: true,
+    description: "live-route-strong",
+    capability_tier: "strong",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: ["coding"],
+    not_for: [],
+    default_roles: ["implementation_worker"],
+    provider_order: [
+      { provider: "ollama-cloud", model: "ollama-cloud/live-strong", priority: 1 },
+    ],
+    notes: [],
+  };
+  const modelRouteHealthMap = new Map([
+    [
+      "iflowcn/dead-strong",
+      { state: "model_not_found" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  // Deliberately pass deadCandidate first so sort stability would favor
+  // it under the old provider-only counter.
+  const best = selectBestModelForRoleAndTask(
+    [deadCandidate, liveCandidate],
+    new Map(),
+    modelRouteHealthMap,
+    now,
+    "implementation_worker",
+    null,
+    "strong",
+  );
+
+  assert.ok(best);
+  assert.equal(best.id, "live-route-strong");
 });

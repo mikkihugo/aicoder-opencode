@@ -172,6 +172,17 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M31: `selectBestModelForRoleAndTask` ranking counter ignored `modelRouteHealthMap` — route-level-dead candidates could win ties against fully-live candidates `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: the ranking comparator in `selectBestModelForRoleAndTask` computed an "unhealthy visible route" count per candidate using ONLY `isProviderHealthy(providerHealthMap, route.provider, now)`. The third parameter `_modelRouteHealthMap` was declared with a leading underscore to silence the unused-param warning — an explicit TODO marker. Two candidates at the same capability tier — one whose visible routes were all route-level dead (`model_not_found`, zero-token quota, hang `timeout`) but provider-healthy, and one with fully live visible routes — counted equal, and sort stability then picked whichever came first in the input array (which is registry declaration order, not health order).
+- **Reachability**: production-reachable. The downstream caller (`recommendTaskModelRoute`'s best branch at line ~948) walks the winning entry's visible routes searching for a health one and falls through to the last-resort scan if none pass — so an actual inference failure was unlikely, but the reasoning string was wrong ("Best registry model for role") and the last-resort scan bypasses the intent of the best branch, which is to honor billing preference + capability tier. Also a silent correctness defect in the exported helper used in tests and potentially in future callers.
+- **Fix**: un-underscore the parameter (interface is now honored), add an `isRouteUnhealthy` closure that unions provider-level and route-level health via `composeRouteKey(route)` (the M30 helper), and count routes against that closure. No change to tier/billing ordering.
+- **Test**: `selectBestModelForRoleAndTask_whenCandidateHasDeadVisibleRoutes_ranksLowerThanCandidateWithLiveRoutes` — two candidates at tier `strong` / billing `free`, deadCandidate has `iflowcn/dead-strong` with a `model_not_found` penalty and is passed FIRST in the input array (so sort stability favored it under the old counter), liveCandidate has `ollama-cloud/live-strong` fully healthy. Asserts `best.id === "live-route-strong"`.
+- **Verification**: verified-on-HEAD by temporarily stubbing the counter back to provider-only + `void modelRouteHealthMap`; exactly 1 test failed (the new one), restored fix, 142/142 green (141 + 1 new). `npm run build` clean.
+- **Files**: `src/plugins/model-registry.ts` (parameter un-underscored, comparator closure), `src/plugins/model-registry.test.ts` (import + 1 new test).
+- **Rebuilt `dist/plugins/model-registry.js`** so overlay shims pick up the fix.
+
 ### M30: `modelRouteHealthMap` lookups used raw `providerRoute.model` but writes used composite `${provider}/${model.id}` — longcat routes silently ignored all route-level penalties `✅ COMPLETED`
 
 Completion Notes (2026-04-11):

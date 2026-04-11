@@ -1037,7 +1037,7 @@ async function recommendTaskModelRoute(
 export function selectBestModelForRoleAndTask(
   modelRegistryEntries: ModelRegistryEntry[],
   providerHealthMap: Map<string, ProviderHealth>,
-  _modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
   now: number,
   role: string | null,
   task: string | null,
@@ -1072,16 +1072,26 @@ export function selectBestModelForRoleAndTask(
     const bTierIdx = tierOrder.indexOf(b.capability_tier as typeof tierOrder[number]);
     if (aTierIdx !== bTierIdx) return aTierIdx - bTierIdx;
 
-    // Count unhealthy visible routes for each model
+    // Count unhealthy visible routes for each model. A route is unhealthy
+    // if EITHER its provider is penalized OR its composite route key has
+    // a route-level penalty (model_not_found / zero-token quota / hang
+    // timeout). Previously this only checked provider health, so a
+    // candidate whose only visible routes were all route-level-dead ranked
+    // as "0 unhealthy" and could win over a candidate with fully-live
+    // visible routes. Reachable via any session that hits a bad model id
+    // on an otherwise-healthy provider.
+    const isRouteUnhealthy = (route: { provider: string; model: string }): boolean => {
+      if (!isProviderHealthy(providerHealthMap, route.provider, now)) return true;
+      const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
+      if (routeHealth && routeHealth.until > now) return true;
+      return false;
+    };
+
     const aVisibleRoutes = filterVisibleProviderRoutes(a.provider_order);
     const bVisibleRoutes = filterVisibleProviderRoutes(b.provider_order);
 
-    const aUnhealthyCount = aVisibleRoutes.filter(
-      (route) => !isProviderHealthy(providerHealthMap, route.provider, now),
-    ).length;
-    const bUnhealthyCount = bVisibleRoutes.filter(
-      (route) => !isProviderHealthy(providerHealthMap, route.provider, now),
-    ).length;
+    const aUnhealthyCount = aVisibleRoutes.filter(isRouteUnhealthy).length;
+    const bUnhealthyCount = bVisibleRoutes.filter(isRouteUnhealthy).length;
 
     // Prefer models with fewer unhealthy visible routes
     if (aUnhealthyCount !== bUnhealthyCount) return aUnhealthyCount - bUnhealthyCount;
