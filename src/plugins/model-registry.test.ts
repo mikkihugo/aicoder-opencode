@@ -6312,3 +6312,152 @@ test("healthStateLabel_whenStateIsModelNotFound_labelIsThreeWordForm", () => {
 
   assert.equal(label, "MODEL NOT FOUND");
 });
+
+// M99 pin A — blockedProviderID early-filter: the caller passes the
+// provider whose blowup triggered the penalty section; the loop's
+// first filter clause (`providerRoute.provider === blockedProviderID`)
+// ensures that even if `isProviderHealthy` would return `true` for
+// that provider (empty providerHealthMap here), the blocked provider's
+// routes are still removed from candidacy. The entry has two visible
+// routes — iflowcn first, ollama-cloud second — and ZERO penalties in
+// either health map, so the ONLY filter that removes the first route
+// is the early blockedProviderID check. Asserts the second route's
+// composite model string is returned. A refactor that drops the
+// early-filter clause silently returns iflowcn/foo instead. Pin B's
+// brand-blocklist surface is orthogonal because neither iflowcn nor
+// ollama-cloud is in the proprietary-brand blocklist. Pin C's
+// sentinel surface is orthogonal because an allowed route exists so
+// the sentinel is never reached.
+test("findCuratedFallbackRoute_whenBlockedProviderHasHealthyRoute_returnsSiblingInstead", () => {
+  const entry: ModelRegistryEntry = {
+    id: "m99-a",
+    enabled: true,
+    description: "m99-a",
+    capability_tier: "standard",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: [],
+    not_for: [],
+    default_roles: ["implementation_worker"],
+    provider_order: [
+      { provider: "iflowcn", model: "iflowcn/qwen3-coder-plus", priority: 1 },
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5.1", priority: 2 },
+    ],
+    notes: [],
+  };
+
+  const fallback = findCuratedFallbackRoute(
+    entry,
+    "iflowcn",
+    new Map(),
+    new Map(),
+    Date.now(),
+  );
+
+  assert.equal(fallback, "ollama-cloud/glm-5.1");
+});
+
+// M99 pin B — `isFallbackBlocked` proprietary-brand blocklist: a
+// route like openrouter/anthropic/claude-3.5-sonnet:free is both
+// VISIBLE (ends in `:free`, so filterVisibleProviderRoutes keeps it)
+// AND brand-blocked (matches /claude/i), so the filterVisibleProviderRoutes
+// layer alone does NOT close this gap. A refactor that collapses or
+// drops the `isFallbackBlocked` clause silently lets the curated
+// fallback suggester recommend a proprietary claude route through the
+// openrouter `:free` backdoor, directly contradicting the user's
+// brand-policy layer. Asserts the second (ollama-cloud) route is
+// returned. Pin A's blockedProviderID surface is orthogonal because
+// blockedProviderID is `""` here. Pin C's sentinel surface is
+// orthogonal because an allowed route exists.
+test("findCuratedFallbackRoute_whenFirstVisibleRouteIsBrandBlocked_skipsToAllowedSibling", () => {
+  const entry: ModelRegistryEntry = {
+    id: "m99-b",
+    enabled: true,
+    description: "m99-b",
+    capability_tier: "strong",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: [],
+    not_for: [],
+    default_roles: ["implementation_worker"],
+    provider_order: [
+      {
+        provider: "openrouter",
+        model: "openrouter/anthropic/claude-3.5-sonnet:free",
+        priority: 1,
+      },
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5.1", priority: 2 },
+    ],
+    notes: [],
+  };
+
+  const fallback = findCuratedFallbackRoute(
+    entry,
+    "",
+    new Map(),
+    new Map(),
+    Date.now(),
+  );
+
+  assert.equal(fallback, "ollama-cloud/glm-5.1");
+});
+
+// M99 pin C — `NO_FALLBACK_MODEL_CONFIGURED_MESSAGE` sentinel return:
+// when every visible route is disqualified the helper returns the
+// literal sentinel `"no fallback configured"`, which the agent's
+// interpretation layer reads as "do not retry, escalate". A refactor
+// that changes the sentinel to `""` or `null` produces agent-visible
+// bullet lines like `- entry → ` with a trailing space, which the
+// agent may interpret as truncated system prompt and retry the
+// blowing-up route anyway. Entry has one visible route whose
+// composite key is in modelRouteHealthMap with a live penalty, so
+// `isRouteCurrentlyHealthy` returns false and the `find` yields
+// undefined. Pin A's blockedProviderID surface is orthogonal
+// (blockedProviderID `""` here). Pin B's brand-blocklist surface is
+// orthogonal (ollama-cloud is not brand-blocked — the route is
+// removed by route-level health, not by brand). Pin C is the sole
+// surface where changing the sentinel flips the assertion.
+test("findCuratedFallbackRoute_whenEveryRouteIsDisqualified_returnsNoFallbackSentinel", () => {
+  const entry: ModelRegistryEntry = {
+    id: "m99-c",
+    enabled: true,
+    description: "m99-c",
+    capability_tier: "standard",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: [],
+    not_for: [],
+    default_roles: ["implementation_worker"],
+    provider_order: [
+      { provider: "ollama-cloud", model: "ollama-cloud/dead-model", priority: 1 },
+    ],
+    notes: [],
+  };
+
+  const now = Date.now();
+  const modelRouteHealthMap = new Map([
+    [
+      "ollama-cloud/dead-model",
+      { state: "model_not_found" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  const fallback = findCuratedFallbackRoute(
+    entry,
+    "",
+    new Map(),
+    modelRouteHealthMap,
+    now,
+  );
+
+  assert.equal(fallback, "no fallback configured");
+});

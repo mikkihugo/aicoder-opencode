@@ -2852,6 +2852,110 @@ export function evaluateSessionHangForTimeoutPenalty(
   );
 }
 
+/**
+ * Resolve the first curated-and-currently-routable fallback route for a
+ * registry entry whose primary route has been knocked offline, used
+ * exclusively by `buildProviderHealthSystemPrompt` to populate the
+ * agent-visible "Curated fallbacks" bullet list in every provider-penalty
+ * and route-penalty section of the system prompt.
+ *
+ * ## Three independent drift surfaces
+ *
+ * Beyond the two surfaces already pinned by the existing regression tests
+ * (`_whenNextRouteIsHiddenPaidProvider_skipsToVisibleRoute` pins the
+ * `filterVisibleProviderRoutes` integration for hidden paid providers;
+ * `_whenRouteIsMarkedUnhealthyAtRouteLevel_skipsIt` pins the route-level
+ * health predicate via `isRouteCurrentlyHealthy`), three further drift
+ * surfaces live on this helper and have zero direct coverage:
+ *
+ *   1. **`blockedProviderID` early-filter.** The caller passes the ID of
+ *      the provider whose blowup triggered the penalty section — e.g.
+ *      `buildProviderHealthSystemPrompt` passes `providerID` when
+ *      rendering a provider-level penalty section. The loop's first
+ *      filter clause (`if (providerRoute.provider === blockedProviderID)
+ *      return false;`) ensures that even if `isProviderHealthy` would
+ *      return `true` for that provider (e.g. the penalty hasn't been
+ *      recorded in `providerHealthMap` yet because the caller is mid-flow
+ *      between detection and persistence, or because the caller
+ *      deliberately wants to force-skip a specific provider without
+ *      mutating the maps), the blocked provider's routes are still
+ *      removed from candidacy. A refactor that drops this clause
+ *      ("isProviderHealthy already handles this, the check is
+ *      redundant") silently regresses the call sites that rely on the
+ *      force-skip semantic: the "Curated fallback for X" line could
+ *      recommend the same provider that just blew up, directly
+ *      contradicting the penalty banner one line above it.
+ *
+ *   2. **`isFallbackBlocked` proprietary-brand blocklist.** The second
+ *      filter clause excludes any route whose provider OR model matches
+ *      the proprietary-brand blocklist (longcat, anthropic, openai, xai,
+ *      github-copilot provider IDs plus `/longcat/i`, `/claude/i`,
+ *      `/\bgpt-?\d/i`, `/\bchatgpt/i`, `/\bgrok-?\d/i` model patterns).
+ *      These are brands the user's curation policy forbids from EVER
+ *      being suggested as a silent fallback — the agent should be
+ *      routed to an open-weights alternative, not silently upgraded to a
+ *      proprietary model mid-session. Crucially, `filterVisibleProviderRoutes`
+ *      alone does NOT close this gap: a route like
+ *      `openrouter/anthropic/claude-3.5-sonnet:free` is both VISIBLE
+ *      (ends in `:free`) and BLOCKED (matches `/claude/i`), so dropping
+ *      the `isFallbackBlocked` clause silently lets the curated-fallback
+ *      suggester recommend a proprietary claude route through the
+ *      openrouter `:free` backdoor. A refactor that collapses the two
+ *      filters into one ("they both mean 'skip this route'") erases the
+ *      brand-policy layer entirely.
+ *
+ *   3. **`NO_FALLBACK_MODEL_CONFIGURED_MESSAGE` sentinel return.** When
+ *      every visible route is disqualified (all providers unhealthy,
+ *      all routes route-level-blocked, all fallback-blocked, or all
+ *      blockedProviderID-matched), the helper returns the literal
+ *      sentinel string `"no fallback configured"` rather than `null`,
+ *      empty string, or `undefined`. This string is directly
+ *      interpolated into the system-prompt bullet list as
+ *      `- ${entry.id} → ${fallback}`, and the agent is trained to read
+ *      `"no fallback configured"` as "do not retry, escalate to the
+ *      user or wait for the backoff window." A refactor that changes
+ *      the sentinel to `""` produces agent-visible lines like
+ *      `- mimo-v2-pro → ` with a trailing space and no target, which
+ *      the agent may interpret as a truncated render / system-prompt
+ *      corruption and retry the blowing-up route anyway. A refactor
+ *      that changes the sentinel to `null` crashes the template
+ *      literal into `"null"`, which is even worse. The sentinel string
+ *      is a contract with the agent's interpretation layer, not a
+ *      free-floating error code.
+ *
+ * ## Why a thin docstring rather than three new helpers
+ *
+ * The helper body is already seven lines of dense policy and breaking
+ * it into three sub-helpers (`isBlockedProvider` / `isBrandBlocked` /
+ * `renderNoFallbackSentinel`) would atomize logic that only ever
+ * appears together at this one call site. The three surfaces are
+ * drift-prone because they are conventions of one `find` callback
+ * and one early-return sentinel, not because they share code with any
+ * other function in the plugin. Documenting them as properties of
+ * this helper with dedicated regression pins is the minimal
+ * intervention that closes the drift without adding plumbing.
+ *
+ * Args:
+ *   modelRegistryEntry: The registry row whose primary route has been
+ *     knocked offline; the helper scans this entry's `provider_order`
+ *     in authored order for the first viable fallback.
+ *   blockedProviderID: The provider ID to force-skip even if healthy.
+ *     Pass `""` to disable the force-skip semantic (route-health checks
+ *     remain active regardless).
+ *   providerHealthMap: Live provider-keyed health map, consulted via
+ *     `isRouteCurrentlyHealthy`.
+ *   modelRouteHealthMap: Live composite-route-keyed health map, also
+ *     consulted via `isRouteCurrentlyHealthy`.
+ *   now: Wall-clock ms used for the health expiry comparison.
+ *
+ * Returns:
+ *   The composite `provider/model-id` string of the first route that
+ *   passes all three filters plus `isRouteCurrentlyHealthy`, or the
+ *   literal sentinel `"no fallback configured"` when no route qualifies.
+ *   The returned string is already in composite form (the helper reads
+ *   it from `provider_order[].model` rather than re-composing it, per
+ *   the body comment's double-prefix regression note at M31).
+ */
 export function findCuratedFallbackRoute(
   modelRegistryEntry: ModelRegistryEntry,
   blockedProviderID: string,
