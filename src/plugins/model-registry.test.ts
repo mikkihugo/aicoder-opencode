@@ -4283,6 +4283,118 @@ test("buildRoleRecommendationRoutes_whenEveryVisibleRouteBlocked_fallsBackToFirs
   assert.equal(result.alternativeRoutes[0]!.healthy, false);
 });
 
+// M125 pin A — isolated drift surface 1: `filterVisibleProviderRoutes`
+// wrap on `entry.provider_order`. Entry has TWO healthy visible routes
+// (openrouter `:free` siblings) and ONE hidden paid route (`xai/grok-4`).
+// `findFirstHealthyRouteInEntry` has its own internal visibility filter
+// so the healthy primary resolution is unaffected by this surface; the
+// drift only surfaces in `visibleRoutes` → `firstVisibleRoute` fallback
+// (unused here, both visible routes are healthy) and in
+// `alternativeRoutes`. Assertion: none of the alternatives is xai/grok-4.
+// S1 drift (drop visibility filter): alternatives becomes
+// `[openrouter/b:free, xai/grok-4]`, assertion fires. S2 drift (drop
+// `?? firstVisibleRoute`): healthyPrimary non-null, primary unchanged,
+// alternatives still filtered — passes. S3 drift (drop
+// `!== primaryRoute`): alternatives becomes `[openrouter/a:free,
+// openrouter/b:free]` (primary duplicated), no xai in the list, passes.
+test("buildRoleRecommendationRoutes_whenVisibleSiblingAndHiddenSibling_excludesHiddenFromAlternatives", () => {
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "m125-pin-a",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "openrouter", model: "openrouter/m125-a:free", priority: 1 },
+      { provider: "openrouter", model: "openrouter/m125-b:free", priority: 2 },
+      { provider: "xai", model: "xai/grok-4", priority: 3 },
+    ],
+  );
+
+  const result = buildRoleRecommendationRoutes(entry, new Map(), new Map(), now);
+
+  assert.ok(result.primaryRoute);
+  assert.equal(
+    result.alternativeRoutes.every((alt) => alt.route.provider !== "xai"),
+    true,
+    "hidden xai route must never appear in alternativeRoutes regardless of order",
+  );
+});
+
+// M125 pin B — isolated drift surface 2: `healthyPrimary ?? firstVisibleRoute`
+// degraded-primary fallback. SINGLE-route entry (iflowcn) whose sole
+// visible route is provider-quota-blocked. `visibleRoutes.length === 1`
+// so the early-return length check does NOT fire; `healthyPrimary`
+// resolves to null because the only route is blocked; the helper must
+// fall back to `firstVisibleRoute` so `primaryRoute !== null`.
+// Assertion: `primaryRoute !== null`. S1 drift (drop visibility filter):
+// one visible route either way, no change, passes. S2 drift (drop
+// `?? firstVisibleRoute`): primary = healthyPrimary = null, assertion
+// fires. S3 drift (drop `!== primaryRoute` alt filter): primary still
+// non-null via the fallback, passes the assertion. Pin does NOT depend
+// on alternatives length — S3 cannot contaminate.
+test("buildRoleRecommendationRoutes_whenEveryVisibleRouteBlockedOnSingleRoute_returnsNonNullFirstVisibleRoute", () => {
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "m125-pin-b",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "iflowcn", model: "iflowcn/m125-pin-b", priority: 1 },
+    ],
+  );
+  const providerHealthMap = new Map([
+    [
+      "iflowcn",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  const result = buildRoleRecommendationRoutes(
+    entry,
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+
+  assert.ok(
+    result.primaryRoute,
+    "degraded-primary fallback must return the first visible route, not null",
+  );
+  assert.equal(result.primaryHealthy, false);
+});
+
+// M125 pin C — isolated drift surface 3: `route !== primaryRoute`
+// alternatives dedupe. SINGLE visible-and-healthy route entry. Empty
+// health maps so the primary path is clean; the only question is
+// whether the primary leaks into `alternativeRoutes`. Assertion:
+// `alternativeRoutes.length === 0`. S1 drift (drop visibility filter):
+// no hidden siblings, no change, passes. S2 drift (drop
+// `?? firstVisibleRoute`): healthyPrimary non-null, primary unchanged,
+// passes. S3 drift (drop alt filter): alternatives becomes
+// `[iflowcn/m125-pin-c]` (primary materialized as its own alt), length
+// 1, assertion fires. Pin uses a single-route fixture so neither pin A
+// nor pin B's surfaces can contaminate the alternatives count.
+test("buildRoleRecommendationRoutes_whenSingleHealthyRouteEntry_producesEmptyAlternatives", () => {
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "m125-pin-c",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "iflowcn", model: "iflowcn/m125-pin-c", priority: 1 },
+    ],
+  );
+
+  const result = buildRoleRecommendationRoutes(entry, new Map(), new Map(), now);
+
+  assert.ok(result.primaryRoute);
+  assert.equal(
+    result.alternativeRoutes.length,
+    0,
+    "primary must not leak into alternativeRoutes when it is the only visible route",
+  );
+});
+
 test("computeRegistryEntryHealthReport_whenPrimaryKeyMissingButSiblingHealthy_returnsNull", () => {
   // Headline integration pin for M61. Post-M58 shape: a curated entry
   // whose primary visible route lives on an uncredentialed provider

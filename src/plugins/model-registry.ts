@@ -4355,6 +4355,81 @@ export function findFirstHealthyRouteInEntry(
  *   iff a healthy route was found. `alternativeRoutes` lists every
  *   visible route except the one chosen as primary, each annotated with
  *   its individual `healthy` flag.
+ *
+ * ## Drift surfaces (M125 PDD)
+ *
+ * The body is eight statements and three of them carry orthogonal
+ * load-bearing invariants that the five pre-existing pins partition only
+ * along bundled lines — pin 1 bundles visibility + length-zero + shape,
+ * pin 5 bundles the healthyPrimary-null fallback with the alternatives
+ * filter, and every happy-path pin asserts both `alternativeRoutes.length`
+ * and some `primaryRoute.provider` equality. Single-line sabotages cascade
+ * into correlated pin clusters rather than localizing to the drift
+ * surface that actually broke. The three asymmetric unit pins below
+ * restore per-surface localization so an engineer running a focused
+ * regression can read "pin X fired alone" and know exactly which surface
+ * regressed.
+ *
+ *  1. **`filterVisibleProviderRoutes(entry.provider_order)` wrap —
+ *     alternatives-list visibility invariant.** The inner
+ *     `findFirstHealthyRouteInEntry` call has its OWN visibility filter
+ *     (it calls `filterVisibleProviderRoutes` internally at M123/M124
+ *     sites), so dropping the wrap HERE does not corrupt the healthy
+ *     primary path. It corrupts TWO downstream quantities: (a) the
+ *     `firstVisibleRoute = visibleRoutes[0]` fallback used when
+ *     `healthyPrimary === null`, and (b) the `alternativeRoutes` list
+ *     materialized from `visibleRoutes.filter(...).map(...)`. A drift
+ *     that replaces `filterVisibleProviderRoutes(entry.provider_order)`
+ *     with raw `entry.provider_order` silently leaks hidden paid routes
+ *     (togetherai, xai, cerebras, deepseek, github-copilot, non-`:free`
+ *     openrouter) into the `alternativeRoutes` array that the agent-
+ *     facing `recommend_model_for_role` tool output directly serializes.
+ *     Agents then see proprietary `xai/grok-4` or paid
+ *     `openrouter/xiaomi/mimo-v2-pro` routes in the "alternative routes"
+ *     bullet list of the tool response, parse them as routable, and
+ *     either prefer them over the open-weight primary or escalate to the
+ *     user asking whether to use them. Both outcomes break the curated-
+ *     fallback policy at the tool boundary.
+ *
+ *  2. **`healthyPrimary ?? firstVisibleRoute` degraded-primary
+ *     fallback.** When every visible route is blocked (a state
+ *     `selectBestModelForRoleAndTask` is supposed to prevent but
+ *     defensively handled), `findFirstHealthyRouteInEntry` returns null
+ *     and the helper falls back to `visibleRoutes[0]` so the tool output
+ *     shape stays renderable with `primaryRoute: {provider, model}` +
+ *     `primaryHealthy: false`. A drift that drops the `?? firstVisibleRoute`
+ *     tail (a tempting "the null case is the no-visible-routes case, the
+ *     early return handles it" mis-read) silently returns `primaryRoute:
+ *     null` whenever every visible route is blocked but SOME visible
+ *     route exists. Downstream readers that do `result.primaryRoute.provider`
+ *     without a null guard (because the docstring says null only when
+ *     visibleRoutes.length === 0, which the length check above
+ *     supposedly rules out) crash the tool handler with a TypeError. The
+ *     `?? firstVisibleRoute` fallback is the only thing keeping the
+ *     shape contract intact for the "every route blocked" branch.
+ *
+ *  3. **`route !== primaryRoute` alternatives dedupe.** The
+ *     `alternativeRoutes` mapper filters `visibleRoutes` to exclude
+ *     whichever route was chosen as primary so the agent never sees the
+ *     same route in both slots. Dropping the filter (a refactor that
+ *     simplifies `.filter(...).map(...)` to `.map(...)` "because we
+ *     already surfaced primary separately") causes the primary route to
+ *     appear in BOTH `primaryRoute` and as the first entry of
+ *     `alternativeRoutes`. The agent now sees the same `{provider,
+ *     model}` tuple twice in one tool response, which agents interpret
+ *     as "the curated fallback for this model IS itself" — a loop
+ *     signal that can trigger defensive re-routing or user-facing
+ *     warnings about circular fallback configuration even though the
+ *     registry is fine. The dedupe filter is the one thing keeping the
+ *     primary / alternatives slots mutually exclusive.
+ *
+ * Each surface is isolated by exactly one new asymmetric unit pin below
+ * (`buildRoleRecommendationRoutes_whenVisibleSiblingAndHiddenSibling_
+ * excludesHiddenFromAlternatives`, `_whenEveryVisibleRouteBlockedOnSingleRoute_
+ * returnsNonNullFirstVisibleRoute`, `_whenSingleHealthyRouteEntry_
+ * producesEmptyAlternatives`) so a sabotage on exactly one drift surface
+ * fires exactly one new pin uniquely; pre-existing pins firing as
+ * additive coverage is acceptable per the PDD protocol.
  */
 export function buildRoleRecommendationRoutes(
   modelRegistryEntry: ModelRegistryEntry,
