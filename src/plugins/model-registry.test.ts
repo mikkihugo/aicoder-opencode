@@ -8192,6 +8192,95 @@ test("buildRoutingContextSystemPrompt_whenRenderingEntry_fusesCostTierAndBilling
   assert.equal(costLine, "Cost tier: cheap | Billing: paid_api");
 });
 
+// M130 pin A — structural line-count invariant: the rendered section
+// has EXACTLY 8 newline-separated lines (header + Model + Description
+// + Roles + Best for + Not for + Concurrency limit + Cost/Billing).
+// Adding or dropping a template row changes the count, and downstream
+// splitters that index by position (`lines[0]` for the header,
+// `lines[7]` for the cost/billing fusion) silently point at the wrong
+// content. The existing M97 pins all locate lines by `.startsWith(…)`
+// or `.includes(…)` and happily pass on 7-line or 9-line variants.
+// Asserts ONLY `.length === 8` — no inspection of individual line
+// content — so it is orthogonal to pins B and C's field-binding
+// surfaces and to the M97 pins' separator/header surfaces.
+test("buildRoutingContextSystemPrompt_whenRenderingEntry_emitsExactlyEightLines", () => {
+  const entry: ModelRegistryEntry = {
+    ...buildModelRegistryEntry("m-count", ["coding"], "standard", [
+      { provider: "openrouter", model: "openrouter/count-model", priority: 1 },
+    ]),
+    description: "count pin entry",
+    best_for: ["bulk coding"],
+    not_for: [],
+    concurrency: 2,
+    cost_tier: "cheap",
+    billing_mode: "paid_api",
+  };
+
+  const rendered = buildRoutingContextSystemPrompt(entry);
+
+  assert.equal(rendered.split("\n").length, 8);
+});
+
+// M130 pin B — `Model:` line is bound to the registry entry's `.id`
+// field specifically, not any other string field on the entry. A
+// copy-paste drift that swaps `${entry.id}` for `${entry.description}`
+// typechecks silently (both are strings) but replaces the stable
+// canonical model ID with a prose blurb, and every agent
+// self-identifies as its own description. Asserts the exact
+// `"Model: m-id-binding"` line using an `.id` value (`"m-id-binding"`)
+// that is NOT present anywhere else in the entry — description,
+// best_for, not_for, roles, tiers, provider-order model names all use
+// DIFFERENT strings — so only an `.id` field binding produces the
+// expected line, and any field-swap sabotage fires this pin alone.
+test("buildRoutingContextSystemPrompt_whenRenderingEntry_bindsModelLineToEntryIdField", () => {
+  const entry: ModelRegistryEntry = {
+    ...buildModelRegistryEntry("m-id-binding", ["coding"], "standard", [
+      { provider: "openrouter", model: "openrouter/unrelated-route", priority: 1 },
+    ]),
+    description: "an entirely different string that is not the id",
+    best_for: ["bulk coding"],
+    not_for: [],
+    concurrency: 2,
+    cost_tier: "cheap",
+    billing_mode: "paid_api",
+  };
+
+  const rendered = buildRoutingContextSystemPrompt(entry);
+  const modelLine = rendered.split("\n").find((line) => line.startsWith("Model:"));
+
+  assert.equal(modelLine, "Model: m-id-binding");
+});
+
+// M130 pin C — `Concurrency limit:` line is bound to the entry's
+// `.concurrency` field specifically, not any other stringifiable
+// field. A field-binding drift that puts `cost_tier` on this line
+// produces `"Concurrency limit: cheap"`, which fails integer parse
+// and falls back to "unbounded concurrency" — silent over-dispatch
+// to rate-limited providers. Uses a distinctive concurrency value
+// (`7`) not equal to any tier-ordinal, so only a `.concurrency` field
+// binding produces the expected line. Exact-match on the full line
+// so any drift to another numeric or stringified field flips.
+test("buildRoutingContextSystemPrompt_whenRenderingEntry_bindsConcurrencyLineToConcurrencyField", () => {
+  const entry: ModelRegistryEntry = {
+    ...buildModelRegistryEntry("m-conc-binding", ["coding"], "standard", [
+      { provider: "openrouter", model: "openrouter/conc-model", priority: 1 },
+    ]),
+    description: "concurrency pin entry",
+    best_for: ["bulk coding"],
+    not_for: [],
+    concurrency: 7,
+    cost_tier: "cheap",
+    billing_mode: "paid_api",
+  };
+
+  const rendered = buildRoutingContextSystemPrompt(entry);
+  const concLine = rendered
+    .split("\n")
+    .find((line) => line.startsWith("Concurrency limit:"));
+
+  assert.equal(concLine, "Concurrency limit: 7");
+});
+
 // M98 pin A — `"QUOTA BACKOFF"` carries the `"BACKOFF"` suffix: the
 // `quota` state is the only transient-recoverable state with a
 // suffix word beyond the bare state name, signalling to the agent

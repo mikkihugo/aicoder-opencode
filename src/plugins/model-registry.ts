@@ -1074,6 +1074,63 @@ export async function loadRegistryAndLookupEntryForInputModel(
  *     paid_api"` could be read as a cost-tier value of `"cheap /
  *     Billing: paid_api"` by any naive `Cost tier: (\w+)` extractor.
  *
+ * ## Drift surfaces (M130 PDD)
+ *
+ * The prose above describes three CONTENT-level surfaces (header
+ * literal, comma-space separator, pipe fusion) — each already has one
+ * M97 regression pin. What those pins do NOT cover are three
+ * STRUCTURAL surfaces that are equally load-bearing and equally easy
+ * to silently regress during a "let me tidy this template" refactor.
+ * The M130 pin set closes that gap:
+ *
+ *  A. **Exact line count == 8.** The rendered string has EXACTLY
+ *     eight newline-separated lines: header, Model, Description,
+ *     Roles, Best for, Not for, Concurrency limit, Cost tier+Billing.
+ *     Adding a new curated field (or quietly dropping one the agent
+ *     "doesn't seem to use") changes the count, and downstream
+ *     splitters that index by position — `lines[0]` for the header,
+ *     `lines[7]` for the cost/billing fusion — silently point at the
+ *     wrong content. No existing pin asserts the count: the M97 pins
+ *     all test line content by `.includes(...)` or by locating the
+ *     header index, which happily passes on a 9-line variant that
+ *     inserts a new row anywhere after line 0.
+ *
+ *  B. **`Model:` line is bound to `.id`, not any other string
+ *     field.** The line template is `` `Model: ${entry.id}` `` — NOT
+ *     `${entry.description}` or the top `provider_order[0].model`
+ *     route or anything else stringy. This matters because the
+ *     operator curates stable canonical IDs in `models.jsonc` (e.g.
+ *     `glm-5`) and the agent uses the `Model:` line as its
+ *     identity-of-record for routing decisions. A copy-paste drift
+ *     that swaps `.id` for `.description` (both are strings, both
+ *     look plausible in the template, typecheck passes) replaces
+ *     `"Model: glm-5"` with a 40-word prose blurb and every agent
+ *     self-identifies as its own description. No existing pin
+ *     distinguishes `.id` from `.description` because the M97 pin
+ *     only asserts the header literal is the first line.
+ *
+ *  C. **`Concurrency limit:` line is bound to `.concurrency`, not
+ *     any other numeric-or-stringified field.** The line template is
+ *     `` `Concurrency limit: ${entry.concurrency}` `` — NOT
+ *     `${entry.cost_tier}` or any other field that `String(…)` would
+ *     happily stringify. The concurrency value gates how many
+ *     parallel agent sessions the runtime will dispatch against this
+ *     model; a field-binding drift that puts `cost_tier` on this line
+ *     produces `"Concurrency limit: cheap"`, which the agent reads as
+ *     "unbounded concurrency" (parse-failure → fallback default) and
+ *     silently over-dispatches to rate-limited providers. No existing
+ *     pin binds a specific non-header line to its specific entry
+ *     field: the M97 pins are all separator/format assertions.
+ *
+ * Asymmetric sabotage model: pin A fires on any line-count delta
+ * (insert or delete a template row), pin B fires on any `Model:`
+ * field-binding swap, pin C fires on any `Concurrency limit:`
+ * field-binding swap. The three sabotages are orthogonal — none of
+ * them moves the header off line 0, changes the list separator, or
+ * touches the Cost/Billing fusion — so the existing M97 pins remain
+ * green on every individual sabotage and each new pin fires alone
+ * in its partition.
+ *
  * Args:
  *   modelRegistryEntry: The curated registry row for the currently
  *     active model.
