@@ -93,6 +93,49 @@ async function waitForPersistedHealthState(
   return readFile(filePath, "utf8").catch(() => "");
 }
 
+test("initializeProviderHealthState_whenAuthJsonUsesRealOpencodeSchema_recognizesCredentials", async () => {
+  // Real opencode auth.json entries are:
+  //   { type: "api", key: "..." }          for API-key providers
+  //   { type: "oauth", access: "...", ... } for OAuth providers
+  // Previously the plugin read `.apiKey` and false-flagged every real entry
+  // as `key_missing`. This test locks in the real schema.
+  await withIsolatedHome(async (homeDirectory) => {
+    await writeAuthFile(homeDirectory, {
+      "api-provider": { type: "api", key: "real-api-key" },
+      "oauth-provider": {
+        type: "oauth",
+        access: "real-access-token",
+        refresh: "real-refresh-token",
+        expires: Date.now() + 60_000,
+      },
+      "unconfigured-provider": { type: "api", key: "" },
+    });
+
+    await withFreshHealthState(async () => {
+      const { initializeProviderHealthState } = await import("./model-registry.js");
+
+      const runtime = await initializeProviderHealthState([
+        buildModelRegistryEntry("api-model", ["architect"], [
+          { provider: "api-provider", model: "api-provider/m", priority: 1 },
+        ]),
+        buildModelRegistryEntry("oauth-model", ["architect"], [
+          { provider: "oauth-provider", model: "oauth-provider/m", priority: 1 },
+        ]),
+        buildModelRegistryEntry("empty-model", ["architect"], [
+          { provider: "unconfigured-provider", model: "unconfigured-provider/m", priority: 1 },
+        ]),
+      ]);
+
+      assert.equal(runtime.providerHealthMap.get("api-provider"), undefined);
+      assert.equal(runtime.providerHealthMap.get("oauth-provider"), undefined);
+      assert.equal(
+        runtime.providerHealthMap.get("unconfigured-provider")?.state,
+        "key_missing",
+      );
+    });
+  });
+});
+
 test("initializeProviderHealthState marks missing provider keys as key_missing", async () => {
   await withIsolatedHome(async (homeDirectory) => {
     await writeAuthFile(homeDirectory, {

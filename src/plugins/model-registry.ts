@@ -425,7 +425,17 @@ async function readAgentMetadata(
 /**
  * Load API keys from the OpenCode auth.json file.
  */
-async function loadAuthKeys(): Promise<Map<string, { apiKey?: string }>> {
+/**
+ * Read opencode's auth.json and report whether each provider has a usable
+ * credential configured. The real opencode schema is:
+ *   - { type: "api", key: "<string>" }              — API key entry
+ *   - { type: "oauth", access: "...", refresh: "..." } — OAuth entry
+ *
+ * An earlier version of this plugin assumed { apiKey: string }, which does
+ * not match any real auth.json entry and caused every provider to be
+ * incorrectly flagged as `key_missing`. This function is now schema-aware.
+ */
+async function loadAuthKeys(): Promise<Map<string, { hasCredential: boolean }>> {
   try {
     const authFilePath = path.join(
       process.env.HOME ?? "",
@@ -435,11 +445,46 @@ async function loadAuthKeys(): Promise<Map<string, { apiKey?: string }>> {
       "auth.json",
     );
     const raw = await readFile(authFilePath, "utf8");
-    const parsed = JSON.parse(raw);
-    return new Map(Object.entries(parsed));
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const result = new Map<string, { hasCredential: boolean }>();
+    for (const [providerID, value] of Object.entries(parsed)) {
+      result.set(providerID, { hasCredential: hasUsableCredential(value) });
+    }
+    return result;
   } catch {
     return new Map();
   }
+}
+
+/**
+ * Check whether an auth.json entry has a usable credential.
+ * Accepts the real opencode schemas, the legacy `{ apiKey }` shape (to keep
+ * older fixtures working), and bare string values (used in some legacy tests).
+ */
+function hasUsableCredential(entry: unknown): boolean {
+  if (typeof entry === "string") {
+    return entry.length > 0;
+  }
+  if (!entry || typeof entry !== "object") {
+    return false;
+  }
+  const record = entry as Record<string, unknown>;
+  const entryType = typeof record.type === "string" ? record.type : undefined;
+  if (entryType === "api") {
+    return typeof record.key === "string" && record.key.length > 0;
+  }
+  if (entryType === "oauth") {
+    return typeof record.access === "string" && record.access.length > 0;
+  }
+  // Legacy / fixture shape: { apiKey: "..." }
+  if (typeof record.apiKey === "string" && record.apiKey.length > 0) {
+    return true;
+  }
+  // Fallback: any object that carries a non-empty `key` string.
+  if (typeof record.key === "string" && record.key.length > 0) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -468,8 +513,7 @@ async function initializeProviderHealthState(
   for (const providerID of knownProviders) {
     // Only mark as key_missing if not already in a penalty state
     if (!providerHealthMap.has(providerID)) {
-      const hasKey = authKeys.has(providerID) &&
-        (authKeys.get(providerID) as any).apiKey !== undefined;
+      const hasKey = authKeys.get(providerID)?.hasCredential === true;
 
       if (!hasKey) {
         providerHealthMap.set(providerID, {

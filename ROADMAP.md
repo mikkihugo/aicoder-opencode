@@ -146,6 +146,19 @@ Completion Notes (2026-04-11):
 - Verify that overlay shims in `targets/*/overlay/.opencode/plugins/` are in sync with `src/plugins/`
 - Add a CI check or validation command
 
+### M12: `loadAuthKeys` reads the real opencode auth.json schema `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `loadAuthKeys()` + `initializeProviderHealthState()` in `src/plugins/model-registry.ts` checked `authKeys.get(providerID).apiKey !== undefined`, but real opencode `auth.json` entries use `{ type: "api", key: "..." }` for API keys and `{ type: "oauth", access: "...", refresh: "..." }` for OAuth — **no entry ever has an `apiKey` field**. Every real provider was silently flagged `key_missing` on first startup.
+- **Existing tests didn't catch it** because they wrote fixture auth entries in the wrong (matching-bug) shape — `{apiKey: "token-value"}` or bare strings — so plugin + tests were internally consistent but both wrong relative to reality.
+- **Fix**:
+  - Introduced `hasUsableCredential(entry)` that handles all three shapes: real API-key (`type:"api", key:"..."`), real OAuth (`type:"oauth", access:"..."`), and legacy fixture shapes (`apiKey`, bare string) as fallbacks so existing tests still lock in their original behavior.
+  - `loadAuthKeys()` now returns `Map<string, { hasCredential: boolean }>` instead of the raw parsed entry; the consumer check becomes `authKeys.get(id)?.hasCredential === true`.
+  - Added `initializeProviderHealthState_whenAuthJsonUsesRealOpencodeSchema_recognizesCredentials` test — writes three entries (API/oauth/empty-key) and asserts the empty-key one is the only one flagged `key_missing`.
+- **Verification**: `npx tsc -p tsconfig.json --noEmit` clean, `node --import tsx --test 'src/**/*.test.ts'` 119/119 pass (118 existing + 1 new).
+- **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
+- **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
+
 ### M11: Atomic write for `provider-health.json` `✅ COMPLETED`
 
 Completion Notes (2026-04-11):
