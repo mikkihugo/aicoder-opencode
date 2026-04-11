@@ -1608,6 +1608,84 @@ test("logPluginHookFailure_whenCalled_invokesLogFnExactlyOnce", () => {
   assert.equal(callCount, 1);
 });
 
+test("logPluginHookFailure_whenCalled_messageStartsWithBracketedPluginBrandPrefix", () => {
+  // M141 Pin A — Surface 1 (brand-prefix `[aicoder-opencode plugin]`).
+  // Operators grep for `\[aicoder-opencode plugin\]` to isolate this
+  // plugin's failures from the combined opencode log, and the autopilot
+  // post-mortem scripts match the exact bracketed literal for provenance
+  // attribution. A sabotage that drops the prefix (the "keep it short"
+  // drift class) silently orphans every failure log from its plugin
+  // attribution — the existing `includes(hookName)` pin passes cleanly
+  // because the hook name still interpolates, so this pin is the ONLY
+  // observer of the prefix drift.
+  const captured: { message: string; error: unknown }[] = [];
+  const logFn = (message: string, error: unknown) => {
+    captured.push({ message, error });
+  };
+
+  logPluginHookFailure("chat.params", new Error("boom"), logFn);
+
+  assert.equal(captured.length, 1);
+  const first = captured[0];
+  assert.ok(first);
+  assert.ok(
+    first.message.startsWith("[aicoder-opencode plugin] "),
+    `expected message to start with '[aicoder-opencode plugin] ' but got: ${first.message}`,
+  );
+});
+
+test("logPluginHookFailure_whenCalled_messageContainsHookFailedIgnoringAndContinuingSuffix", () => {
+  // M141 Pin B — Surface 2 (static `hook failed — ignoring and
+  // continuing:` suffix). This suffix is the operator-facing contract
+  // that the plugin deliberately does NOT crash opencode on hook errors:
+  // the em-dash phrase is what tells an operator reading stderr "this is
+  // a recoverable swallow, not a fatal". A refactor that simplifies the
+  // suffix to just `"failed"` or drops the em-dash clause breaks the
+  // "recoverable swallow" signal. The existing pins do not assert
+  // against this phrase (they only check hookName interpolation, error
+  // reference, and call count), so this pin fires alone on a suffix
+  // simplification.
+  const captured: { message: string; error: unknown }[] = [];
+  const logFn = (message: string, error: unknown) => {
+    captured.push({ message, error });
+  };
+
+  logPluginHookFailure("chat.params", new Error("boom"), logFn);
+
+  assert.equal(captured.length, 1);
+  const first = captured[0];
+  assert.ok(first);
+  assert.ok(
+    first.message.includes("hook failed — ignoring and continuing:"),
+    `expected message to contain 'hook failed — ignoring and continuing:' but got: ${first.message}`,
+  );
+});
+
+test("logPluginHookFailure_whenCalledWithoutExplicitLogFn_defaultSinkFallbackDoesNotThrow", () => {
+  // M141 Pin C — Surface 3 (`logFn` third parameter default value).
+  // Both production call sites (`chat.params` and
+  // `experimental.chat.system.transform` hook catch blocks) invoke the
+  // helper as `logPluginHookFailure(hookName, error)` — no explicit
+  // sink. A refactor that drops the `= defaultHookFailureLogSink`
+  // default (the "require all params" drift class) turns a silent-
+  // swallow code path into a hard crash (`TypeError: logFn is not a
+  // function`) at the exact moment the swallow matters most. Every
+  // existing pin passes an explicit `logFn` and so would continue to
+  // pass against this drift; this pin calls with only two arguments
+  // and asserts the call neither throws nor errors, firing alone when
+  // the default is removed. We temporarily swap `console.error` with a
+  // no-op so the production default sink doesn't leak into test output.
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    assert.doesNotThrow(() => {
+      logPluginHookFailure("chat.params", new Error("boom"));
+    });
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
 test("bindSessionHangState_whenCalled_populatesAllThreeMapsAtomically", () => {
   // M79 symmetry pin: the three-map write triplet must stay in sync.
   // Dropping any one write silently desynchronises the hang detector —

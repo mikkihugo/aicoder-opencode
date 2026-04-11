@@ -333,6 +333,80 @@ function logRegistryLoadError(error: unknown): void {
  *     stack traces survive the swallow.
  *   logFn: Injected sink. Defaults to a small wrapper over
  *     `console.error` so production callers stay one-liners.
+ *
+ * ## Drift surfaces (M141 PDD)
+ *
+ * The three pre-existing M80 pins cover the `${hookName}` interpolation,
+ * the error-reference passthrough, and the single-call invariant. That
+ * trio has a real asymmetric partition for body-level drift but leaves
+ * THREE independent message-template and signature invariants unpinned,
+ * each of which is load-bearing for operator-facing log grep and silent
+ * in production until an operator actually tries to triage a failure:
+ *
+ * 1. **Brand-prefix `[aicoder-opencode plugin]` anchors every message.**
+ *    The prefix is the only token that identifies this plugin as the
+ *    source of the log line — every other substring (`hook failed`,
+ *    hookName, error) can plausibly appear from opencode core, a
+ *    sibling plugin, or an unrelated library. Operators running a
+ *    multi-plugin workspace grep for `\[aicoder-opencode plugin\]` to
+ *    isolate this plugin's errors from the combined opencode log, and
+ *    the autopilot post-mortem scripts in
+ *    `targets/dr-repo/overlay/.opencode/autopilot/cli.mjs` match the
+ *    exact bracketed literal for provenance attribution. A refactor
+ *    that drops the prefix (the "keep it short" drift class) silently
+ *    orphans every failure log from its plugin attribution, and the
+ *    existing `includes(hookName)` pin passes cleanly because the hook
+ *    name still interpolates. Pin A anchors "message starts with the
+ *    exact `[aicoder-opencode plugin] ` byte sequence" so a prefix
+ *    drop fires this pin alone.
+ *
+ * 2. **Static `hook failed — ignoring and continuing:` suffix encodes
+ *    the swallow-and-proceed semantic in plain English.** This suffix
+ *    is the operator-facing contract that the plugin deliberately does
+ *    NOT crash opencode on hook errors — the em-dash phrase is what
+ *    tells an operator reading stderr "this is a recoverable swallow,
+ *    not a fatal". Without it, an operator sees `chat.params` in the
+ *    log and assumes the hook actually fired successfully; the trailing
+ *    colon is also the separator before the injected error value so
+ *    that `console.error(msg, err)` prints `... continuing: Error: ...`
+ *    as one readable line. A refactor that simplifies the suffix to
+ *    just `"failed"` or drops the em-dash clause breaks the
+ *    "recoverable swallow" signal for every downstream operator — the
+ *    existing pins do not assert against this phrase, so the drift
+ *    ships silently. Pin B anchors the exact substring so a suffix
+ *    simplification fires this pin alone.
+ *
+ * 3. **`logFn` third parameter has a default value.** The helper is
+ *    called from two production sites (`chat.params` and
+ *    `experimental.chat.system.transform` hook catch blocks) as
+ *    `logPluginHookFailure(hookName, error)` — neither call site passes
+ *    an explicit sink because the whole point of the default is to keep
+ *    production one-liners and let tests override for observability.
+ *    A refactor that drops the `= defaultHookFailureLogSink` default
+ *    (the "require all params" drift class, or an over-eager linter
+ *    auto-fix) makes both production call sites crash with
+ *    `TypeError: logFn is not a function` the first time any hook
+ *    throws — turning a silent-swallow code path into a hard crash at
+ *    the exact moment an operator most needs the swallow to work. Every
+ *    existing pin passes an explicit `logFn` so they continue to pass
+ *    against this drift; Pin C calls the helper with only two arguments
+ *    and asserts it neither throws nor errors, firing alone when the
+ *    default is removed.
+ *
+ * ### Why asymmetric
+ *
+ * The M80 trio (hookName interpolation, error passthrough, single call)
+ * uses the body of the helper as the shared sabotage substrate. M141's
+ * trio uses the SIGNATURE and MESSAGE TEMPLATE as orthogonal substrates:
+ * prefix drift, suffix drift, and default-parameter drift each touch a
+ * distinct axis of the helper's contract with zero overlap with M80 or
+ * with each other. A prefix drop does not affect the suffix or the
+ * default; a suffix simplification leaves the prefix and the default
+ * intact; removing the default leaves both literal substrings in the
+ * template. Pre-existing pins fire additively on NONE of the three
+ * because they assert `.match(/chat\.params/)`, reference equality on
+ * the error, and `callCount === 1` — all of which survive every M141
+ * sabotage. The partition is tight.
  */
 export function logPluginHookFailure(
   hookName: string,
