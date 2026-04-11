@@ -16,6 +16,7 @@ import {
   isFallbackBlocked,
   findFirstHealthyRouteInEntry,
   findFirstHealthyVisibleRoute,
+  isRouteCurrentlyHealthy,
   findPreferredHealthyRoute,
   isAgentVisibleHealthState,
   hasAgentVisiblePenalty,
@@ -1537,6 +1538,101 @@ test("computeRegistryEntryHealthReport_whenLongcatEntryIsUnprefixed_detectsRoute
   assert.ok(report);
   assert.equal(report.state, "model_not_found");
   assert.equal(report.scope, "route");
+});
+
+test("isRouteCurrentlyHealthy_whenNeitherProviderNorRouteBlocked_returnsTrue", () => {
+  const now = Date.now();
+  const route = { provider: "opencode", model: "opencode/glm-5.1-free" };
+  assert.equal(
+    isRouteCurrentlyHealthy(route, new Map(), new Map(), now),
+    true,
+  );
+});
+
+test("isRouteCurrentlyHealthy_whenProviderKeyMissing_returnsFalse", () => {
+  const now = Date.now();
+  const route = { provider: "opencode", model: "opencode/glm-5.1-free" };
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+  ]);
+  assert.equal(
+    isRouteCurrentlyHealthy(route, providerHealthMap, new Map(), now),
+    false,
+  );
+});
+
+test("isRouteCurrentlyHealthy_whenProviderHealthExpired_returnsTrue", () => {
+  // Stale provider penalty whose `until` is in the past is treated as
+  // expired by isProviderHealthy. Pins that the helper does NOT do its
+  // own naive `providerHealthMap.has(id)` check (the pre-M31 bug shape).
+  const now = Date.now();
+  const route = { provider: "opencode", model: "opencode/glm-5.1-free" };
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      { state: "quota" as const, until: now - 1000, retryCount: 1 },
+    ],
+  ]);
+  assert.equal(
+    isRouteCurrentlyHealthy(route, providerHealthMap, new Map(), now),
+    true,
+  );
+});
+
+test("isRouteCurrentlyHealthy_whenRouteLevelPenaltyActive_returnsFalse", () => {
+  // Provider-level check passes but the composite route-health entry
+  // blocks the specific route. Pins that the helper walks BOTH maps,
+  // not just the provider one — same bug class as the M29/M31 cascade.
+  const now = Date.now();
+  const route = { provider: "openrouter", model: "openrouter/qwen/qwen3-coder:free" };
+  const modelRouteHealthMap = new Map([
+    [
+      "openrouter/qwen/qwen3-coder:free",
+      { state: "model_not_found" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  assert.equal(
+    isRouteCurrentlyHealthy(route, new Map(), modelRouteHealthMap, now),
+    false,
+  );
+});
+
+test("isRouteCurrentlyHealthy_whenRouteLevelPenaltyExpired_returnsTrue", () => {
+  const now = Date.now();
+  const route = { provider: "openrouter", model: "openrouter/qwen/qwen3-coder:free" };
+  const modelRouteHealthMap = new Map([
+    [
+      "openrouter/qwen/qwen3-coder:free",
+      { state: "timeout" as const, until: now - 5_000, retryCount: 1 },
+    ],
+  ]);
+  assert.equal(
+    isRouteCurrentlyHealthy(route, new Map(), modelRouteHealthMap, now),
+    true,
+  );
+});
+
+test("isRouteCurrentlyHealthy_whenRouteKeyComposedFromPlainModelID_matchesComposedForm", () => {
+  // longcat publishes `LongCat-Flash-Chat` as an unprefixed model id. The
+  // canonical route key is `longcat/LongCat-Flash-Chat` (per
+  // composeRouteKey). Pins that the helper normalizes via composeRouteKey
+  // and finds the penalty regardless of whether the incoming route.model
+  // was prefixed — same invariant that M31 fixed for the write-side.
+  const now = Date.now();
+  const route = { provider: "longcat", model: "LongCat-Flash-Chat" };
+  const modelRouteHealthMap = new Map([
+    [
+      "longcat/LongCat-Flash-Chat",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  assert.equal(
+    isRouteCurrentlyHealthy(route, new Map(), modelRouteHealthMap, now),
+    false,
+  );
 });
 
 test("findFirstHealthyRouteInEntry_whenNoVisibleRoutes_returnsNull", () => {

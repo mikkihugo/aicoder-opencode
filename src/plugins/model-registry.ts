@@ -1098,6 +1098,58 @@ export function countHealthyVisibleRoutes(
 }
 
 /**
+ * Return `true` when a single provider route is currently routable: its
+ * provider has no active penalty AND its composite `provider/model-id`
+ * route-health entry is expired or absent.
+ *
+ * This is the canonical "is this route healthy right now" predicate. Six
+ * call sites in this file used to inline the same two-step check
+ * (`isProviderHealthy` then `modelRouteHealthMap.get(composeRouteKey(...))`)
+ * — `findFirstHealthyRouteInEntry`, `findFirstHealthyVisibleRoute`,
+ * `summarizeVisibleRouteHealth`, the `isRouteHealthy` lambdas inside
+ * `findPreferredHealthyRoute` and `buildRoleRecommendationRoutes`, and the
+ * `bestRouteIsHealthy` lambda inside `recommendTaskModelRoute`. Every time
+ * the predicate gained a new clause (M29 added route-level health, M31
+ * added composite route keys, M61 centralized the per-entry walk), SOME
+ * sites were updated and others silently drifted until a user hit the
+ * gap.
+ *
+ * Centralizing the predicate here gives all six readers the same answer
+ * by construction, not by convention. `findCuratedFallbackRoute`
+ * deliberately does NOT use this helper — it adds an additional
+ * `isFallbackBlocked` check because "is this route a valid FALLBACK" is a
+ * strictly stronger question than "is this route routable" (a curated
+ * entry whose primary is `longcat` is legitimately routable for agents
+ * that explicitly want longcat, but must never be chosen as a silent
+ * fallback from a different model). Keep that divergence explicit so the
+ * two predicates can evolve independently.
+ *
+ * Args:
+ *   providerRoute: The route to check. Only `provider` and `model` fields
+ *     are read (the full `ProviderRoute` shape is accepted for caller
+ *     convenience — no need to destructure at the call site).
+ *   providerHealthMap: In-memory provider-keyed health map.
+ *   modelRouteHealthMap: In-memory composite-route-keyed health map.
+ *   now: Wall-clock timestamp in ms.
+ *
+ * Returns:
+ *   `true` when both provider and route health checks pass, `false`
+ *   otherwise.
+ */
+export function isRouteCurrentlyHealthy(
+  providerRoute: { provider: string; model: string },
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  now: number,
+): boolean {
+  if (!isProviderHealthy(providerHealthMap, providerRoute.provider, now)) {
+    return false;
+  }
+  const routeHealth = modelRouteHealthMap.get(composeRouteKey(providerRoute));
+  return !routeHealth || routeHealth.until <= now;
+}
+
+/**
  * Pair-valued companion to `countHealthyVisibleRoutes`: returns both the
  * healthy AND unhealthy visible-route counts in a single pass.
  *
@@ -1123,17 +1175,11 @@ export function summarizeVisibleRouteHealth(
   let healthy = 0;
   let unhealthy = 0;
   for (const route of visibleRoutes) {
-    const providerHealth = providerHealthMap.get(route.provider);
-    if (providerHealth && providerHealth.until > now) {
+    if (isRouteCurrentlyHealthy(route, providerHealthMap, modelRouteHealthMap, now)) {
+      healthy++;
+    } else {
       unhealthy++;
-      continue;
     }
-    const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
-    if (routeHealth && routeHealth.until > now) {
-      unhealthy++;
-      continue;
-    }
-    healthy++;
   }
   return { healthy, unhealthy };
 }
@@ -1369,10 +1415,9 @@ export function findFirstHealthyRouteInEntry(
 ): ProviderRoute | null {
   const visibleRoutes = filterVisibleProviderRoutes(modelRegistryEntry.provider_order);
   for (const route of visibleRoutes) {
-    if (!isProviderHealthy(providerHealthMap, route.provider, now)) continue;
-    const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
-    if (routeHealth && routeHealth.until > now) continue;
-    return route;
+    if (isRouteCurrentlyHealthy(route, providerHealthMap, modelRouteHealthMap, now)) {
+      return route;
+    }
   }
   return null;
 }
@@ -1436,11 +1481,6 @@ export function buildRoleRecommendationRoutes(
   if (visibleRoutes.length === 0) {
     return { primaryRoute: null, primaryHealthy: false, alternativeRoutes: [] };
   }
-  const isRouteHealthy = (route: ProviderRoute): boolean => {
-    if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
-    const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
-    return !routeHealth || routeHealth.until <= now;
-  };
   const healthyPrimary = findFirstHealthyRouteInEntry(
     modelRegistryEntry,
     providerHealthMap,
@@ -1455,7 +1495,10 @@ export function buildRoleRecommendationRoutes(
   const primaryHealthy = healthyPrimary !== null;
   const alternativeRoutes = visibleRoutes
     .filter((route) => route !== primaryRoute)
-    .map((route) => ({ route, healthy: isRouteHealthy(route) }));
+    .map((route) => ({
+      route,
+      healthy: isRouteCurrentlyHealthy(route, providerHealthMap, modelRouteHealthMap, now),
+    }));
   return { primaryRoute, primaryHealthy, alternativeRoutes };
 }
 
@@ -2478,12 +2521,6 @@ export function findPreferredHealthyRoute(
 ): { selectedModelRoute: string; reasoning: string } | null {
   if (preferredModels.length === 0) return null;
 
-  const isRouteHealthy = (route: { provider: string; model: string }): boolean => {
-    if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
-    const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
-    return !routeHealth || routeHealth.until <= now;
-  };
-
   for (const preferredModel of preferredModels) {
     for (const entry of candidateEntries) {
       const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
@@ -2493,7 +2530,9 @@ export function findPreferredHealthyRoute(
       if (!entryContainsPreferred) continue;
 
       const exactRoute = visibleRoutes.find(
-        (route) => route.model === preferredModel && isRouteHealthy(route),
+        (route) =>
+          route.model === preferredModel
+          && isRouteCurrentlyHealthy(route, providerHealthMap, modelRouteHealthMap, now),
       );
       if (exactRoute) {
         return {
@@ -2502,7 +2541,10 @@ export function findPreferredHealthyRoute(
         };
       }
 
-      const fallbackRoute = visibleRoutes.find((route) => isRouteHealthy(route));
+      const fallbackRoute = visibleRoutes.find(
+        (route) =>
+          isRouteCurrentlyHealthy(route, providerHealthMap, modelRouteHealthMap, now),
+      );
       if (fallbackRoute) {
         return {
           selectedModelRoute: fallbackRoute.model,
@@ -2555,10 +2597,9 @@ export function findFirstHealthyVisibleRoute(
   for (const entry of candidateEntries) {
     const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
     for (const route of visibleRoutes) {
-      if (!isProviderHealthy(providerHealthMap, route.provider, now)) continue;
-      const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
-      if (routeHealth && routeHealth.until > now) continue;
-      return { provider: route.provider, model: route.model };
+      if (isRouteCurrentlyHealthy(route, providerHealthMap, modelRouteHealthMap, now)) {
+        return { provider: route.provider, model: route.model };
+      }
     }
   }
   return null;
@@ -2670,12 +2711,9 @@ async function recommendTaskModelRoute(
     // healthy one. If none are healthy, fall through to the last-resort
     // healthy-route scan below so the caller gets a working route.
     const visibleRoutes = filterVisibleProviderRoutes(best.provider_order);
-    const bestRouteIsHealthy = (route: { provider: string; model: string }): boolean => {
-      if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
-      const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
-      return !routeHealth || routeHealth.until <= now;
-    };
-    const primaryRoute = visibleRoutes.find(bestRouteIsHealthy);
+    const primaryRoute = visibleRoutes.find((route) =>
+      isRouteCurrentlyHealthy(route, providerHealthMap, modelRouteHealthMap, now),
+    );
     if (primaryRoute) {
       return {
         // primaryRoute.model is already composite "provider/model-id".
