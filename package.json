@@ -11,7 +11,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "npm run build && npm run test",
-    "test": "node --import tsx --test src/**/*.test.ts",
+    "test": "node --import tsx --test 'src/**/*.test.ts'",
     "list-targets": "tsx src/cli.ts list-targets",
     "targets": "tsx src/cli.ts list-targets",
     "show:dr-repo": "tsx src/cli.ts show-target dr-repo",
