@@ -178,6 +178,55 @@ async function persistProviderHealth(
   }
 }
 
+/**
+ * Filter a raw opencode `provider.models` map down to enabled, route-healthy
+ * raw model ids for one provider.
+ *
+ * Used by the `provider.models` hook. Previously the hook only consulted
+ * `providerHealthMap` for the whole provider (e.g. `openrouter` as a unit) —
+ * if a SPECIFIC route had a `model_not_found` / zero-token quota / hang
+ * `timeout` entry in `modelRouteHealthMap`, the model was still advertised
+ * as available to opencode's router, which would then pick it, fail, record
+ * the penalty again, and loop. Route-level penalties were effectively
+ * invisible to opencode's routing layer even though every other reader in
+ * this plugin honors them.
+ *
+ * Args:
+ *   providerModels: The opencode-supplied raw models map (typed unknown-value
+ *     because the opencode runtime shape is provider-specific and not worth
+ *     re-declaring here — we only need the keys).
+ *   enabledRawModelIDs: Raw model ids the registry marks enabled for this
+ *     provider (built by `buildEnabledProviderModelSet`).
+ *   providerID: The opencode provider id (e.g. `"openrouter"`).
+ *   modelRouteHealthMap: In-memory route health table; entries with
+ *     `until > now` are treated as blocked.
+ *   now: Wall-clock timestamp in ms.
+ *
+ * Returns:
+ *   A new map containing only entries whose key is both (a) enabled per the
+ *   registry for this provider and (b) not currently penalized at the route
+ *   level. Route keys are composed via `composeRouteKey` so the write-side
+ *   convention (`${providerID}/${model.id}`) stays symmetric with the
+ *   read-side lookup.
+ */
+export function filterProviderModelsByRouteHealth(
+  providerModels: Record<string, unknown>,
+  enabledRawModelIDs: Set<string>,
+  providerID: string,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  now: number,
+): Record<string, unknown> {
+  const filtered: Record<string, unknown> = {};
+  for (const [modelID, modelValue] of Object.entries(providerModels)) {
+    if (!enabledRawModelIDs.has(modelID)) continue;
+    const routeKey = composeRouteKey({ provider: providerID, model: modelID });
+    const routeHealth = modelRouteHealthMap.get(routeKey);
+    if (routeHealth && routeHealth.until > now) continue;
+    filtered[modelID] = modelValue;
+  }
+  return filtered;
+}
+
 function buildEnabledProviderModelSet(
   modelRegistryEntries: ModelRegistryEntry[],
   providerID: string,
@@ -1370,11 +1419,13 @@ export const ModelRegistryPlugin: Plugin = async () => {
             OPENROUTER_PROVIDER_ID,
           );
 
-          return Object.fromEntries(
-            Object.entries(provider.models).filter(([modelID]) =>
-              enabledOpenRouterModels.has(modelID),
-            ),
-          );
+          return filterProviderModelsByRouteHealth(
+            provider.models as Record<string, unknown>,
+            enabledOpenRouterModels,
+            OPENROUTER_PROVIDER_ID,
+            modelRouteHealthMap,
+            now,
+          ) as typeof provider.models;
         } catch (error) {
           logRegistryLoadError(error);
           return provider.models;

@@ -12,6 +12,7 @@ import {
   composeRouteKey,
   computeRegistryEntryHealthReport,
   expireHealthMaps,
+  filterProviderModelsByRouteHealth,
   findCuratedFallbackRoute,
   inferTaskComplexity,
   recommendTaskModelRoute,
@@ -1079,4 +1080,69 @@ test("recommendTaskModelRoute_whenLastResortMustSkipRouteLevelDeadRoute_returnsN
 
   assert.equal(decision.selectedModelRoute, "ollama-cloud/live-last-resort");
   assert.match(decision.reasoning, /Fallback to first healthy visible route/);
+});
+
+test("filterProviderModelsByRouteHealth_whenRawModelHasRouteLevelPenalty_isExcludedFromOpencodeModelMap", () => {
+  // Regression: the openrouter `provider.models` hook used to only consult
+  // `providerHealthMap` for the provider as a whole. A specific route with
+  // a route-level penalty (model_not_found, zero-token quota, hang timeout)
+  // was still returned to opencode's router as available, and the router
+  // would pick it, fail, re-record the penalty, and loop — the penalty was
+  // effectively invisible at the only layer where opencode actually routes.
+  const enabledRawModelIDs = new Set(["xiaomi/mimo-v2-pro", "stepfun/step-3.5-flash:free"]);
+  const providerModels = {
+    "xiaomi/mimo-v2-pro": { id: "xiaomi/mimo-v2-pro", label: "paid" },
+    "stepfun/step-3.5-flash:free": { id: "stepfun/step-3.5-flash:free", label: "free" },
+    "never-enabled-model": { id: "never-enabled-model", label: "not in registry" },
+  };
+  const modelRouteHealthMap = new Map([
+    ["openrouter/xiaomi/mimo-v2-pro", {
+      state: "model_not_found" as const,
+      until: Date.now() + 60_000,
+      retryCount: 1,
+    }],
+  ]);
+
+  const filtered = filterProviderModelsByRouteHealth(
+    providerModels,
+    enabledRawModelIDs,
+    "openrouter",
+    modelRouteHealthMap,
+    Date.now(),
+  );
+
+  assert.deepEqual(
+    Object.keys(filtered).sort(),
+    ["stepfun/step-3.5-flash:free"],
+    "route-penalized model should be excluded; healthy free route should remain; never-enabled should be excluded",
+  );
+});
+
+test("filterProviderModelsByRouteHealth_whenRouteLevelPenaltyHasExpired_keepsModelAvailable", () => {
+  // Symmetry check: an expired penalty (until <= now) must NOT block the
+  // route. The expireHealthMaps sweep eventually deletes it, but between
+  // sweeps the filter is the gate readers see — it must treat `until <= now`
+  // as "penalty lifted" or the plugin races itself.
+  const enabledRawModelIDs = new Set(["stepfun/step-3.5-flash:free"]);
+  const providerModels = {
+    "stepfun/step-3.5-flash:free": { id: "stepfun/step-3.5-flash:free" },
+  };
+  const now = Date.now();
+  const modelRouteHealthMap = new Map([
+    ["openrouter/stepfun/step-3.5-flash:free", {
+      state: "model_not_found" as const,
+      until: now - 1, // already expired
+      retryCount: 1,
+    }],
+  ]);
+
+  const filtered = filterProviderModelsByRouteHealth(
+    providerModels,
+    enabledRawModelIDs,
+    "openrouter",
+    modelRouteHealthMap,
+    now,
+  );
+
+  assert.deepEqual(Object.keys(filtered), ["stepfun/step-3.5-flash:free"]);
 });
