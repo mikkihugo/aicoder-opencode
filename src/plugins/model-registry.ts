@@ -2901,12 +2901,26 @@ export function findFirstHealthyVisibleRoute(
   modelRouteHealthMap: Map<string, ModelRouteHealth>,
   now: number,
 ): { provider: string; model: string } | null {
+  // M72: delegate the inner per-entry scan to `findFirstHealthyRouteInEntry`
+  // (M61) instead of inlining `filterVisibleProviderRoutes` + the
+  // `isRouteCurrentlyHealthy` loop. M65 already did this at the
+  // `buildAvailableModelsSystemPrompt` site but missed this one — the
+  // dedupe sweep stopped one caller short. The two functions differ only
+  // in outer-loop arity (single entry vs list of entries); the inner
+  // "find the first healthy visible route in this one entry" question has
+  // a single canonical answer, and it's `findFirstHealthyRouteInEntry`.
+  // Keeping them in lockstep means any future refinement of the per-entry
+  // predicate (e.g. a provider-preference tiebreak, a composite-key
+  // normalization step) lands at one site and propagates here for free.
   for (const entry of candidateEntries) {
-    const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
-    for (const route of visibleRoutes) {
-      if (isRouteCurrentlyHealthy(route, providerHealthMap, modelRouteHealthMap, now)) {
-        return { provider: route.provider, model: route.model };
-      }
+    const firstHealthyRoute = findFirstHealthyRouteInEntry(
+      entry,
+      providerHealthMap,
+      modelRouteHealthMap,
+      now,
+    );
+    if (firstHealthyRoute) {
+      return { provider: firstHealthyRoute.provider, model: firstHealthyRoute.model };
     }
   }
   return null;
