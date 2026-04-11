@@ -1360,14 +1360,23 @@ export function findCuratedFallbackRoute(
   // — returning them here would poison the agent-visible "Curated fallbacks"
   // system-prompt section with routes the agent cannot use.
   const visibleRoutes = filterVisibleProviderRoutes(modelRegistryEntry.provider_order);
+  // M66: the provider-healthy + route-expired suffix is exactly
+  // `isRouteCurrentlyHealthy`. The M64 dedupe-helper docstring
+  // deliberately left this site inline because the two upfront
+  // guards (`blockedProviderID`, `isFallbackBlocked`) are strictly
+  // stronger than the canonical predicate. But those extras are
+  // prefix filters — if they pass, the tail IS the canonical check
+  // and should delegate so a future health-check refinement (e.g.
+  // a new sentinel state or a sibling-aware check) propagates here
+  // automatically. Existing pins
+  // `findCuratedFallbackRoute_whenRouteIsMarkedUnhealthyAtRouteLevel_skipsIt`
+  // and `findCuratedFallbackRoute_whenNextRouteIsHiddenPaidProvider_skipsToVisibleRoute`
+  // catch drift in the tail.
   const allowedRoute = visibleRoutes.find(
     (providerRoute) => {
       if (providerRoute.provider === blockedProviderID) return false;
       if (isFallbackBlocked(providerRoute.provider, providerRoute.model)) return false;
-      if (!isProviderHealthy(providerHealthMap, providerRoute.provider, now)) return false;
-      const routeHealth = modelRouteHealthMap.get(composeRouteKey(providerRoute));
-      if (routeHealth && routeHealth.until > now) return false;
-      return true;
+      return isRouteCurrentlyHealthy(providerRoute, providerHealthMap, modelRouteHealthMap, now);
     },
   );
 
