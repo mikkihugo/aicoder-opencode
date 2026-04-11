@@ -254,6 +254,40 @@ function isFallbackBlocked(providerID: string, modelID: string): boolean {
   );
 }
 
+/**
+ * Drop entries from both health maps whose penalty window has elapsed.
+ *
+ * Called from `experimental.chat.system.transform` on every invocation
+ * so long-running sessions do not accumulate stale health state in
+ * memory OR in the persisted `providerHealth.json` file (which is
+ * rewritten from these maps whenever an error event fires).
+ *
+ * Args:
+ *   providerHealthMap: In-place map of provider-id → health (mutated).
+ *   modelRouteHealthMap: In-place map of composite-route → health (mutated).
+ *   now: Current wall-clock timestamp in ms (epoch).
+ *
+ * Note:
+ *   `key_missing` entries have `until = Number.POSITIVE_INFINITY` and
+ *   are correctly never expired.
+ */
+export function expireHealthMaps(
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  now: number,
+): void {
+  for (const [providerID, health] of providerHealthMap.entries()) {
+    if (health.until <= now) {
+      providerHealthMap.delete(providerID);
+    }
+  }
+  for (const [routeKey, health] of modelRouteHealthMap.entries()) {
+    if (health.until <= now) {
+      modelRouteHealthMap.delete(routeKey);
+    }
+  }
+}
+
 export function findCuratedFallbackRoute(
   modelRegistryEntry: ModelRegistryEntry,
   blockedProviderID: string,
@@ -1327,12 +1361,11 @@ export const ModelRegistryPlugin: Plugin = async () => {
         const now = Date.now();
         const modelRegistry = await loadModelRegistry(CONTROL_PLANE_ROOT_DIRECTORY);
 
-        // Expire stale health entries.
-        for (const [providerID, health] of providerHealthMap.entries()) {
-          if (health.until <= now) {
-            providerHealthMap.delete(providerID);
-          }
-        }
+        // Expire stale health entries in BOTH maps. The transform hook
+        // runs on every message, so this keeps memory and the persisted
+        // providerHealth.json file bounded. Previously only the provider
+        // map was expired; route-health entries accumulated forever.
+        expireHealthMaps(providerHealthMap, modelRouteHealthMap, now);
 
         const modelRegistryEntry = findRegistryEntryByModel(modelRegistry.models, {
           id: input.model.id,

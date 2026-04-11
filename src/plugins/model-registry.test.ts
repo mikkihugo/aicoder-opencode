@@ -6,6 +6,7 @@ import test from "node:test";
 
 import type { ModelRegistryEntry } from "../model-registry.js";
 import {
+  expireHealthMaps,
   findCuratedFallbackRoute,
   inferTaskComplexity,
   recommendTaskModelRoute,
@@ -529,4 +530,65 @@ test("findCuratedFallbackRoute_whenRouteIsMarkedUnhealthyAtRouteLevel_skipsIt", 
   );
 
   assert.equal(fallback, "opencode-go/some-model-live");
+});
+
+test("expireHealthMaps_whenRouteEntryExpired_dropsRouteEntry", () => {
+  // Regression: the `experimental.chat.system.transform` hook used to
+  // expire only `providerHealthMap`, leaving stale `modelRouteHealthMap`
+  // entries in place forever. They leak memory in long-running plugin
+  // sessions AND persist across restarts via `persistProviderHealth`,
+  // which rewrites providerHealth.json from these maps on every error
+  // event. The fix extracted a shared `expireHealthMaps` helper that
+  // walks BOTH maps.
+  const now = Date.now();
+  const providerHealthMap = new Map([
+    [
+      "iflowcn",
+      { state: "quota" as const, until: now - 1, retryCount: 1 },
+    ],
+    [
+      "ollama-cloud",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  const modelRouteHealthMap = new Map([
+    [
+      "opencode-go/dead-route",
+      { state: "model_not_found" as const, until: now - 1, retryCount: 1 },
+    ],
+    [
+      "opencode-go/live-route",
+      { state: "timeout" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  expireHealthMaps(providerHealthMap, modelRouteHealthMap, now);
+
+  // Provider expiration (preserved behavior).
+  assert.equal(providerHealthMap.has("iflowcn"), false);
+  assert.equal(providerHealthMap.has("ollama-cloud"), true);
+  // Route expiration (the new fix).
+  assert.equal(modelRouteHealthMap.has("opencode-go/dead-route"), false);
+  assert.equal(modelRouteHealthMap.has("opencode-go/live-route"), true);
+});
+
+test("expireHealthMaps_whenKeyMissingEntryIsInfinite_neverExpires", () => {
+  // `key_missing` entries use `until = Number.POSITIVE_INFINITY` to
+  // stay active for the full process lifetime (credentials don't
+  // appear mid-run). Pin that they are never dropped even far in
+  // the future.
+  const providerHealthMap = new Map([
+    [
+      "openrouter",
+      {
+        state: "key_missing" as const,
+        until: Number.POSITIVE_INFINITY,
+        retryCount: 0,
+      },
+    ],
+  ]);
+
+  expireHealthMaps(providerHealthMap, new Map(), Date.now() + 365 * 24 * 60 * 60 * 1000);
+
+  assert.equal(providerHealthMap.has("openrouter"), true);
 });

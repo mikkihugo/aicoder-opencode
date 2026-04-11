@@ -172,6 +172,18 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M25: `experimental.chat.system.transform` only expired providerHealthMap — modelRouteHealthMap grew unbounded and leaked to persisted disk state `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: the `experimental.chat.system.transform` hook ran a local `for (const [providerID, health] of providerHealthMap.entries()) { if (health.until <= now) providerHealthMap.delete(providerID); }` loop on every message to keep the provider health map lean. It did NOT run the equivalent loop on `modelRouteHealthMap`. Since the only other `modelRouteHealthMap.delete` site was `get_quota_backoff_status` (which only fires when the agent explicitly queries status), every route-level penalty — `model_not_found`, route-level quota, hang-timer `timeout` — stayed in memory for the full lifetime of the process.
+- **Consequence 1 (memory)**: long-running plugin sessions (autopilot loops, days of uptime) accumulated dead route entries without bound. Not catastrophic but real and easy to fix.
+- **Consequence 2 (persisted disk state)**: `persistProviderHealth(providerHealthMap, modelRouteHealthMap)` is called from every error-event handler and serializes both maps to `providerHealth.json`. Expired-but-still-in-memory route entries were re-written to disk on every error, and `loadPersistedProviderHealth` on restart reloaded them and clamped-or-kept them depending on their `until` values. Cross-restart drift: route backoffs that should have expired while the process was stopped didn't, because `loadPersistedProviderHealth` doesn't currently expire at load time either (it just trusts the stored `until` — which is correct as long as the in-memory map is kept pruned).
+- **Consequence 3 (semantic)**: M23 and M24 both added `modelRouteHealthMap.get(route.model)?.until <= now` checks. Those checks are correct regardless of whether stale entries are pruned (an expired entry with `until <= now` is equivalent to no entry), so the routing decisions themselves were not broken by the leak. Only memory and disk state were affected.
+- **Fix**: extract a shared `expireHealthMaps(providerHealthMap, modelRouteHealthMap, now)` helper that walks both maps in-place, and call it from the transform hook instead of the inline provider-only loop. Exported for direct unit testing. `key_missing` entries with `until = Number.POSITIVE_INFINITY` remain non-expiring by construction (`Infinity > now` is always true, so the `<= now` check never fires).
+- **Tests**: (a) `expireHealthMaps_whenRouteEntryExpired_dropsRouteEntry` — seeds each map with one expired and one live entry, asserts only the expired entries are dropped from BOTH maps. (b) `expireHealthMaps_whenKeyMissingEntryIsInfinite_neverExpires` — pins the `key_missing` semantics by advancing `now` one year and asserting the entry survives. (No "fails on old behavior" pass needed — the function is brand new, the test is the spec for what it must do.)
+- **Verification**: 132/132 tests pass (130 + 2 new), `tsc -p tsconfig.json` clean.
+- **Files**: `src/plugins/model-registry.ts`, `src/plugins/model-registry.test.ts`.
+
 ### M24: `findCuratedFallbackRoute` skipped `filterVisibleProviderRoutes` and `modelRouteHealthMap` — system-prompt "Curated fallbacks" could suggest paid/dead routes `✅ COMPLETED`
 
 Completion Notes (2026-04-11):
