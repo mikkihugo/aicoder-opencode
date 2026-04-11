@@ -3,31 +3,30 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
-AUTOPILOT_BIN="$REPO_ROOT/.opencode/bin/dr-autopilot"
-MAINTENANCE_WEB_SERVICE_NAME="${DR_REPO_MAINTENANCE_SERVICE_NAME:-aicoder-opencode-main.service}"
-MAINTENANCE_SERVER_URL="${DR_REPO_MAINTENANCE_SERVER_URL:-${DR_MAINTENANCE_SERVER_URL:-http://127.0.0.1:8080}}"
-MAINTENANCE_AUTOMATION_USERNAME="${DR_REPO_MAINTENANCE_AUTOMATION_USERNAME:-${DR_MAINTENANCE_AUTOMATION_USERNAME:-opencode}}"
-MAINTENANCE_PASSWORD_PATH="${DR_REPO_MAINTENANCE_PASSWORD_PATH:-$REPO_ROOT/.opencode/state/maintenance-web/server-password}"
-LOG_DIRECTORY="$REPO_ROOT/.opencode/state/autopilot"
-LOG_PATH="$LOG_DIRECTORY/maintenance-autonomous-start.log"
-START_MESSAGE="${1:-Maintenance iteration for dr-repo. Follow this workflow strictly:
-1. Consult roadmap_keeper for the next highest-value slice (read STATUS.md, ROADMAP.md, active plans under docs/plans/, recent checkpoints).
+MAINTENANCE_SERVICE_NAME="${LETTA_WORKSPACE_MAINTENANCE_SERVICE_NAME:-aicoder-opencode-main.service}"
+MAINTENANCE_SERVER_URL="${LETTA_WORKSPACE_MAINTENANCE_SERVER_URL:-${LETTA_MAINTENANCE_SERVER_URL:-http://127.0.0.1:8080}}"
+MAINTENANCE_AUTOMATION_USERNAME="${LETTA_WORKSPACE_MAINTENANCE_AUTOMATION_USERNAME:-${LETTA_MAINTENANCE_AUTOMATION_USERNAME:-opencode}}"
+MAINTENANCE_PASSWORD_PATH="${LETTA_WORKSPACE_MAINTENANCE_PASSWORD_PATH:-$REPO_ROOT/.opencode/state/maintenance-web/server-password}"
+LOG_DIRECTORY="$REPO_ROOT/.opencode/state/maintenance"
+LOG_PATH="$LOG_DIRECTORY/maintenance-start.log"
+START_MESSAGE="${1:-Maintenance iteration for letta-workspace. Follow this workflow strictly:
+1. Consult roadmap_keeper for the next highest-value slice (read STATUS.md, ROADMAP.md, active plans, recent checkpoints, monorepo subproject state).
 2. Dispatch planning_analyst and consumer_advocate in parallel for that slice. Planning must produce a Critical Files list; consumer_advocate must surface user-facing friction and unsafe defaults.
 3. For every non-trivial slice, run a concrete partner/combatant pair in parallel before coding: use codebase_explorer or architecture_consultant as the supportive read helper, and use critical_reviewer or oracle as the adversarial read helper. Synthesize both reports yourself before editing.
 4. Implement the change yourself, or delegate one tightly scoped implementation_worker task with exact paths, exact change, and one-sentence why.
 5. Run verifier after changes. If regression or security risk is material, run critical_reviewer or security_reviewer as an additional read-only pass.
 6. Commit when verified. Loop to step 1 for the next slice. Never ask the user unless the next move is destructive or irreversible; otherwise record the assumption in the checkpoint and continue.
-7. Keep the session title and checkpoints clean and specific to dr-repo maintenance.
+7. Keep the session title and checkpoints clean and specific to letta-workspace maintenance.
 8. **PDD Purpose gate — emit BEFORE any edit.** For every non-trivial slice, emit the 6-line Purpose block (OBSERVED: / PURPOSE: / WHY: / IF/THEN: / CONFIDENCE: 0.0-1.0 / GATE:) as specified in implementation_lead.md BEFORE touching code. Trivial reversible slices may emit a one-line RATIONALE: instead. CONFIDENCE < 0.7 blocks proceeding without an adversarial subagent pass (critical_reviewer / oracle / security_reviewer). The Purpose block is your visible proof the gate was run.
 9. **Subagent output guard.** If any dispatched specialist returns zero text (step-start + step-finish with no content parts), treat it as a failed MCP 503 dispatch, NOT "no feedback". Retry with a different-lineage model. Never synthesize on empty input. Record `reviewer: empty, retried: <model>` in slice notes.
 
 Spec-kit is the canonical scaffold: shape every non-trivial slice as /specify (spec from .specify/templates/spec-template.md) -> /plan (plan from plan-template.md) -> /tasks (tasks from tasks-template.md) -> /implement. PM skills (pm-outcome-roadmap, pm-create-prd, pm-brainstorm-okrs, pm-prioritization-frameworks, pm-pre-mortem) feed the spec; planning_analyst feeds the plan; implementation_lead executes tasks.}"
-AUTONOMOUS_SESSION_TITLE="${DR_REPO_MAINTENANCE_AUTONOMOUS_SESSION_TITLE:-${DR_MAINTENANCE_AUTONOMOUS_SESSION_TITLE:-dr-repo-maintenance}}"
-GENERIC_AUTONOMOUS_TITLE_REGEX="${DR_REPO_MAINTENANCE_GENERIC_AUTONOMOUS_TITLE_REGEX:-${DR_MAINTENANCE_GENERIC_AUTONOMOUS_TITLE_REGEX:-dr-maintenance-autonomous|dr[- ]repo maintenance|autonomous iteration|dr autonomous iteration mode}}"
-SESSION_ID_FILE="$LOG_DIRECTORY/maintenance-autonomous-session-id"
-RUNNER_UNIT_NAME="${DR_REPO_MAINTENANCE_RUNNER_UNIT_NAME:-dr-repo-maintenance-run.service}"
-REMOTE_MESSAGE_READ_TIMEOUT_SECONDS="${DR_REPO_REMOTE_MESSAGE_READ_TIMEOUT_SECONDS:-120}"
-ACTIVE_RUN_STALE_SECONDS="${DR_REPO_ACTIVE_RUN_STALE_SECONDS:-1200}"
+SESSION_TITLE="${LETTA_WORKSPACE_MAINTENANCE_SESSION_TITLE:-${LETTA_MAINTENANCE_SESSION_TITLE:-letta-workspace-maintenance}}"
+SESSION_ID_FILE="$LOG_DIRECTORY/session-id"
+RUNNER_UNIT_NAME="${LETTA_WORKSPACE_MAINTENANCE_RUNNER_UNIT_NAME:-letta-workspace-maintenance-run.service}"
+GENERIC_MAINTENANCE_TITLE_REGEX="${LETTA_WORKSPACE_MAINTENANCE_GENERIC_TITLE_REGEX:-${LETTA_MAINTENANCE_GENERIC_TITLE_REGEX:-\`?letta-workspace\`? maintenance|\`?letta-workspace\`? autonomous maintenance mode}}"
+REMOTE_MESSAGE_READ_TIMEOUT_SECONDS="${LETTA_WORKSPACE_REMOTE_MESSAGE_READ_TIMEOUT_SECONDS:-120}"
+ACTIVE_RUN_STALE_SECONDS="${LETTA_WORKSPACE_ACTIVE_RUN_STALE_SECONDS:-1200}"
 
 list_remote_sessions() {
   python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" "$REPO_ROOT" <<'PY'
@@ -110,37 +109,7 @@ while time.time() < deadline:
         last_error = exc
         time.sleep(1)
 
-raise SystemExit(f"dr-maintenance-autonomous: shared server not ready: {last_error}")
-PY
-}
-
-write_autonomous_checkpoint() {
-  local session_id="$1"
-  python3 - "$REPO_ROOT" "$session_id" <<'PY'
-import json
-import os
-import sys
-from datetime import datetime, timezone
-
-repo_root = sys.argv[1]
-session_id = sys.argv[2]
-checkpoint_dir = os.path.join(repo_root, ".opencode", "state", "checkpoints")
-checkpoint_path = os.path.join(checkpoint_dir, f"{session_id}.json")
-os.makedirs(checkpoint_dir, exist_ok=True)
-
-existing = {"sessionID": session_id}
-if os.path.exists(checkpoint_path):
-    with open(checkpoint_path, "r", encoding="utf-8") as handle:
-        existing = json.load(handle)
-
-existing["sessionID"] = session_id
-existing["autonomousIteration"] = True
-existing["status"] = existing.get("status") or "in_progress"
-existing["updatedAt"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-with open(checkpoint_path, "w", encoding="utf-8") as handle:
-    json.dump(existing, handle, indent=2)
-    handle.write("\n")
+raise SystemExit(f"letta-workspace-maintenance: shared server not ready: {last_error}")
 PY
 }
 
@@ -189,7 +158,6 @@ import base64
 import json
 import sys
 import urllib.request
-import urllib.error
 from pathlib import Path
 
 server_url = sys.argv[1].rstrip("/")
@@ -371,16 +339,12 @@ if password_path.exists():
         request.add_header("Authorization", f"Basic {token}")
 
 with urllib.request.urlopen(request, timeout=30) as response:
-    print(
-        json.dumps(
-            {
-                "accepted": True,
-                "status": response.status,
-                "sessionID": session_id,
-                "agent": agent_name,
-            }
-        )
-    )
+    print(json.dumps({
+        "accepted": True,
+        "status": response.status,
+        "sessionID": session_id,
+        "agent": agent_name,
+    }))
 PY
 }
 
@@ -391,20 +355,19 @@ stop_legacy_runner() {
 mkdir -p "$LOG_DIRECTORY"
 touch "$LOG_PATH"
 exec >>"$LOG_PATH" 2>&1
-echo "[$(date -Iseconds)] dr-repo-maintenance: bootstrap start"
-systemctl --user start "$MAINTENANCE_WEB_SERVICE_NAME" >/dev/null
-"$AUTOPILOT_BIN" start >/dev/null
+echo "[$(date -Iseconds)] letta-workspace-maintenance: bootstrap start"
+systemctl --user start "$MAINTENANCE_SERVICE_NAME" >/dev/null
 wait_for_remote_server >/dev/null
 REMOTE_SESSIONS_JSON="$(list_remote_sessions)"
 
-SESSION_SELECTION_JSON="$(python3 - "$REMOTE_SESSIONS_JSON" "$AUTONOMOUS_SESSION_TITLE" "$GENERIC_AUTONOMOUS_TITLE_REGEX" "$REPO_ROOT" <<'PY'
+SESSION_SELECTION_JSON="$(python3 - "$REMOTE_SESSIONS_JSON" "$SESSION_TITLE" "$GENERIC_MAINTENANCE_TITLE_REGEX" "$REPO_ROOT" <<'PY'
 import json
 import re
 import sys
 
 sessions = json.loads(sys.argv[1]) if sys.argv[1].strip() else []
 session_title = sys.argv[2]
-generic_autonomous_title_regex = re.compile(sys.argv[3], re.IGNORECASE)
+generic_title_regex = re.compile(sys.argv[3], re.IGNORECASE)
 repo_root = sys.argv[4]
 matching_sessions = [
     session
@@ -419,14 +382,14 @@ generic_conflicts = [
     session["id"]
     for session in sessions
     if str(session.get("directory", "")) == repo_root
-    if str(session.get("title", "")) != session_title
-    and generic_autonomous_title_regex.search(str(session.get("title", "")))
+    and str(session.get("title", "")) != session_title
+    and generic_title_regex.search(str(session.get("title", "")))
 ]
 print(json.dumps({"selected": selected, "duplicates": duplicates, "genericConflicts": generic_conflicts}))
 PY
 )"
 
-SELECTED_SESSION_ID="$(python3 - "$SESSION_SELECTION_JSON" <<'PY'
+EXISTING_SESSION_ID="$(python3 - "$SESSION_SELECTION_JSON" <<'PY'
 import json
 import sys
 
@@ -471,40 +434,53 @@ cleanup_session_ids() {
 
 cleanup_session_ids "$DUPLICATE_SESSION_IDS"
 cleanup_session_ids "$GENERIC_CONFLICT_SESSION_IDS"
-
-if [[ -n "$SELECTED_SESSION_ID" ]]; then
-  if session_requires_rotation "$SELECTED_SESSION_ID" "implementation_lead"; then
-    echo "[$(date -Iseconds)] dr-repo-maintenance: rotating polluted session $SELECTED_SESSION_ID"
-    delete_remote_session "$SELECTED_SESSION_ID"
-    SELECTED_SESSION_ID=""
+if [[ -n "$EXISTING_SESSION_ID" ]]; then
+  if session_requires_rotation "$EXISTING_SESSION_ID" "implementation_lead"; then
+    echo "[$(date -Iseconds)] letta-workspace-maintenance: rotating polluted session $EXISTING_SESSION_ID"
+    delete_remote_session "$EXISTING_SESSION_ID"
+    EXISTING_SESSION_ID=""
   fi
 fi
 
-if [[ -n "$SELECTED_SESSION_ID" ]]; then
-  if session_has_stale_assistant_run "$SELECTED_SESSION_ID" "$ACTIVE_RUN_STALE_SECONDS"; then
-    echo "[$(date -Iseconds)] dr-repo-maintenance: rotating stale active session $SELECTED_SESSION_ID"
-    delete_remote_session "$SELECTED_SESSION_ID"
-    SELECTED_SESSION_ID=""
-  elif session_has_active_assistant_run "$SELECTED_SESSION_ID"; then
-    echo "[$(date -Iseconds)] dr-repo-maintenance: assistant still running in session $SELECTED_SESSION_ID"
-    printf '%s\n' "$SELECTED_SESSION_ID" >"$SESSION_ID_FILE"
-    write_autonomous_checkpoint "$SELECTED_SESSION_ID"
-    echo "dr-repo-maintenance: active run already in progress on $MAINTENANCE_SERVER_URL"
+if [[ -n "$EXISTING_SESSION_ID" ]]; then
+  if session_has_stale_assistant_run "$EXISTING_SESSION_ID" "$ACTIVE_RUN_STALE_SECONDS"; then
+    echo "[$(date -Iseconds)] letta-workspace-maintenance: rotating stale active session $EXISTING_SESSION_ID"
+    delete_remote_session "$EXISTING_SESSION_ID"
+    EXISTING_SESSION_ID=""
+  elif session_has_active_assistant_run "$EXISTING_SESSION_ID"; then
+    echo "[$(date -Iseconds)] letta-workspace-maintenance: assistant still running in session $EXISTING_SESSION_ID"
+    printf '%s\n' "$EXISTING_SESSION_ID" >"$SESSION_ID_FILE"
+    echo "letta-workspace-maintenance: active run already in progress on $MAINTENANCE_SERVER_URL"
     exit 0
   fi
 fi
 
-if [[ -z "$SELECTED_SESSION_ID" ]]; then
-  SELECTED_SESSION_ID="$(create_remote_session "$AUTONOMOUS_SESSION_TITLE")"
+if [[ -z "$EXISTING_SESSION_ID" ]]; then
+  EXISTING_SESSION_ID="$(create_remote_session "$SESSION_TITLE")"
 fi
 
-printf '%s\n' "$SELECTED_SESSION_ID" >"$SESSION_ID_FILE"
-write_autonomous_checkpoint "$SELECTED_SESSION_ID"
+printf '%s\n' "$EXISTING_SESSION_ID" >"$SESSION_ID_FILE"
 
 stop_legacy_runner
-echo "[$(date -Iseconds)] dr-repo-maintenance: prompting session $SELECTED_SESSION_ID via $MAINTENANCE_SERVER_URL"
-PROMPT_RESULT="$(send_remote_prompt "$SELECTED_SESSION_ID" "implementation_lead" "$START_MESSAGE")"
-echo "[$(date -Iseconds)] dr-repo-maintenance: prompt completed $PROMPT_RESULT"
+echo "[$(date -Iseconds)] letta-workspace-maintenance: prompting session $EXISTING_SESSION_ID via $MAINTENANCE_SERVER_URL"
+PROMPT_RESULT="$(send_remote_prompt "$EXISTING_SESSION_ID" "implementation_lead" "$START_MESSAGE")"
+echo "[$(date -Iseconds)] letta-workspace-maintenance: prompt completed $PROMPT_RESULT"
+NEW_SESSION_ID="$(python3 - "$(list_remote_sessions)" "$SESSION_TITLE" <<'PY'
+import json
+import sys
 
-echo "dr-repo-maintenance: seeded via $MAINTENANCE_SERVER_URL"
+sessions = json.loads(sys.argv[1]) if sys.argv[1].strip() else []
+session_title = sys.argv[2]
+for session in sessions:
+    if session.get("title") == session_title:
+        print(session["id"])
+        break
+PY
+)"
+
+if [[ -n "$NEW_SESSION_ID" ]]; then
+  printf '%s\n' "$NEW_SESSION_ID" >"$SESSION_ID_FILE"
+fi
+
+echo "letta-workspace-maintenance: seeded via $MAINTENANCE_SERVER_URL"
 echo "log: $LOG_PATH"
