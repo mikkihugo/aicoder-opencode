@@ -1983,13 +1983,19 @@ export function buildAvailableModelsSystemPrompt(
   for (const entry of modelRegistryEntries) {
     if (!entry.enabled) continue;
 
-    const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
-    const firstHealthyVisibleRoute = visibleRoutes.find((route) => {
-      if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
-      const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
-      if (routeHealth && routeHealth.until > now) return false;
-      return true;
-    });
+    // M65: delegate to `findFirstHealthyRouteInEntry` (which itself
+    // delegates to `isRouteCurrentlyHealthy`) instead of inlining the
+    // predicate. This was a stray 7th inline copy missed in the M64
+    // dedupe sweep — same bug class, same "(provider healthy) AND
+    // (route health expired or absent)" shape. See M64 Completion
+    // Notes + `isRouteCurrentlyHealthy` docstring for the drift
+    // history that motivates the single-source-of-truth boundary.
+    const firstHealthyVisibleRoute = findFirstHealthyRouteInEntry(
+      entry,
+      providerHealthMap,
+      modelRouteHealthMap,
+      now,
+    );
     if (!firstHealthyVisibleRoute) continue;
 
     for (const role of entry.default_roles) {
