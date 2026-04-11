@@ -473,18 +473,77 @@ export function filterProviderModelsByRouteHealth(
   return filtered;
 }
 
-function buildEnabledProviderModelSet(
+/**
+ * Build the set of raw (provider-relative) model IDs that an opencode
+ * `provider.models` hook should keep visible for one provider, based on
+ * the curated registry.
+ *
+ * This helper is the sole source of truth for three independent drift
+ * surfaces that the `provider.models` curation hook relies on. Each
+ * surface has a concrete failure mode history, and collapsing them into
+ * one named helper is the only way to keep them from drifting apart:
+ *
+ *  1. **Enabled gate.** A `modelRegistryEntry.enabled === false` row in
+ *     `models.jsonc` is the operator-facing "hide this model from the
+ *     router" switch. A refactor that drops `if (!entry.enabled)
+ *     continue;` resurrects every disabled model at the provider-hook
+ *     boundary — the model becomes visible again to the agent / to
+ *     opencode's model picker even though the operator explicitly
+ *     disabled it. The enabled flag is the only lever an operator has
+ *     to temporarily quarantine a flaky model without deleting its
+ *     registry row, so breaking it turns the `enabled` field into a
+ *     no-op.
+ *
+ *  2. **Provider filter.** Each entry's `provider_order` array may list
+ *     fallback routes through OTHER providers (e.g. a model with a
+ *     primary openrouter route and a secondary ollama-cloud route). When
+ *     building the visible set for `providerID = "openrouter"`, only
+ *     routes whose `providerRoute.provider === providerID` are relevant
+ *     — the cross-provider fallback routes belong to the OTHER
+ *     provider's visible set, not this one. A refactor that drops
+ *     `if (providerRoute.provider !== providerID) continue;` silently
+ *     leaks cross-provider model IDs into the visible set; the
+ *     `provider.models` hook for openrouter then claims visibility over
+ *     ollama-cloud/* models, the Set.has check at the call site passes
+ *     against the wrong key space, and filtering produces a nonsense
+ *     result.
+ *
+ *  3. **Prefix-strip normalization.** Opencode's `provider.models` map
+ *     is keyed by the provider-RELATIVE raw model id (e.g.
+ *     `"xiaomi/mimo-v2-pro"` for the openrouter provider), but
+ *     `provider_order[].model` in `models.jsonc` is the COMPOSITE form
+ *     (`"openrouter/xiaomi/mimo-v2-pro"`) by registry convention. The
+ *     filter in the `provider.models` hook compares `Set.has(modelID)`
+ *     against those RAW keys, so this helper must strip the
+ *     `${providerID}/` prefix before adding to the set. A refactor that
+ *     drops the `.startsWith(providerPrefix) ? .slice(prefix.length) :
+ *     raw` normalization silently produces a set keyed on composite
+ *     strings; the provider-hook's Set.has check then never matches any
+ *     opencode key and the curation hook returns `{}` — zero models
+ *     visible to the router, which looks like a full provider outage
+ *     even though the provider is healthy.
+ *
+ * The routes that do NOT start with the expected prefix (a small
+ * handful of provider-specific unprefixed registry entries like the
+ * `LongCat-Flash-*` family, where the composite form matches
+ * LongCat's own raw key space) are added verbatim — the ternary
+ * preserves unprefixed entries untouched so the asymmetry
+ * `findRegistryEntryByModel` docstring calls out is handled at both
+ * the read and write paths.
+ *
+ * Args:
+ *   modelRegistryEntries: All curated registry rows. Walked once.
+ *   providerID: The opencode provider ID whose visible set we are
+ *     building (e.g. `"openrouter"`, `"ollama-cloud"`).
+ *
+ * Returns:
+ *   A new `Set<string>` of raw (provider-relative) model IDs the
+ *   `provider.models` hook should retain for this provider.
+ */
+export function buildEnabledProviderModelSet(
   modelRegistryEntries: ModelRegistryEntry[],
   providerID: string,
 ): Set<string> {
-  // opencode's `provider.models` is keyed by the provider-relative raw model
-  // id (e.g. `"xiaomi/mimo-v2-pro"` for the openrouter provider), but
-  // `provider_order[].model` in models.jsonc is the COMPOSITE form
-  // (`"openrouter/xiaomi/mimo-v2-pro"`) by registry convention. The filter
-  // in the `provider.models` hook compares Set.has(modelID) against those
-  // raw keys, so we normalize by stripping the `${providerID}/` prefix.
-  // Without this, the Set never matches any key and the openrouter
-  // curation hook silently returns `{}` — zero models visible to opencode.
   const providerPrefix = `${providerID}/`;
   const rawModelIDs = new Set<string>();
   for (const modelRegistryEntry of modelRegistryEntries) {

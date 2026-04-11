@@ -9,6 +9,7 @@ import type { ModelRouteHealth, ProviderHealth } from "./model-registry.js";
 import {
   buildAgentVisibleBackoffStatus,
   buildAvailableModelsSystemPrompt,
+  buildEnabledProviderModelSet,
   buildLeadingBoundaryRegex,
   buildProviderHealthSummaryForTool,
   buildProviderHealthSystemPrompt,
@@ -6064,4 +6065,69 @@ test("filterEnabledEntriesByOptionalRole_whenRoleIsCoding_excludesArchitectEntry
 
   assert.equal(result.length, 1);
   assert.equal(result[0]?.id, "m-coding");
+});
+
+// M95 pin A — enabled gate: a disabled registry entry must NOT
+// contribute to the visible set. Uses UNPREFIXED raw model ids
+// (LongCat-style) so pin C's strip is a no-op here and a strip-off
+// refactor leaves this pin green. Uses same-provider routes on both
+// entries so pin B (cross-provider leak) cannot fire. Size check
+// discriminates disabled passthrough.
+test("buildEnabledProviderModelSet_whenDisabledEntryShareProviderWithEnabled_dropsDisabled", () => {
+  const enabledEntry = buildModelRegistryEntry("m-enabled", ["coding"], "standard", [
+    { provider: "openrouter", model: "alpha", priority: 1 },
+  ]);
+  const disabledEntry: ModelRegistryEntry = {
+    ...buildModelRegistryEntry("m-disabled", ["coding"], "standard", [
+      { provider: "openrouter", model: "beta", priority: 1 },
+    ]),
+    enabled: false,
+  };
+
+  const result = buildEnabledProviderModelSet(
+    [enabledEntry, disabledEntry],
+    "openrouter",
+  );
+
+  assert.equal(result.size, 1);
+  assert.equal(result.has("alpha"), true);
+});
+
+// M95 pin B — provider filter: a route targeting a DIFFERENT provider
+// must never leak into this provider's visible set. Uses UNPREFIXED
+// model strings on both entries so pin C (strip) is a no-op and a
+// strip-off refactor cannot fire this pin. Both entries are enabled so
+// pin A (enabled gate) cannot fire. Size+has check discriminates the
+// cross-provider leak.
+test("buildEnabledProviderModelSet_whenEntryTargetsDifferentProvider_excludedFromResult", () => {
+  const openrouterEntry = buildModelRegistryEntry("m-or", ["coding"], "standard", [
+    { provider: "openrouter", model: "alpha", priority: 1 },
+  ]);
+  const ollamaEntry = buildModelRegistryEntry("m-oc", ["coding"], "standard", [
+    { provider: "ollama-cloud", model: "gamma", priority: 1 },
+  ]);
+
+  const result = buildEnabledProviderModelSet(
+    [openrouterEntry, ollamaEntry],
+    "openrouter",
+  );
+
+  assert.equal(result.size, 1);
+  assert.equal(result.has("alpha"), true);
+});
+
+// M95 pin C — prefix-strip normalization: the raw id added to the set
+// must be the provider-RELATIVE form ("zoo"), not the composite
+// registry form ("openrouter/zoo"). Uses one enabled entry targeting
+// the queried provider so neither pin A nor pin B can fire; the raw
+// `.has("zoo")` check discriminates strip-on vs strip-off because a
+// strip-off refactor would populate the set with "openrouter/zoo".
+test("buildEnabledProviderModelSet_whenRouteModelHasCompositePrefix_stripsProviderPrefix", () => {
+  const entry = buildModelRegistryEntry("m-strip", ["coding"], "standard", [
+    { provider: "openrouter", model: "openrouter/zoo", priority: 1 },
+  ]);
+
+  const result = buildEnabledProviderModelSet([entry], "openrouter");
+
+  assert.equal(result.has("zoo"), true);
 });
