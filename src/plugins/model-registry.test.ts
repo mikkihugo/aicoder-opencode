@@ -2633,6 +2633,84 @@ test("buildAgentVisibleBackoffStatus_whenEntriesExpired_excludesExpired", () => 
   assert.equal(result["opencode"], undefined);
 });
 
+// M142 pin A — `formatHealthExpiry` call on the ROUTE branch: the
+// `until` field must round-trip a finite epoch-ms number through
+// `new Date(x).toISOString()`, not emit the raw number. A sabotage
+// like `until: String(health.until)` in the route loop would leak
+// `"1700003600000"` to the agent instead of the ISO-8601 form. Exact
+// string match on a known timestamp closes the surface. Pin uses
+// ROUTE map only + non-colliding key so pins B/C don't fire here.
+test("buildAgentVisibleBackoffStatus_whenRouteEntryHasFiniteUntil_untilFieldRendersAsIso8601Format", () => {
+  const now = 1700000000000;
+  const targetUntil = now + 3600_000;
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    [
+      "openrouter/anthropic/claude-3.5-sonnet",
+      { state: "model_not_found" as const, until: targetUntil, retryCount: 1 },
+    ],
+  ]);
+  const result = buildAgentVisibleBackoffStatus(
+    new Map(),
+    modelRouteHealthMap,
+    now,
+  );
+  const entry = result["openrouter/anthropic/claude-3.5-sonnet"]!;
+  assert.equal(entry.until, new Date(targetUntil).toISOString());
+});
+
+// M142 pin B — loop-order precedence on key collision: when both
+// maps carry the same key, the ROUTE loop (which runs SECOND)
+// overwrites the provider entry, so `type: "model_route"` wins.
+// A sabotage that swaps the loop order (or merges into a single
+// provider-last pass) silently emits `type: "provider"` on the
+// collision. Deliberate collision fixture — only pin B asserts on
+// `type`, and neither pin A nor pin C touch the collision shape,
+// so this pin is the sole detector among the new pins.
+test("buildAgentVisibleBackoffStatus_whenProviderAndRouteMapsShareACollisionKey_routeLoopEntryWinsWithModelRouteType", () => {
+  const now = 1700000000000;
+  const sharedKey = "longcat/collision-key";
+  const providerHealthMap = new Map<string, ProviderHealth>([
+    [sharedKey, { state: "quota" as const, until: now + 60_000, retryCount: 5 }],
+  ]);
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    [
+      sharedKey,
+      { state: "model_not_found" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  const result = buildAgentVisibleBackoffStatus(
+    providerHealthMap,
+    modelRouteHealthMap,
+    now,
+  );
+  const entry = result[sharedKey]!;
+  assert.equal(entry.type, "model_route");
+});
+
+// M142 pin C — `retryCount` passthrough on the ROUTE branch: the
+// field must carry the SOURCE entry's retryCount verbatim, not a
+// hardcoded 0 or a dropped slot. The existing provider-branch pin
+// asserts `retryCount === 2` on quota; the route branch has zero
+// retryCount coverage pre-M142. Asserts a non-zero value on the
+// ROUTE map exactly. Pins A/B don't touch retryCount on the route
+// branch, so a `retryCount: 0` sabotage fires only pin C.
+test("buildAgentVisibleBackoffStatus_whenRouteEntryHasNonZeroRetryCount_retryCountFieldIsPreservedFromSource", () => {
+  const now = 1700000000000;
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    [
+      "ollama-cloud/glm-5",
+      { state: "model_not_found" as const, until: now + 60_000, retryCount: 7 },
+    ],
+  ]);
+  const result = buildAgentVisibleBackoffStatus(
+    new Map(),
+    modelRouteHealthMap,
+    now,
+  );
+  const entry = result["ollama-cloud/glm-5"]!;
+  assert.equal(entry.retryCount, 7);
+});
+
 test("buildAvailableModelsSystemPrompt_whenOnlyKeyMissingPenaltiesExist_returnsNull", () => {
   // Headline integration pin for M60. Post-M58 the factory installs a
   // key_missing entry for every uncredentialed curated provider. The

@@ -5538,6 +5538,66 @@ export function isAgentVisibleLivePenalty(
  *   agent-visible penalties are live in either map (including the
  *   post-M58 fresh-boot case where the provider map contains only
  *   `key_missing` entries).
+ *
+ * ## Drift surfaces (M142 PDD)
+ *
+ * The six pre-existing pins (both-empty, key_missing-only, live-quota,
+ * mixed-key_missing+quota, live-route, expired-excluded) cover the
+ * `isAgentVisibleLivePenalty` filter behaviour exhaustively but leave
+ * three orthogonal body-level invariants unpinned. Each has a concrete
+ * failure mode and each new pin is its partition's sole detector
+ * among the new pins.
+ *
+ *  A. **`formatHealthExpiry(health.until)` is called per entry — not
+ *     raw `health.until` passthrough.** The `until` field is the epoch-
+ *     ms number `ProviderHealth`/`ModelRouteHealth` stores internally;
+ *     `formatHealthExpiry` converts it to the ISO-8601 string the
+ *     `get_quota_backoff_status` tool contract advertises (and
+ *     `"never"` for `Number.POSITIVE_INFINITY`). A refactor that
+ *     inlined `String(health.until)` or passed `health.until` directly
+ *     — a plausible "drop the helper, JSON.stringify will handle it"
+ *     simplification — silently emits raw epoch ms like
+ *     `"until": 1700003600000`, which the agent's tool reader has no
+ *     way to interpret as "2023-11-14T17:33:20.000Z minus current
+ *     time". The live-quota pin at `whenLiveQuotaPenalty_includesProviderEntry`
+ *     only asserts `entry.until && entry.until !== "never"` which a
+ *     raw-number sabotage would still satisfy (the coerced number-to-
+ *     string is truthy and not literally `"never"`). Pin A closes the
+ *     ISO-8601 format surface on the ROUTE loop specifically with an
+ *     exact-match assertion against `new Date(targetUntil).toISOString()`.
+ *
+ *  B. **Provider loop runs FIRST; route loop runs SECOND — route
+ *     entries OVERWRITE provider entries on key collision.** The two
+ *     loops share one output record. On the rare key collision (e.g.
+ *     a provider-level entry and a route-level entry keyed by the
+ *     same string), the LATER loop wins by JS object-assignment
+ *     semantics, so the more-specific `type: "model_route"` entry
+ *     dominates the less-specific `type: "provider"` entry. This
+ *     precedence matters because route-level penalties carry narrower
+ *     attribution (a specific model) than provider-level penalties
+ *     (the whole provider) and the agent should prefer the narrower
+ *     signal. A refactor that swapped loop order (or collapsed both
+ *     into a single pre-merge pass where provider entries land last)
+ *     silently flips precedence, emitting `type: "provider"` on
+ *     collisions and discarding the route-level detail. No existing
+ *     pin sets up a colliding dual-map, so the ordering invariant is
+ *     structurally uncovered. Pin B closes it with a deliberate
+ *     collision fixture and asserts `type === "model_route"`.
+ *
+ *  C. **`retryCount` is passed through from the SOURCE entry on
+ *     BOTH branches — not hardcoded, not dropped, not recomputed.**
+ *     The escalation ladder in `computeProviderHealthUpdate` increments
+ *     `retryCount` on every repeat penalty so the agent can see "this
+ *     is the 3rd retry, not the 1st" and adjust strategy accordingly.
+ *     A refactor that hardcoded `retryCount: 0` "to match a fresh-
+ *     looking tool output" or dropped the field entirely on the route
+ *     branch would silently flatten the agent's view to "first attempt"
+ *     for every route-level penalty regardless of history. The live-
+ *     quota pin asserts `retryCount === 2` on the PROVIDER branch,
+ *     but the route branch has zero retryCount coverage today —
+ *     `whenRouteLevelPenaltyLive_includesRouteEntry` asserts only
+ *     state and type. Pin C closes the route-branch retryCount
+ *     passthrough with a non-zero value asserted exactly.
  */
 export function buildAgentVisibleBackoffStatus(
   providerHealthMap: Map<string, ProviderHealth>,
