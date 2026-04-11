@@ -172,6 +172,20 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M19: Composite route double-prefix bug — `${provider}/${route.model}` produced `ollama-cloud/ollama-cloud/glm-5.1` `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `provider_order[].model` in `config/models.jsonc` is already the composite `"provider/model-id"` form per registry convention (e.g. `"ollama-cloud/glm-5.1"`). Four call sites in `src/plugins/model-registry.ts` re-interpolated the provider prefix: `${route.provider}/${route.model}` — producing corrupt double-prefixed keys like `"ollama-cloud/ollama-cloud/glm-5.1"`.
+- **Affected sites**:
+  1. `findCuratedFallbackRoute` (L238) — used by `buildProviderHealthSystemPrompt`. Every time a provider flipped unhealthy, the agent-visible "Curated fallbacks" section in the system prompt listed garbled routes, misleading the model about what routes exist.
+  2. `recommendTaskModelRoute` `best` branch (L729) — the last-resort-before-raw-fallback path returned a corrupt composite as `selectedModelRoute`. Downstream code that uses this as a routing key would miss every time. Path is rarely reached (requires no agent metadata AND a prompt whose keywords match the entry's `best_for`), but was silently wrong when it did fire.
+  3. `get_model_recommendation` tool output `recommendation.primaryRoute` (L985) — user/agent-visible tool response contained a corrupt route string.
+  4. `get_model_recommendation` tool output `alternativeRoutes[].route` (L994) — same, for the alternative-routes list.
+- **Fix**: all four sites now read `route.model` directly (it's already composite). Added explanatory comments pointing back to the registry convention at the two canonical sites (L238, L729) so future edits don't regress.
+- **Test**: new `recommendTaskModelRoute_whenBestRegistryPathIsHit_returnsSinglePrefixedRoute` constructs a registry entry with `best_for: ["coding"]` and a prompt `"coding task"` to force the `best` branch live (bypassing preferred-list and last-resort). Asserts the returned route is `"iflowcn/qwen3-coder-plus"` AND does not match `/^[^/]+\/[^/]+\//` (guards against any future double-prefix regression across the contract).
+- **Verification**: 124/124 tests pass (123 + 1 new), `tsc --noEmit` clean, dist rebuilt.
+- **Files**: `src/plugins/model-registry.ts`, `src/plugins/model-registry.test.ts`.
+
 ### M18: Preferred-model fallback stranded on declared provider (agent family preference ignored when declared provider unhealthy) `✅ COMPLETED`
 
 Completion Notes (2026-04-11):

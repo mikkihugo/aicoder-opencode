@@ -293,3 +293,54 @@ test("recommendTaskModelRoute_whenPreferredRouteIsFiltered_usesNextVisibleMatchi
 
   assert.equal(decision.selectedModelRoute, "iflowcn/qwen3-coder-plus");
 });
+
+test("recommendTaskModelRoute_whenBestRegistryPathIsHit_returnsSinglePrefixedRoute", async () => {
+  // Regression: the `best` (selectBestModelForRoleAndTask) fallback path
+  // in recommendTaskModelRoute used to interpolate
+  // `${primaryRoute.provider}/${primaryRoute.model}` which produced
+  // `iflowcn/iflowcn/qwen3-coder-plus` — a corrupt double-prefixed
+  // composite, because provider_order[].model is already composite by
+  // registry convention. This test pins the single-prefix contract by
+  // constructing a task prompt that matches a best_for keyword so the
+  // `best` branch is live (not fallthrough to last-resort).
+  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "aicoder-model-routing-"));
+
+  const decision = await recommendTaskModelRoute(
+    tempDirectory,
+    {
+      // No agent metadata on disk → no preferred models.
+      subagent_type: "implementation_lead",
+      // "coding" is an exact substring match for best_for below, so the
+      // selectBestModelForRoleAndTask task filter returns the entry and
+      // the `best` branch is exercised.
+      prompt: "coding task",
+    },
+    [
+      {
+        id: "qwen3-coder-plus",
+        enabled: true,
+        description: "qwen3-coder-plus description",
+        capability_tier: "strong",
+        cost_tier: "free",
+        billing_mode: "free",
+        latency_tier: "standard",
+        concurrency: 1,
+        quota_visibility: "system-observed",
+        best_for: ["coding"],
+        not_for: [],
+        default_roles: ["implementation_worker"],
+        provider_order: [
+          { provider: "iflowcn", model: "iflowcn/qwen3-coder-plus", priority: 1 },
+        ],
+        notes: [],
+      },
+    ],
+    new Map(),
+    new Map(),
+    Date.now(),
+  );
+
+  // Must be the single-prefix composite, never "iflowcn/iflowcn/...".
+  assert.equal(decision.selectedModelRoute, "iflowcn/qwen3-coder-plus");
+  assert.doesNotMatch(decision.selectedModelRoute, /^[^/]+\/[^/]+\//);
+});

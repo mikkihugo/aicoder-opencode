@@ -235,7 +235,11 @@ function findCuratedFallbackRoute(
     return NO_FALLBACK_MODEL_CONFIGURED_MESSAGE;
   }
 
-  return `${allowedRoute.provider}/${allowedRoute.model}`;
+  // provider_order[].model is already the composite "provider/model-id"
+  // per registry convention (see models.jsonc). Do NOT re-prefix with
+  // provider — that produces `ollama-cloud/ollama-cloud/glm-5.1` and
+  // poisons the agent-visible system-prompt "Curated fallbacks" section.
+  return allowedRoute.model;
 }
 
 function isProviderHealthy(
@@ -726,7 +730,8 @@ async function recommendTaskModelRoute(
     const primaryRoute = best.provider_order[0];
     if (primaryRoute) {
       return {
-        selectedModelRoute: `${primaryRoute.provider}/${primaryRoute.model}`,
+        // primaryRoute.model is already composite "provider/model-id".
+        selectedModelRoute: primaryRoute.model,
         reasoning: `Best registry model for role '${role}' and complexity '${complexity}'`,
       };
     }
@@ -981,9 +986,9 @@ export const ModelRegistryPlugin: Plugin = async () => {
           return JSON.stringify({
             recommendation: {
               modelID: best.id,
-              primaryRoute: primaryRoute
-                ? `${primaryRoute.provider}/${primaryRoute.model}`
-                : null,
+              // route.model fields in provider_order are already the
+              // composite "provider/model-id" form per registry convention.
+              primaryRoute: primaryRoute ? primaryRoute.model : null,
               capabilityTier: best.capability_tier,
               billingMode: best.billing_mode,
               roles: best.default_roles,
@@ -991,7 +996,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
               primaryProviderHealthy: healthy,
             },
             alternativeRoutes: best.provider_order.slice(1).map((route) => ({
-              route: `${route.provider}/${route.model}`,
+              route: route.model,
               healthy: isProviderHealthy(providerHealthMap, route.provider, now),
             })),
           }, null, 2);
