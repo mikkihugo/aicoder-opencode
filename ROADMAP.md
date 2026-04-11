@@ -93,12 +93,15 @@ Completion Notes (2026-04-11):
 - Target-specific backups should go to `<root>/.opencode/xdg-data/opencode/backups/`
 - Or at minimum, include target name in backup filename
 
-### M8: Letta-workspace overlay — make agent files durable `⬜ PENDING`
+### M8: Letta-workspace overlay — make agent files durable `✅ COMPLETED`
 
-- `letta-workspace/.opencode/` is in letta-workspace's `.gitignore` — agent files (including the PDD-softened `implementation_lead.md`) live only on the local machine, not version-controlled anywhere. If the `.opencode/` dir is deleted or the machine reset, the rules are lost.
-- `dr-repo/.opencode/agents` is a symlink into `aicoder-opencode/targets/dr-repo/overlay/.opencode/agents`, which IS tracked in this repo. That's the correct shape.
-- Fix: create `targets/letta-workspace/overlay/.opencode/agents/`, seed it with the current live files, and symlink `letta-workspace/.opencode/agents` into it. Parallel to the dr-repo layout.
-- Parked on the "don't make cross-repo symlinks mid-flight" heuristic — the 3 autopilots are all running slices now; structural symlink swap should wait for an idle moment.
+Completion Notes (2026-04-11):
+- Created `targets/letta-workspace/overlay/.opencode/agents/` and seeded with all 15 live agent files from `letta-workspace/.opencode/agents/` — byte-identical `diff -q` verified pre-swap.
+- Atomic swap on letta side: `mv agents agents.bak && ln -s <absolute overlay path> agents`, re-verified identical content through the symlink, removed `.bak`.
+- `letta-workspace/.opencode/agents` → `/home/mhugo/code/aicoder-opencode/targets/letta-workspace/overlay/.opencode/agents` (absolute symlink, matching dr-repo layout).
+- PDD-softened `implementation_lead.md` (6-line Purpose block + CONFIDENCE slot + subagent-output guard) is now version-controlled via this overlay.
+- **Closes letta LW1** (cross-reference in `/home/mhugo/code/letta-workspace/roadmap.md`).
+- Still ephemeral in letta: `.opencode/bin/`, `.opencode/commands/`, `.opencode/plugins/` — deferred to M10 for principled propagation rather than repeat manual copy.
 
 ### M9: Enforce partner/combatant review discipline `⬜ PENDING`
 
