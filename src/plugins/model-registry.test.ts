@@ -1221,6 +1221,79 @@ test("extractSessionErrorApiErrorContext_whenStatusCodeIsNaN_defaultsToZero", ()
   });
 });
 
+// M140 pin A — `messageRaw` non-string typeof fallback. The
+// production line `typeof messageRaw === "string" ? messageRaw : ""`
+// defends against opencode runtimes that emit a non-string
+// `data.message` (numeric error codes, serialized error objects,
+// protobuf shapes). A refactor that drops the typeof guard crashes
+// on `(messageRaw as string).toLowerCase()` on any non-string. Every
+// existing pin ships a string `data.message` or omits data, so the
+// typeof guard is globally unpinned. Asymmetry: Pin B's fixture
+// ships a string message with an Infinity statusCode — dropping the
+// message typeof guard does not touch pin B's result. Pin C's
+// fixture is the literal `null`, which short-circuits at the
+// top-level guard long before the message path runs.
+test("extractSessionErrorApiErrorContext_whenMessageIsNonString_typeofGuardFallsBackToEmptyString", () => {
+  const result = extractSessionErrorApiErrorContext({
+    sessionID: "sess-1",
+    error: {
+      name: "APIError",
+      data: { statusCode: 429, message: 429 },
+    },
+  });
+  assert.deepEqual(result, {
+    sessionID: "sess-1",
+    statusCode: 429,
+    lowerMessage: "",
+  });
+});
+
+// M140 pin B — `Number.isFinite` rejects Infinity as well as NaN.
+// The existing `whenStatusCodeIsNaN` pin catches a sabotage that
+// drops the whole numeric guard, but a surgical refactor that
+// replaces `Number.isFinite(statusCodeRaw)` with
+// `!Number.isNaN(statusCodeRaw)` — a "simplification" that
+// preserves the NaN defense — silently lets Infinity leak through.
+// `statusCode === Infinity` propagates into downstream numeric
+// dispatch and every `===` comparison against a finite rate-limit
+// code is false, killing the classifier's effective branching for
+// every real error. Asymmetry: Pin A ships a finite statusCode 429
+// so the Infinity path is inert for pin A. Pin C is literal null
+// and short-circuits before the statusCode branch. Existing NaN
+// pin does NOT fire on the surgical sabotage because NaN is still
+// rejected by `!Number.isNaN(NaN) === false`.
+test("extractSessionErrorApiErrorContext_whenStatusCodeIsInfinity_numberIsFiniteDefaultsToZero", () => {
+  const result = extractSessionErrorApiErrorContext({
+    sessionID: "sess-1",
+    error: {
+      name: "APIError",
+      data: {
+        statusCode: Number.POSITIVE_INFINITY,
+        message: "out of memory",
+      },
+    },
+  });
+  assert.deepEqual(result, {
+    sessionID: "sess-1",
+    statusCode: 0,
+    lowerMessage: "out of memory",
+  });
+});
+
+// M140 pin C — top-level `sessionError === null` explicit guard.
+// `typeof null === "object"` in JS, so the `=== null` clause is
+// load-bearing against a "cleanup refactor" that thinks the typeof
+// check is sufficient. Dropping the `sessionError === null ||`
+// clause lets null slip past the guard, the cast preserves null,
+// and `envelope.error` throws on null-deref. Asymmetry: Pin A and
+// Pin B both pass valid top-level objects so the top-level guard
+// is not touched by their fixtures; dropping it is irrelevant. No
+// existing pin passes null at the top level.
+test("extractSessionErrorApiErrorContext_whenEnvelopeIsLiteralNull_topLevelNullGuardReturnsUndefinedWithoutDeref", () => {
+  const result = extractSessionErrorApiErrorContext(null);
+  assert.equal(result, undefined);
+});
+
 test("extractSessionErrorApiErrorContext_whenDataIsMissing_returnsZeroStatusAndEmptyMessage", () => {
   // M113 pin: an APIError envelope without a `.data` property must
   // not throw — the `dataObj` fallback must resolve to `{}` so

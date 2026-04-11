@@ -2945,6 +2945,61 @@ export function extractSessionErrorExplicitModel(
  *      `error: {name: "APIError"}` alone and asserts
  *      `{sessionID: …, statusCode: 0, lowerMessage: ""}`.
  */
+/**
+ * ## Drift surfaces (M140 PDD)
+ *
+ * The six existing pins (valid shape, wrong error name, missing
+ * sessionID, empty-string sessionID, NaN statusCode, missing data)
+ * leave three structurally-orthogonal invariants uncovered:
+ *
+ * 1. **`messageRaw` non-string typeof fallback.** The line
+ *    `const lowerMessage = (typeof messageRaw === "string" ?
+ *    messageRaw : "").toLowerCase();` defends against opencode
+ *    runtimes that emit a non-string `data.message` (real-world
+ *    shapes: numeric error codes, `Error` objects serialized with
+ *    `message: <number>`, protobuf envelopes where message is an
+ *    object). A refactor that drops the typeof guard because
+ *    "message is always a string in APIError data" silently crashes
+ *    on `(messageRaw as string).toLowerCase()` the moment any such
+ *    payload arrives, killing the event subscription for the rest
+ *    of the session. Every existing pin ships a string
+ *    `data.message` (or omits data entirely), so the non-string
+ *    fallback is globally unpinned. Fires: fixture with
+ *    `data: {statusCode: 429, message: 429}` — correct impl returns
+ *    `lowerMessage === ""`, sabotaged impl throws on `(429).toLowerCase()`.
+ *
+ * 2. **`Number.isFinite(statusCodeRaw)` rejects Infinity, not just
+ *    NaN.** The `typeof === "number" && Number.isFinite(...)` guard
+ *    is load-bearing against TWO distinct IEEE-754 pathologies:
+ *    NaN (covered by the existing `whenStatusCodeIsNaN` pin) AND
+ *    ±Infinity. A refactor that replaces `Number.isFinite(...)`
+ *    with `!Number.isNaN(...)` — a surgical "simplification" that
+ *    preserves the NaN defense — silently lets Infinity leak
+ *    through. `statusCode === Infinity` then propagates into the
+ *    numeric dispatch downstream where every `===` comparison
+ *    against a finite integer is false, and the classifier falls
+ *    into its "unknown status" default for every real-world rate
+ *    limit / auth failure. Fires: fixture with
+ *    `data: {statusCode: Number.POSITIVE_INFINITY, message: "oom"}`
+ *    — correct impl returns `statusCode === 0`, `!Number.isNaN`
+ *    sabotage returns `statusCode === Infinity`. The existing NaN
+ *    pin does NOT catch this specific sabotage (it still passes
+ *    because NaN is still rejected by `!Number.isNaN(NaN)`).
+ *
+ * 3. **Top-level `sessionError === null` explicit guard.** Same
+ *    `typeof null === "object"` JS footgun as M139 but at a
+ *    different call site and under a different hook
+ *    (`session.error` vs `assistant.message.completed`). Dropping
+ *    the `sessionError === null ||` clause from the opening if lets
+ *    null slip past the guard, the cast
+ *    `sessionError as Record<string, unknown>` preserves null, and
+ *    the next statement `envelope.error` throws on null-deref.
+ *    Every existing pin passes a concrete envelope object, so the
+ *    top-level null guard is globally unpinned for THIS helper.
+ *    Fires: call with the literal argument `null` — correct impl
+ *    returns undefined, sabotaged impl throws before any other
+ *    check runs.
+ */
 export function extractSessionErrorApiErrorContext(
   sessionError: unknown,
 ): { sessionID: string; statusCode: number; lowerMessage: string } | undefined {
