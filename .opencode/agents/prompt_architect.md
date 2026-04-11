@@ -1,7 +1,7 @@
 ---
 description: Read-only prompt architect for shared doctrine, prompt systems, skills, and plugin command surfaces.
 mode: subagent
-model: zai-coding-plan/glm-5.1
+model: ollama-cloud/kimi-k2-thinking
 models:
   - zai-coding-plan/glm-5.1
   - zai-coding-plan/glm-5

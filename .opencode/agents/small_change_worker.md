@@ -1,7 +1,7 @@
 ---
 description: Cheap worker for small, straightforward, bounded edits.
 mode: subagent
-model: zai-coding-plan/glm-4.7-flash
+model: xiaomi-token-plan-ams/mimo-v2-pro
 models:
   - zai-coding-plan/glm-4.7-flash
   - ollama-cloud/kimi-k2.5

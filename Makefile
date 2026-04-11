@@ -1,5 +1,9 @@
 .PHONY: help install build check targets show-dr-repo show-letta-workspace show-dr-repo-instructions show-letta-workspace-instructions validate-dr-repo validate-letta-workspace print-dr-repo-launch debug-dr-repo-sandbox doom-loop-dr-repo show-aicoder-opencode show-aicoder-opencode-instructions validate-aicoder-opencode self-check openportal-start openportal-stop openportal-status openportal-list openportal-clean opencode-db-maintenance-start opencode-db-maintenance-status opencode-db-checkpoint-now opencode-db-backup-now opencode-db-vacuum
 
+# Prefer bun when installed, fall back to npm/npx.
+RUNNER := $(shell command -v bun >/dev/null 2>&1 && echo "bun" || echo "npm")
+NPX_CMD := $(shell command -v bunx >/dev/null 2>&1 && echo "bunx" || echo "npx")
+
 help:
 	@echo "aicoder-opencode"
 	@echo "  make install               - Install TypeScript dependencies"
@@ -31,55 +35,55 @@ help:
 	@echo "  make opencode-db-vacuum                - Run manual OpenCode SQLite VACUUM"
 
 install:
-	bun install
+	$(RUNNER) install
 
 build:
-	bun run build
+	$(RUNNER) run build
 
 check:
-	bun run check
+	$(RUNNER) run check
 
 targets:
-	@bunx tsx src/cli.ts list-targets
+	@$(NPX_CMD) tsx src/cli.ts list-targets
 
 show-dr-repo:
-	@bunx tsx src/cli.ts show-target dr-repo
+	@$(NPX_CMD) tsx src/cli.ts show-target dr-repo
 
 show-letta-workspace:
-	@bunx tsx src/cli.ts show-target letta-workspace
+	@$(NPX_CMD) tsx src/cli.ts show-target letta-workspace
 
 show-dr-repo-instructions:
-	@bunx tsx src/cli.ts show-target-instructions dr-repo
+	@$(NPX_CMD) tsx src/cli.ts show-target-instructions dr-repo
 
 show-letta-workspace-instructions:
-	@bunx tsx src/cli.ts show-target-instructions letta-workspace
+	@$(NPX_CMD) tsx src/cli.ts show-target-instructions letta-workspace
 
 validate-dr-repo:
-	@bunx tsx src/cli.ts validate-target dr-repo
+	@$(NPX_CMD) tsx src/cli.ts validate-target dr-repo
 
 validate-letta-workspace:
-	@bunx tsx src/cli.ts validate-target letta-workspace
+	@$(NPX_CMD) tsx src/cli.ts validate-target letta-workspace
 
 print-dr-repo-launch:
-	@bunx tsx src/cli.ts print-product-launch dr-repo -- --help
+	@$(NPX_CMD) tsx src/cli.ts print-product-launch dr-repo -- --help
 
 debug-dr-repo-sandbox:
-	@bunx tsx src/cli.ts debug-product-sandbox dr-repo -- /usr/bin/env bash -lc 'pwd; for path_name in .opencode .agents .maintenance; do echo ===$${path_name}===; find "$${path_name}" -mindepth 1 -maxdepth 2 | head -20; done'
+	@$(NPX_CMD) tsx src/cli.ts debug-product-sandbox dr-repo -- /usr/bin/env bash -lc 'pwd; for path_name in .opencode .agents .maintenance; do echo ===$${path_name}===; find "$${path_name}" -mindepth 1 -maxdepth 2 | head -20; done'
 
 doom-loop-dr-repo:
-	@bunx tsx src/cli.ts check-doom-loop dr-repo
+	@$(NPX_CMD) tsx src/cli.ts check-doom-loop dr-repo
 
 show-aicoder-opencode:
-	@bunx tsx src/cli.ts show-target aicoder-opencode
+	@$(NPX_CMD) tsx src/cli.ts show-target aicoder-opencode
 
 show-aicoder-opencode-instructions:
-	@bunx tsx src/cli.ts show-target-instructions aicoder-opencode
+	@$(NPX_CMD) tsx src/cli.ts show-target-instructions aicoder-opencode
 
 validate-aicoder-opencode:
-	@bunx tsx src/cli.ts validate-target aicoder-opencode
+	@$(NPX_CMD) tsx src/cli.ts validate-target aicoder-opencode
 
 self-check:
-	@bun run check
+	@$(RUNNER) run check
 
 openportal-start:
 	@AICODER_OPENPORTAL_PORT=3091 AICODER_OPENPORTAL_OPENCODE_PORT=4091 ./bin/aicoder-opencode-openportal-service start

@@ -1,7 +1,7 @@
 ---
 description: Read-only blocker-focused reviewer for correctness, regressions, and missing proof.
 mode: subagent
-model: ollama-cloud/qwen3.5:397b
+model: iflowcn/qwen3-coder-plus
 models:
   - ollama-cloud/qwen3.5:397b
   - zai-coding-plan/glm-5.1

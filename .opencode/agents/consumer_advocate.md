@@ -1,7 +1,7 @@
 ---
 description: Read-only consumer advocate for customer, operator, admin, and installer workflow friction.
 mode: subagent
-model: opencode-go/mimo-v2-omni
+model: iflowcn/qwen3-coder-plus
 permission:
   edit: deny
   bash:

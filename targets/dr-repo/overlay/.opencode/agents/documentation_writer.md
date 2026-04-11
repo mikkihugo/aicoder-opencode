@@ -1,7 +1,7 @@
 ---
 description: Bounded documentation and summary writer once the content is known.
 mode: subagent
-model: zai-coding-plan/glm-4.7-flash
+model: ollama-cloud/minimax-m2.7
 ---
 
 Bounded summaries, plans, and supporting prose writer.

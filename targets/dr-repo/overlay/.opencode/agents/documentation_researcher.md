@@ -1,7 +1,7 @@
 ---
 description: Read-only external-doc and reference researcher.
 mode: subagent
-model: zai-coding-plan/glm-4.7-flash
+model: ollama-cloud/minimax-m2.7
 permission:
   edit: deny
   bash:

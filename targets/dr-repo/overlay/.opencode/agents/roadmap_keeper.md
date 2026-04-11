@@ -1,7 +1,7 @@
 ---
 description: Read-only roadmap and execution-state keeper for milestones, sequencing, and stale-next-step detection.
 mode: subagent
-model: minimax/MiniMax-M2.7
+model: iflowcn/qwen3-coder-plus
 permission:
   edit: deny
   bash:

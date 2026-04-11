@@ -1,7 +1,7 @@
 ---
 description: Hard implementation and debugging specialist for bounded slices.
 mode: subagent
-model: zai-coding-plan/glm-4.7
+model: xiaomi-token-plan-ams/mimo-v2-pro
 models:
   - zai-coding-plan/glm-4.7
   - qwen/qwen-3.5-coder

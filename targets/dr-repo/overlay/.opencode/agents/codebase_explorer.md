@@ -1,7 +1,7 @@
 ---
 description: Fast read-only codebase mapper for ownership, search, and execution paths.
 mode: subagent
-model: zai-coding-plan/glm-4.7-flash
+model: iflowcn/qwen3-coder-plus
 models:
   - zai-coding-plan/glm-4.7-flash
   - zai-coding-plan/glm-4.7
