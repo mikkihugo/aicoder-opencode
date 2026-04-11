@@ -30,6 +30,7 @@ import {
   isZeroTokenQuotaSignal,
   parseAgentFrontmatter,
   parseHangTimeoutMs,
+  providerEnvVarCandidates,
   stripYamlScalarQuotes,
   DEFAULT_ROUTE_HANG_TIMEOUT_MS,
   ROUTE_MODEL_NOT_FOUND_DURATION_MS,
@@ -6130,4 +6131,50 @@ test("buildEnabledProviderModelSet_whenRouteModelHasCompositePrefix_stripsProvid
   const result = buildEnabledProviderModelSet([entry], "openrouter");
 
   assert.equal(result.has("zoo"), true);
+});
+
+// M96 pin A — override table passthrough: a provider pinned in
+// PROVIDER_ENV_VAR_OVERRIDES (google has a TWO-name override
+// `["GEMINI_API_KEY", "GOOGLE_API_KEY"]`) must return the override
+// list verbatim. A refactor that drops the early-return and always
+// computes the conventional form would collapse google to the
+// single-element `["GOOGLE_API_KEY"]`. The length check discriminates
+// this cleanly without touching the casing or dash-handling surfaces
+// (google has no dashes and only fits the override-consultation axis).
+test("providerEnvVarCandidates_whenProviderHasMultiNameOverride_returnsOverrideListVerbatim", () => {
+  const candidates = providerEnvVarCandidates("google");
+
+  assert.equal(candidates.length, 2);
+  assert.equal(candidates[0], "GEMINI_API_KEY");
+  assert.equal(candidates[1], "GOOGLE_API_KEY");
+});
+
+// M96 pin B — dash-to-underscore normalization: a non-overridden
+// provider id containing a dash must produce an env var name with no
+// dash remaining (POSIX shell vars forbid `-`). A refactor that drops
+// the `.replace(/-/g, "_")` leaves `"OLLAMA-CLOUD_API_KEY"` in place.
+// The assertion is intentionally "no dash remains in result[0]" — not
+// an exact full-string match — so this pin is orthogonal to pin C's
+// casing surface: a lowercase-leaking sabotage still produces no dash
+// and leaves pin B green. "ollama-cloud" is NOT in the override table
+// so pin A's surface is untouched.
+test("providerEnvVarCandidates_whenProviderIdContainsDash_substitutesUnderscore", () => {
+  const candidates = providerEnvVarCandidates("ollama-cloud");
+
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0]?.includes("-"), false);
+});
+
+// M96 pin C — conventional form uppercase + `_API_KEY` suffix: a
+// non-overridden provider id with no dashes and lowercase letters
+// must produce an exact `<UPPER>_API_KEY` form. A refactor that drops
+// `.toUpperCase()` produces `foo_API_KEY`, and a refactor that drops
+// the `_API_KEY` suffix produces bare `FOO` — either way this exact
+// match flips. Uses `"foo"` which is NOT in the override table
+// (orthogonal to pin A) and has NO dashes (orthogonal to pin B's
+// dash-substitution surface).
+test("providerEnvVarCandidates_whenProviderIdIsLowerAlphaOnly_producesUpperConventionalForm", () => {
+  const candidates = providerEnvVarCandidates("foo");
+
+  assert.deepEqual(candidates, ["FOO_API_KEY"]);
 });

@@ -4160,7 +4160,66 @@ const PROVIDER_ENV_VAR_OVERRIDES: Record<string, readonly string[]> = {
   togetherai: ["TOGETHER_API_KEY", "TOGETHERAI_API_KEY"],
 };
 
-function providerEnvVarCandidates(providerID: string): readonly string[] {
+/**
+ * Return the ordered list of environment variable names that, when set,
+ * should be treated as a valid credential for `providerID` in lieu of
+ * (or in addition to) an `auth.json` entry.
+ *
+ * This helper is the sole source of truth for three independent drift
+ * surfaces the key-missing / env-var-fallback logic relies on. Each
+ * surface has a concrete failure mode:
+ *
+ *  1. **Override table consultation.** `PROVIDER_ENV_VAR_OVERRIDES`
+ *     pins providers whose env var name does NOT follow the
+ *     conventional `<PROVIDER>_API_KEY` pattern, OR whose credential
+ *     can come from one of several names. Google is the canonical
+ *     multi-name case: `["GEMINI_API_KEY", "GOOGLE_API_KEY"]`. A
+ *     refactor that drops the `if (overrides) return overrides;`
+ *     early-return (the "always compute the conventional form" drift
+ *     class) silently collapses the override list down to whatever the
+ *     conventional form happens to produce — for google that is
+ *     `["GOOGLE_API_KEY"]` alone, so anyone configured solely via
+ *     `GEMINI_API_KEY` is false-flagged `key_missing` and the entire
+ *     google provider is suppressed from routing at plugin init even
+ *     though the credential is present and opencode itself honours it.
+ *     The override table is also the only way to add MULTIPLE env var
+ *     candidates for one provider (togetherai: both `TOGETHER_API_KEY`
+ *     and `TOGETHERAI_API_KEY`), so dropping the early return also
+ *     collapses multi-name providers to the conventional form only.
+ *
+ *  2. **Dash-to-underscore normalization.** Provider IDs use kebab
+ *     case (`ollama-cloud`, `kimi-for-coding`, `github-copilot`), but
+ *     POSIX shell env var names must match `[A-Za-z_][A-Za-z0-9_]*` —
+ *     a literal `-` is not a legal env var character. The
+ *     `.replace(/-/g, "_")` step is what lets the conventional form
+ *     produce a valid name from a dashed provider ID. A refactor that
+ *     drops the replacement (the "providers are plain words" drift
+ *     class) silently produces syntactically-invalid names like
+ *     `OLLAMA-CLOUD_API_KEY` that no shell will ever set, so every
+ *     dashed provider without an explicit override entry is
+ *     permanently false-flagged `key_missing` at the env var fallback
+ *     layer.
+ *
+ *  3. **Uppercase + `_API_KEY` suffix composition.** The conventional
+ *     form is `<UPPERCASE_PROVIDER>_API_KEY`. A refactor that drops
+ *     the `.toUpperCase()` step (the "env vars are case-insensitive"
+ *     drift class) produces lowercase names that fail the POSIX shell
+ *     convention and are not honoured by any real env; a refactor that
+ *     drops the `_API_KEY` suffix produces bare provider names that
+ *     collide with other variables and obviously never match opencode's
+ *     env var scheme. Both drifts silently disable the env var
+ *     fallback for every non-overridden provider.
+ *
+ * Args:
+ *   providerID: The opencode provider id (kebab-case, e.g.
+ *     `"openrouter"`, `"ollama-cloud"`, `"kimi-for-coding"`).
+ *
+ * Returns:
+ *   An ordered list of env var names to consult. Overridden providers
+ *   return the pinned override list verbatim; non-overridden providers
+ *   return a single-element list containing the conventional form.
+ */
+export function providerEnvVarCandidates(providerID: string): readonly string[] {
   const overrides = PROVIDER_ENV_VAR_OVERRIDES[providerID];
   if (overrides) {
     return overrides;
