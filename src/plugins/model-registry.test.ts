@@ -1727,6 +1727,77 @@ test("readAndClearSessionHangState_whenUnknownSession_returnsUndefinedTupleWitho
   assert.equal(sessionActiveModelMap.has("other"), true);
 });
 
+test("readAndClearSessionHangState_whenOnlyProviderMapPopulated_returnsProviderAfterRead", () => {
+  // M121 asymmetric pin A: isolates the
+  // `sessionActiveProviderMap.get(sessionID)` read. Only the provider
+  // map is populated — if the read is dropped OR reordered after the
+  // delegated clear, `result.providerID` collapses to `undefined` and
+  // this pin fires alone among the three new M121 pins. Pre-existing
+  // M78 pins fire as additive coverage but do not localise the surface.
+  const sessionStartTimeMap = new Map<string, number>();
+  const sessionActiveProviderMap = new Map<string, string>([["s1", "iflowcn"]]);
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >();
+
+  const result = readAndClearSessionHangState(
+    "s1",
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  assert.equal(result.providerID, "iflowcn");
+});
+
+test("readAndClearSessionHangState_whenOnlyModelMapPopulated_returnsModelAfterRead", () => {
+  // M121 asymmetric pin B: isolates the
+  // `sessionActiveModelMap.get(sessionID)` read. Only the model map is
+  // populated — if the read is dropped OR reordered after the clear,
+  // `result.model` collapses to `undefined` and this pin fires alone.
+  const sessionStartTimeMap = new Map<string, number>();
+  const sessionActiveProviderMap = new Map<string, string>();
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >([["s1", { id: "qwen3-coder-plus", providerID: "iflowcn" }]]);
+
+  const result = readAndClearSessionHangState(
+    "s1",
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  assert.deepEqual(result.model, { id: "qwen3-coder-plus", providerID: "iflowcn" });
+});
+
+test("readAndClearSessionHangState_whenAllMapsPopulated_delegationClearsStartTimeMap", () => {
+  // M121 asymmetric pin C: isolates the `clearSessionHangState(...)`
+  // delegation. All three maps are populated; the ONLY assertion is
+  // that the start-time map entry is gone after the call. A drift
+  // that drops the delegation entirely leaves `sessionStartTimeMap`
+  // still containing "s1" and this pin fires alone — the two read
+  // pins are unaffected because their assertions are on the returned
+  // tuple, not on the map state.
+  const sessionStartTimeMap = new Map<string, number>([["s1", 1000]]);
+  const sessionActiveProviderMap = new Map<string, string>([["s1", "iflowcn"]]);
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >([["s1", { id: "qwen3-coder-plus", providerID: "iflowcn" }]]);
+
+  readAndClearSessionHangState(
+    "s1",
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  assert.equal(sessionStartTimeMap.has("s1"), false);
+});
+
 test("buildProviderHealthSystemPrompt_whenOnlyRoutePenaltiesExist_emitsRouteSection", () => {
   // Regression: the transform hook used to short-circuit on
   // `providerHealthMap.size === 0`, so a route-level penalty

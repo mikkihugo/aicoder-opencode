@@ -3684,6 +3684,81 @@ export function bindSessionHangState(
  *   bound (e.g. the chat.params hook short-circuited before writing the
  *   model map).
  */
+/**
+ * Snapshot the per-session provider/model tuple AND clear all three
+ * hang-detection maps in a single atomic step — the read side of the M78
+ * "read-then-clear" pair used by every terminal session handler.
+ *
+ * ## Drift surfaces (M121 PDD)
+ *
+ * The body is four statements but each of the three load-bearing lines
+ * carries one orthogonal production invariant, and the three pre-existing
+ * M78 pins bundle ordering + map-membership + delegation checks in every
+ * test — so any single-line sabotage fires MULTIPLE pre-existing pins at
+ * once, leaving failure messages unable to localise which invariant broke.
+ * M121 adds three asymmetric pins that each fire on exactly one surface:
+ *
+ *   (1) **`sessionActiveProviderMap.get(sessionID)` read.** This is the
+ *       provider-half of the `{providerID, model}` tuple consumed by the
+ *       two terminal event handlers (`session.error`,
+ *       `assistant.message.completed`) to attribute timeout/classification
+ *       penalties to the correct composite route key. A drift that drops
+ *       the read (or reorders it AFTER the `clearSessionHangState` call —
+ *       the M78 motivating regression) causes `.get` to return `undefined`
+ *       from an already-cleared map, the returned tuple's `providerID`
+ *       collapses to `undefined`, and every downstream classification
+ *       branch early-returns with no penalty. The bug is silent: no
+ *       runtime error, no type error (the return type already admits
+ *       `undefined`), and the pre-existing bundled pins fire but do not
+ *       distinguish this failure from a dropped delegation or a dropped
+ *       model read.
+ *
+ *   (2) **`sessionActiveModelMap.get(sessionID)` read.** The model-half of
+ *       the same tuple. Drives the `composeRouteKey` model side in the
+ *       downstream route-level penalty recording (M42 dual-map split). A
+ *       drift that drops the read — or reorders it after the clear —
+ *       leaves route-level penalty recording degrading to provider-only
+ *       attribution, letting a single bad `{provider, model}` pair drag
+ *       down every other model hosted by the same provider at the health
+ *       ranking layer. Orthogonal to surface (1) because a caller that
+ *       populated only the model map (not the provider map) still expects
+ *       the model half of the tuple to round-trip cleanly.
+ *
+ *   (3) **`clearSessionHangState(...)` delegation call.** Must be called
+ *       AFTER both reads to drop all three map entries and prevent the
+ *       session-state leak documented in `finalizeHungSessionState`. A
+ *       drift that drops the delegation entirely (inlining only a subset
+ *       of the three `.delete` lines, or "optimising" it away on the
+ *       theory that the caller will clear the maps) silently leaks
+ *       per-session tuples — tiny (~150 bytes each) but unbounded because
+ *       the M78 single-call-site guarantee means this is the ONLY place
+ *       the maps get cleared on the silent-death path. Orthogonal to
+ *       surfaces (1) and (2) because the return tuple can still be
+ *       bitwise-correct while the maps leak: the reads happened, the
+ *       tuple was assembled, the clear never fired.
+ *
+ * ## Body contract
+ *
+ * Bitwise-identical to pre-M121. Four statements, three orthogonal
+ * drift surfaces, asymmetric pins at `readAndClearSessionHangState_
+ * whenOnlyProviderMapPopulated_returnsProviderAfterRead`,
+ * `..._whenOnlyModelMapPopulated_returnsModelAfterRead`, and
+ * `..._whenAllMapsPopulated_delegationClearsStartTimeMap`.
+ *
+ * Args:
+ *   sessionID: The session id whose hang-detection state is being read
+ *     and evicted. Unknown ids are total — the helper returns
+ *     `{undefined, undefined}` and the delegation no-ops on absent keys.
+ *   sessionStartTimeMap / sessionActiveProviderMap / sessionActiveModelMap:
+ *     The three per-session hang-detection maps. All three are mutated
+ *     in-place via the delegated `clearSessionHangState` call.
+ *
+ * Returns:
+ *   `{providerID, model}` snapshotted BEFORE the clear call. Either
+ *   field may be `undefined` when the caller populated only a subset of
+ *   the three maps (silent-death path, double-fire, or short-circuited
+ *   `chat.params` hook that bound provider before model).
+ */
 export function readAndClearSessionHangState(
   sessionID: string,
   sessionStartTimeMap: Map<string, number>,
