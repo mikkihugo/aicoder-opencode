@@ -3402,6 +3402,75 @@ export function summarizeVisibleRouteHealth(
   return { healthy, unhealthy };
 }
 
+/**
+ * Drop a terminating session from all three per-session hang-detection
+ * maps. Read-side and delete-side counterpart of `bindSessionHangState`
+ * (which writes the same three maps) and `readAndClearSessionHangState`
+ * (M78; which atomically consumes-and-clears during hang resolution).
+ *
+ * ## Drift surfaces (M118 PDD)
+ *
+ * The triplet looks trivial — three `.delete()` calls on three maps —
+ * but each line is load-bearing for an orthogonal failure mode, and
+ * dropping any one line fails **silently** in production. The single
+ * pre-existing pin at `clearSessionHangState_whenSessionTerminates_
+ * dropsFromAllThreeSessionMaps` asserts all three deletes happen in one
+ * bundled test, which means every sabotage of any single delete fires
+ * the same pin — symmetric, not asymmetric — so an engineer running a
+ * focused regression cannot tell from the failure message which of the
+ * three invariants actually broke. These three surfaces partition the
+ * failure modes so a sabotage of exactly one delete fires exactly one
+ * new pin uniquely, restoring the asymmetric-pin locality the M68/M75
+ * durability-pair protocol requires.
+ *
+ *  1. **`sessionStartTimeMap.delete` — start-time entry leak.**
+ *     `sessionStartTimeMap` is the only map the hang finalizer
+ *     (`finalizeHungSessionState`) reads to compute the elapsed-ms
+ *     delta against `Date.now()`. A dropped delete on this map leaks
+ *     one entry per completed session for the lifetime of the plugin
+ *     process, which is hours-to-days in long-running autopilot
+ *     workers. Not an immediate correctness bug (the hang timer
+ *     short-circuits on a missing start-time, and the next
+ *     `bindSessionHangState` call for a reused sessionID will overwrite
+ *     the leaked entry), but the unbounded-growth class that already
+ *     shipped once before M65 and triggered a 6h autopilot OOM loop.
+ *
+ *  2. **`sessionActiveProviderMap.delete` — stale provider binding.**
+ *     This map answers "which provider is this session currently
+ *     running against" for the hang finalizer's penalty-recording
+ *     path. A dropped delete leaves the OLD session's provider ID
+ *     bound to a sessionID that has completed; when the next turn for
+ *     a DIFFERENT session reuses the same sessionID slot and its own
+ *     `bindSessionHangState` runs, the overwrite is benign — but
+ *     between completion and the next bind, a hang timer firing on the
+ *     completed session would record a `timeout` penalty against the
+ *     stale provider, quarantining a provider that had nothing to do
+ *     with the hang. Routes flap off and back on for no visible reason.
+ *
+ *  3. **`sessionActiveModelMap.delete` — stale model tuple binding.**
+ *     Same failure mode as surface 2, one layer deeper: this map
+ *     carries the `{id, providerID}` composite the finalizer uses to
+ *     compose the route-level `composeRouteKey` for the penalty. A
+ *     dropped delete produces a spurious route-level `timeout` penalty
+ *     against a `provider/model` key that the completed session was
+ *     NOT using — the hang-penalty record lands in the wrong slot of
+ *     `modelRouteHealthMap`, `findCuratedFallbackRoute` then skips an
+ *     innocent route on the next turn, and the fallback cascade drifts
+ *     away from the curated priority order for the 15-minute timeout
+ *     window.
+ *
+ * Each surface lives on one line. The three surfaces are independent,
+ * orthogonal, and each failure is invisible under production logging
+ * until the leaked/stale state cascades into its secondary effect
+ * hours later. The helper body is bitwise-unchanged — documentation
+ * and pins only.
+ *
+ * Args:
+ *   sessionID: The terminating session's identifier.
+ *   sessionStartTimeMap / sessionActiveProviderMap / sessionActiveModelMap:
+ *     The three per-session hang-detection maps — all three mutated
+ *     in-place.
+ */
 export function clearSessionHangState(
   sessionID: string,
   sessionStartTimeMap: Map<string, number>,

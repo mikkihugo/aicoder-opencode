@@ -706,6 +706,84 @@ test("clearSessionHangState_whenSessionTerminates_dropsFromAllThreeSessionMaps",
   assert.equal(sessionActiveModelMap.has("session-b"), true);
 });
 
+// M118 pin A — isolated drift surface 1: `sessionStartTimeMap.delete`.
+// Only the start-time map carries an entry for the terminating session;
+// the other two maps are EMPTY. A sabotage that drops ONLY the
+// `sessionActiveProviderMap.delete` or ONLY the `sessionActiveModelMap.delete`
+// line cannot fire this pin because neither delete has anything to do
+// on an empty map — `.delete(sessionID)` on an absent key is a no-op
+// and `.has(sessionID)` still returns `false`. Only a sabotage that
+// drops `sessionStartTimeMap.delete` leaves `has("session-a") === true`
+// on the one populated map and fires this assertion uniquely.
+test("clearSessionHangState_whenOnlyStartTimeMapHasEntry_dropsStartTimeSpecifically", () => {
+  const sessionStartTimeMap = new Map<string, number>([["session-a", 1000]]);
+  const sessionActiveProviderMap = new Map<string, string>();
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >();
+
+  clearSessionHangState(
+    "session-a",
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  assert.equal(sessionStartTimeMap.has("session-a"), false);
+});
+
+// M118 pin B — isolated drift surface 2: `sessionActiveProviderMap.delete`.
+// Only the provider map is populated. A sabotage that drops only the
+// start-time delete or only the model delete cannot fire this pin
+// (both other maps are empty → deletes are no-ops on absent keys).
+// Only a sabotage that drops `sessionActiveProviderMap.delete` leaves
+// `has("session-a") === true` on the populated map and fires this
+// assertion uniquely.
+test("clearSessionHangState_whenOnlyProviderMapHasEntry_dropsProviderSpecifically", () => {
+  const sessionStartTimeMap = new Map<string, number>();
+  const sessionActiveProviderMap = new Map<string, string>([
+    ["session-a", "ollama-cloud"],
+  ]);
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >();
+
+  clearSessionHangState(
+    "session-a",
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  assert.equal(sessionActiveProviderMap.has("session-a"), false);
+});
+
+// M118 pin C — isolated drift surface 3: `sessionActiveModelMap.delete`.
+// Only the model map is populated. Symmetric to pins A and B: only a
+// sabotage that drops `sessionActiveModelMap.delete` leaves
+// `has("session-a") === true` on the populated map and fires this
+// assertion uniquely. Sabotages on either of the other two lines are
+// no-ops because those maps are empty.
+test("clearSessionHangState_whenOnlyModelMapHasEntry_dropsModelSpecifically", () => {
+  const sessionStartTimeMap = new Map<string, number>();
+  const sessionActiveProviderMap = new Map<string, string>();
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >([["session-a", { id: "glm-4.7", providerID: "ollama-cloud" }]]);
+
+  clearSessionHangState(
+    "session-a",
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  assert.equal(sessionActiveModelMap.has("session-a"), false);
+});
+
 test("serializeHealthEntryForPersistence_whenUntilIsInfinity_emitsNeverString", () => {
   // M81 pin: `key_missing` entries store `until: Number.POSITIVE_INFINITY`
   // in memory, but `JSON.stringify(Infinity)` emits `null`, which
