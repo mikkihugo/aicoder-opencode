@@ -18,6 +18,7 @@ import {
   expireHealthMaps,
   filterProviderModelsByRouteHealth,
   findCuratedFallbackRoute,
+  findRegistryEntryByModel,
   inferTaskComplexity,
   parsePersistedHealthEntry,
   recommendTaskModelRoute,
@@ -922,6 +923,108 @@ test("composeRouteKey_whenRegistryEntryIsUnprefixed_producesCompositeKey", () =>
     composeRouteKey({ provider: "openrouter", model: "openrouter/xiaomi/mimo-v2-pro" }),
     "openrouter/xiaomi/mimo-v2-pro",
   );
+});
+
+test("findRegistryEntryByModel_whenRuntimeIdIsRawAndRegistryIsComposite_returnsEntry", () => {
+  // Common case: runtime delivers `{id: "glm-5", providerID: "ollama-cloud"}`
+  // and registry route is composite "ollama-cloud/glm-5". Pin that the
+  // shared `composeRouteKey` normalization keeps the common case green.
+  const entries: ModelRegistryEntry[] = [
+    buildModelRegistryEntry("glm-5", ["implementation_worker"], "strong", [
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5", priority: 1 },
+    ]),
+  ];
+
+  const match = findRegistryEntryByModel(entries, {
+    id: "glm-5",
+    providerID: "ollama-cloud",
+  });
+
+  assert.ok(match);
+  assert.equal(match?.id, "glm-5");
+});
+
+test("findRegistryEntryByModel_whenRuntimeIdIsRawAndRegistryIsUnprefixed_returnsEntry", () => {
+  // Longcat-shape edge: runtime `{id: "LongCat-Flash-Chat", providerID: "longcat"}`
+  // and registry authored WITHOUT the `longcat/` prefix. The old
+  // defensive OR branch caught this; post-M47 it is now caught by
+  // composeRouteKey normalizing BOTH sides to "longcat/LongCat-Flash-Chat".
+  const entries: ModelRegistryEntry[] = [
+    buildModelRegistryEntry("longcat-flash-chat", ["oracle"], "strong", [
+      { provider: "longcat", model: "LongCat-Flash-Chat", priority: 1 },
+    ]),
+  ];
+
+  const match = findRegistryEntryByModel(entries, {
+    id: "LongCat-Flash-Chat",
+    providerID: "longcat",
+  });
+
+  assert.ok(match);
+  assert.equal(match?.id, "longcat-flash-chat");
+});
+
+test("findRegistryEntryByModel_whenRuntimeIdIsAlreadyCompositeAndRegistryIsUnprefixed_returnsEntry", () => {
+  // Headline regression (M47): four-way shape cartesian worst case.
+  // Runtime delivers an already-composite id (e.g. because an adjacent
+  // plugin's `provider.models` hook rewrote it) AND the matching
+  // registry row is authored without the `provider/` prefix. Old code
+  // produced "longcat/longcat/LongCat-Flash-Chat" on the synthetic
+  // composite path and `"LongCat-Flash-Chat" !== "longcat/LongCat-Flash-Chat"`
+  // on the defensive branch — no match, entry dropped on the floor.
+  // With `composeRouteKey` on both sides (idempotent via the
+  // `.startsWith(${provider}/)` guard), both normalize to
+  // "longcat/LongCat-Flash-Chat" and the entry is found.
+  const entries: ModelRegistryEntry[] = [
+    buildModelRegistryEntry("longcat-flash-chat", ["oracle"], "strong", [
+      { provider: "longcat", model: "LongCat-Flash-Chat", priority: 1 },
+    ]),
+  ];
+
+  const match = findRegistryEntryByModel(entries, {
+    id: "longcat/LongCat-Flash-Chat",
+    providerID: "longcat",
+  });
+
+  assert.ok(match);
+  assert.equal(match?.id, "longcat-flash-chat");
+});
+
+test("findRegistryEntryByModel_whenRuntimeIdIsAlreadyCompositeAndRegistryIsComposite_returnsEntry", () => {
+  // Fourth cartesian cell: both sides composite. Must still match
+  // without the runtime side getting double-prefixed to
+  // "ollama-cloud/ollama-cloud/glm-5".
+  const entries: ModelRegistryEntry[] = [
+    buildModelRegistryEntry("glm-5", ["implementation_worker"], "strong", [
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5", priority: 1 },
+    ]),
+  ];
+
+  const match = findRegistryEntryByModel(entries, {
+    id: "ollama-cloud/glm-5",
+    providerID: "ollama-cloud",
+  });
+
+  assert.ok(match);
+  assert.equal(match?.id, "glm-5");
+});
+
+test("findRegistryEntryByModel_whenRuntimeModelIsNotInRegistry_returnsUndefined", () => {
+  // Negative pin: the post-M47 helper must still return undefined for
+  // genuinely unknown models — the composeRouteKey reuse must not
+  // accidentally become a catch-all match.
+  const entries: ModelRegistryEntry[] = [
+    buildModelRegistryEntry("glm-5", ["implementation_worker"], "strong", [
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5", priority: 1 },
+    ]),
+  ];
+
+  const match = findRegistryEntryByModel(entries, {
+    id: "unknown-model",
+    providerID: "some-provider",
+  });
+
+  assert.equal(match, undefined);
 });
 
 test("computeRegistryEntryHealthReport_whenLongcatEntryIsUnprefixed_detectsRouteLevelPenaltyFromCompositeKey", () => {

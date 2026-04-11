@@ -330,28 +330,47 @@ function buildEnabledProviderModelSet(
   return rawModelIDs;
 }
 
-function findRegistryEntryByModel(
+export function findRegistryEntryByModel(
   modelRegistryEntries: ModelRegistryEntry[],
   model: ModelIdentity,
 ): ModelRegistryEntry | undefined {
   // Opencode's runtime `Model` shape is `{ id, providerID }` where `id`
-  // is the RAW short id (e.g. "glm-4.7") and providerID is the opencode
-  // provider id (e.g. "ollama-cloud"). The registry's
-  // `provider_order[].model` field is the COMPOSITE form ("ollama-cloud/glm-4.7")
-  // per models.jsonc convention. Compare composite-to-composite so the
-  // lookup actually matches — previously both branches of the OR reduced
-  // to `providerRoute.model === model.id` and always returned undefined,
-  // silently killing both the capability-tier temperature override and
-  // the `## Active model routing context` system-prompt injection.
-  const composite = `${model.providerID}/${model.id}`;
+  // is normally the RAW short id ("glm-4.7") and `providerID` is the
+  // opencode provider id ("ollama-cloud"). The registry's
+  // `provider_order[].model` field is the COMPOSITE form
+  // ("ollama-cloud/glm-4.7") for most entries, but for a handful of
+  // provider-specific entries (longcat: `LongCat-Flash-Chat`,
+  // `LongCat-Flash-Thinking`, `LongCat-Flash-Lite`) it is UNPREFIXED —
+  // the same asymmetry `composeRouteKey` (M30) was introduced to absorb
+  // on the health-map write/read paths.
+  //
+  // Previously this helper hand-rolled the comparison in two branches:
+  // one concatenating a synthetic `${providerID}/${id}` composite to
+  // match the common case, and a defensive `(provider === providerID &&
+  // model === id)` branch to catch unprefixed registry entries. Both
+  // branches silently failed if the runtime `model.id` ever arrived
+  // already-composite (e.g. an adjacent plugin's `provider.models` hook
+  // rewrote the id) AND the matching registry row was ALSO authored
+  // without a `provider/` prefix: the synthetic composite double-prefixed
+  // to `"ollama-cloud/ollama-cloud/glm-4.7"` and the defensive branch
+  // compared the raw unprefixed registry model against the already-
+  // composite runtime id. No match → undefined → both the capability-
+  // tier temperature override AND the `## Active model routing context`
+  // system-prompt injection silently dropped for that session.
+  //
+  // Share `composeRouteKey` on BOTH sides of the comparison so both the
+  // runtime identity and the registry route are normalized to the same
+  // composite form before comparing. The helper is idempotent (the M30
+  // `.startsWith(${provider}/)` guard handles the already-prefixed case),
+  // so the four-way cartesian of {prefixed, unprefixed} × {runtime,
+  // registry} all collapse to the same canonical key.
+  const runtimeCompositeKey = composeRouteKey({
+    provider: model.providerID,
+    model: model.id,
+  });
   return modelRegistryEntries.find((modelRegistryEntry) =>
     modelRegistryEntry.provider_order.some(
-      (providerRoute) =>
-        providerRoute.model === composite ||
-        // Defensive: honor registry entries where `.model` is not prefixed
-        // with `.provider` (unusual but not schema-forbidden).
-        (providerRoute.provider === model.providerID &&
-          providerRoute.model === model.id),
+      (providerRoute) => composeRouteKey(providerRoute) === runtimeCompositeKey,
     ),
   );
 }
