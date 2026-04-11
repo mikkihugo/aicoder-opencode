@@ -1183,6 +1183,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
                   until: Date.now() + QUOTA_BACKOFF_DURATION_MS,
                   retryCount: (existing?.retryCount ?? 0) + 1,
                 });
+                void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
               }
             }
           }, timeoutMs + 100); // Check slightly after the timeout threshold

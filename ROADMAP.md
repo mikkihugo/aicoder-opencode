@@ -172,6 +172,16 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M14: `chat.params` setTimeout route-timeout never persisted `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `chat.params` hook schedules a `setTimeout(..., timeoutMs + 100)` that records a `timeout` state into `modelRouteHealthMap` when a route hangs past `AICODER_ROUTE_HANG_TIMEOUT_MS` (default 60s). The in-memory write happened but `persistProviderHealth()` was never called on that branch — so every opencode restart silently dropped accumulated route-timeout penalties, and the hung route would get retried immediately.
+- **Why tests didn't catch it**: existing test `chat_params_when_route_hangs_classifies_route_timeout_backoff` uses `AICODER_ROUTE_HANG_TIMEOUT_MS=20` which falls through the `timeoutMs < 1000` test-only branch — that branch *does* persist. The production `setTimeout` branch was untested.
+- **Fix**: add `void persistProviderHealth(providerHealthMap, modelRouteHealthMap);` after the `modelRouteHealthMap.set(..., "timeout", ...)` inside the `setTimeout` callback, mirroring the already-tested fast branch at line 1167. One-line parallel change.
+- **Verification**: `npx tsc -p tsconfig.json --noEmit` clean, 120/120 tests pass, dist rebuilt.
+- **No new test**: the setTimeout path requires real wall-clock wait past 1000ms (test branch gates on `< 1000`); a faithful test would add 1+ second of sleep to the suite. Pattern matches the already-tested fast branch. Race-reproduction tests for setTimeout-driven persistence are inherently flaky.
+- **Files**: `src/plugins/model-registry.ts`.
+
 ### M11: Atomic write for `provider-health.json` `✅ COMPLETED`
 
 Completion Notes (2026-04-11):
