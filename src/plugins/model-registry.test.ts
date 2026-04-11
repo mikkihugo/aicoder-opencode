@@ -57,6 +57,7 @@ import {
   assembleHealthAwareSystemPrompts,
   classifyPersistedHealthKey,
   extractAssistantMessageCompletedPayload,
+  extractSessionErrorApiErrorContext,
   extractSessionErrorExplicitModel,
   shouldRecordImmediateTimeoutPenalty,
   findRegistryEntryByModel,
@@ -857,6 +858,58 @@ test("extractAssistantMessageCompletedPayload_whenTokensIsMissing_returnsUndefin
   const result = extractAssistantMessageCompletedPayload({
     type: "assistant.message.completed",
     properties: { sessionID: "sess-1" },
+  });
+  assert.equal(result, undefined);
+});
+
+test("extractSessionErrorApiErrorContext_whenShapeIsValid_returnsNarrowedTuple", () => {
+  // M88 pin: a well-formed `session.error` envelope with APIError,
+  // sessionID, statusCode, and a mixed-case message must return the
+  // narrowed `{sessionID, statusCode, lowerMessage}` tuple with the
+  // message already case-folded. A sabotage that short-circuits the
+  // helper to `return undefined` fires this pin alone.
+  const result = extractSessionErrorApiErrorContext({
+    sessionID: "sess-1",
+    error: {
+      name: "APIError",
+      data: { statusCode: 429, message: "Rate Limit EXCEEDED" },
+    },
+  });
+  assert.deepEqual(result, {
+    sessionID: "sess-1",
+    statusCode: 429,
+    lowerMessage: "rate limit exceeded",
+  });
+});
+
+test("extractSessionErrorApiErrorContext_whenErrorNameIsWrong_returnsUndefined", () => {
+  // M88 pin: a payload whose `error.name` is not "APIError" must
+  // return `undefined` — downstream classifiers assume the APIError
+  // `data.statusCode`/`data.message` shape and will silently
+  // misclassify other error types. A sabotage that drops the
+  // `error.name !== "APIError"` check fires this pin alone — pin 1
+  // still has name "APIError" and pin 3 is broken on sessionID.
+  const result = extractSessionErrorApiErrorContext({
+    sessionID: "sess-1",
+    error: {
+      name: "NotFoundError",
+      data: { statusCode: 404, message: "not found" },
+    },
+  });
+  assert.equal(result, undefined);
+});
+
+test("extractSessionErrorApiErrorContext_whenSessionIDIsMissing_returnsUndefined", () => {
+  // M88 pin: an APIError payload missing `sessionID` must return
+  // `undefined` — the classification handler needs sessionID to
+  // key the route-health maps. A sabotage that drops the
+  // sessionID string check fires this pin alone — pin 1 still has
+  // a sessionID and pin 2 is broken on the error name.
+  const result = extractSessionErrorApiErrorContext({
+    error: {
+      name: "APIError",
+      data: { statusCode: 429, message: "rate limit" },
+    },
   });
   assert.equal(result, undefined);
 });

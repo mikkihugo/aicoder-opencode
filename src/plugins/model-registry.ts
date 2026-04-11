@@ -1741,6 +1741,118 @@ export function extractSessionErrorExplicitModel(
 }
 
 /**
+ * Narrow the opencode `session.error` event payload to the
+ * structurally-required `{ sessionID, statusCode, lowerMessage }`
+ * tuple when the underlying error is a recognized `APIError`, or
+ * `undefined` when any gate fails.
+ *
+ * ## Drift shape
+ *
+ * Previously the `session.error` handler opened with five inline
+ * narrowing gates spread across nine lines:
+ *
+ *     if (!sessionError?.error || sessionError.error.name !== "APIError") {
+ *       return;
+ *     }
+ *     const apiError = sessionError.error;
+ *     const statusCode: number = apiError.data.statusCode ?? 0;
+ *     const message: string = (apiError.data.message ?? "").toLowerCase();
+ *     const sessionID = sessionError.sessionID;
+ *     if (!sessionID) return;
+ *
+ * Four independent drift surfaces lived on that fragment:
+ *
+ *   1. **Error-type gate**. `error.name !== "APIError"` is a hardcoded
+ *      discriminator — opencode emits `session.error` for several
+ *      error classes (NotFoundError, ProviderAuthError, APIError), and
+ *      only APIError carries the `data: {statusCode, message}` shape
+ *      the classification ladder downstream depends on. A refactor
+ *      that widens the gate to `error.name.includes("Error")` or
+ *      drops it entirely silently propagates non-APIError shapes
+ *      into the `apiError.data.statusCode` raw read, producing
+ *      `undefined` that coalesces to `0` and mis-classifies every
+ *      non-APIError session event as an "unknown-status APIError".
+ *   2. **Status code default**. The `?? 0` fallback encodes policy:
+ *      an absent statusCode means "no authoritative signal, fall
+ *      through to keyword heuristics". A future refactor that
+ *      replaces `?? 0` with `?? -1` or `!!` would change which
+ *      classification branches fire in `classifyProviderApiError`
+ *      (the status-code dispatch table compares against specific
+ *      numeric codes) and in `shouldClassifyAsModelNotFound` (which
+ *      checks membership in `MODEL_NOT_FOUND_HTTP_STATUS_CODES`).
+ *   3. **Message default + case-fold**. The `?? ""` + `.toLowerCase()`
+ *      pair encodes the "keyword matching is case-insensitive against
+ *      a guaranteed string" contract that every downstream keyword
+ *      predicate relies on (`shouldClassifyAsModelNotFound`,
+ *      `NO_CREDIT_KEYWORDS.some(kw => msg.includes(kw))`, etc.).
+ *      Dropping the `.toLowerCase()` silently breaks every keyword
+ *      match for messages that capitalize even one letter; dropping
+ *      the `?? ""` fallback pushes `undefined.toLowerCase()` and
+ *      crashes the handler on any APIError that omits a message.
+ *   4. **Session ID gate**. `!sessionID` must run AFTER the APIError
+ *      check, not before — reordering silently widens the handler
+ *      to non-APIError paths that happen to carry a sessionID,
+ *      re-introducing drift surface 1 via a different door.
+ *
+ * The helper collapses all four gates into one call-site conditional.
+ * The `?? 0` / `?? ""` / `.toLowerCase()` policy lives in one place.
+ * Renaming the helper return field from `message` to `lowerMessage`
+ * pins the case-fold contract in the type system — a consumer that
+ * passes the field to a case-sensitive comparison is naming it wrong.
+ *
+ * Args:
+ *   sessionError: The `event.properties` payload for a `session.error`
+ *     event — type `unknown` because the opencode host does not
+ *     currently export a stable TypeScript shape for the outer
+ *     envelope, and the whole point of this helper is to narrow it
+ *     defensively rather than trust raw `sessionError.error.data.*`
+ *     reads.
+ *
+ * Returns:
+ *   `{ sessionID, statusCode, lowerMessage }` when the payload
+ *   carries a recognized APIError and a non-empty sessionID.
+ *   `undefined` on any gate failure — the `session.error` handler
+ *   must `return` immediately on undefined because every downstream
+ *   classifier assumes the APIError shape.
+ */
+export function extractSessionErrorApiErrorContext(
+  sessionError: unknown,
+): { sessionID: string; statusCode: number; lowerMessage: string } | undefined {
+  if (sessionError === null || typeof sessionError !== "object") {
+    return undefined;
+  }
+  const envelope = sessionError as Record<string, unknown>;
+  const error = envelope.error;
+  if (error === null || typeof error !== "object") {
+    return undefined;
+  }
+  const errorObj = error as Record<string, unknown>;
+  if (errorObj.name !== "APIError") {
+    return undefined;
+  }
+  if (typeof envelope.sessionID !== "string" || envelope.sessionID.length === 0) {
+    return undefined;
+  }
+  const data = errorObj.data;
+  const dataObj =
+    data !== null && typeof data === "object"
+      ? (data as Record<string, unknown>)
+      : {};
+  const statusCodeRaw = dataObj.statusCode;
+  const statusCode =
+    typeof statusCodeRaw === "number" && Number.isFinite(statusCodeRaw)
+      ? statusCodeRaw
+      : 0;
+  const messageRaw = dataObj.message;
+  const lowerMessage = (typeof messageRaw === "string" ? messageRaw : "").toLowerCase();
+  return {
+    sessionID: envelope.sessionID,
+    statusCode,
+    lowerMessage,
+  };
+}
+
+/**
  * Narrow the opencode `assistant.message.completed` event payload to the
  * structurally-required `{ sessionID, tokens }` tuple or `undefined`.
  *
@@ -4517,16 +4629,16 @@ export const ModelRegistryPlugin: Plugin = async () => {
     async event({ event }: { event: Event }) {
       if (event.type === "session.error") {
         const sessionError = event.properties;
-        if (!sessionError?.error || sessionError.error.name !== "APIError") {
-          return;
-        }
-
-        const apiError = sessionError.error;
-        const statusCode: number = apiError.data.statusCode ?? 0;
-        const message: string = (apiError.data.message ?? "").toLowerCase();
-
-        const sessionID = sessionError.sessionID;
-        if (!sessionID) return;
+        // M88: `extractSessionErrorApiErrorContext` replaces the five
+        // inline narrowing gates (`!sessionError?.error`, `name !==
+        // "APIError"`, `?? 0`, `?? ""`, `!sessionID`) with one
+        // runtime-narrowed helper. See the helper docstring for the
+        // four drift surfaces it closes (error-type gate, status
+        // code default, message default + case-fold, sessionID gate
+        // ordering).
+        const apiErrorContext = extractSessionErrorApiErrorContext(sessionError);
+        if (apiErrorContext === undefined) return;
+        const { sessionID, statusCode, lowerMessage: message } = apiErrorContext;
 
         // M78: `readAndClearSessionHangState` encodes the read-before-clear
         // ordering invariant — inlining the two `Map.get` calls and the
