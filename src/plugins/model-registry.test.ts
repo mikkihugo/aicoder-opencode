@@ -3226,6 +3226,118 @@ test("recordRouteHealthByIdentifiers_whenCalled_invokesPersistFnThroughM68Record
   assert.equal(observedRouteMap, modelRouteHealthMap);
 });
 
+test("recordRouteHealthByIdentifiers_whenExistingShorterEntryLosesMerge_retryCountCarriesAcrossWonMerge", () => {
+  // M136 Pin A: isolates the `lookupRouteHealthByIdentifiers` read so
+  // retryCount continues escalating through the WON-merge branch (where
+  // the incoming penalty's newUntil > existing.until and the new state
+  // wins). Pre-existing pin #2 only covers the LOST-merge branch. This
+  // pin uses a shorter existing entry so the only observable difference
+  // under a "drop the lookup" sabotage is retryCount: the (state, until)
+  // stay on the incoming path either way. routeKey here is
+  // "iflowcn/qwen3-coder-plus" which coincides under both composeRouteKey
+  // and the inline-template sabotage, so Pin A cannot flip under S2;
+  // S3 still writes the same `health` payload so retryCount is unchanged.
+  const existingRetryCount = 7;
+  const baseTime = 1_000;
+  const shorterExistingUntil = baseTime + 10_000;
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    [
+      "iflowcn/qwen3-coder-plus",
+      { state: "timeout", until: shorterExistingUntil, retryCount: existingRetryCount },
+    ],
+  ]);
+  const providerHealthMap = new Map<string, ProviderHealth>();
+
+  recordRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "iflowcn",
+    "qwen3-coder-plus",
+    "quota",
+    60 * 60 * 1000,
+    baseTime,
+    () => {},
+  );
+
+  const entry = modelRouteHealthMap.get("iflowcn/qwen3-coder-plus");
+  assert.ok(entry);
+  // Incoming newUntil (1h) wins against 10s existing — state and until
+  // move to the incoming values, but retryCount carries from existing+1.
+  assert.equal(entry!.state, "quota");
+  assert.equal(entry!.until, baseTime + 60 * 60 * 1000);
+  assert.equal(entry!.retryCount, existingRetryCount + 1);
+});
+
+test("recordRouteHealthByIdentifiers_whenModelIdAlreadyCarriesProviderPrefix_composeRouteKeyDedupesAtWrapperLayer", () => {
+  // M136 Pin B: isolates the `composeRouteKey` startsWith-dedupe branch
+  // at the wrapper layer. Pre-existing pins #1/#2 both route through the
+  // WRAP branch (modelID does not start with `${providerID}/`). This pin
+  // uses an already-composite runtime model id (`openrouter/xiaomi/
+  // mimo-v2-pro:free` — the shape aggregator routes carry through the
+  // openrouter session events) so the dedupe branch fires: the entry
+  // must land at "openrouter/xiaomi/mimo-v2-pro:free", NOT at
+  // "openrouter/openrouter/xiaomi/mimo-v2-pro:free". A sabotage that
+  // inlines the routeKey as `` `${providerID}/${modelID}` `` double-
+  // prefixes and hides the entry from every downstream reader
+  // (`isRouteCurrentlyHealthy`, `findFirstHealthyRouteInEntry`, the
+  // persisted health classifier). S1 (drop lookup) is a no-op because
+  // the fixture starts empty. S3 (inline set) still uses the correct
+  // routeKey from the destructure.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+
+  recordRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "openrouter",
+    "openrouter/xiaomi/mimo-v2-pro:free",
+    "timeout",
+    60 * 60 * 1000,
+    0,
+    () => {},
+  );
+
+  assert.ok(
+    modelRouteHealthMap.has("openrouter/xiaomi/mimo-v2-pro:free"),
+    "entry must land under the dedupe-form route key",
+  );
+  assert.ok(
+    !modelRouteHealthMap.has("openrouter/openrouter/xiaomi/mimo-v2-pro:free"),
+    "double-prefixed key must not exist",
+  );
+});
+
+test("recordRouteHealthByIdentifiers_whenSimplestWritePath_narrowlyAssertsDurabilityPairFires", () => {
+  // M136 Pin C: narrowest possible persistCalls-alone assertion so the
+  // failure signature under S3 (inline `modelRouteHealthMap.set` without
+  // the `recordRouteHealthPenalty` delegate) is unambiguous. Pre-existing
+  // pin #3 also asserts reference equality on both maps, which bundles
+  // "wrong ref threaded" into the same failure message. This pin strips
+  // to one counter and one assertion so an engineer bisecting across the
+  // three-step ritual reads "Pin C fired alone" and goes directly to the
+  // delegate-vs-inline line. S1 (drop lookup) still funnels through
+  // `recordRouteHealthPenalty`; S2 (inline routeKey) still calls the
+  // delegate — both leave persistCalls at 1.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  let persistCalls = 0;
+
+  recordRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "iflowcn",
+    "qwen3-coder-plus",
+    "quota",
+    60 * 60 * 1000,
+    0,
+    () => {
+      persistCalls += 1;
+    },
+  );
+
+  assert.equal(persistCalls, 1);
+});
+
 test("recordModelNotFoundRouteHealthByIdentifiers_whenCalled_writesSixHourModelNotFoundEntry", () => {
   // M76: the model-not-found sibling must thread (providerID, modelID)
   // into `buildModelNotFoundRouteHealth`, which bakes in `"model_not_found"`

@@ -1806,6 +1806,94 @@ export function recordProviderHealthPenalty(
  *     without stubbing `Date.now`.
  *   persistFn: Injected persister (production always passes
  *     `persistProviderHealth`; tests pass a spy).
+ *
+ * ## Drift surfaces (M136 PDD)
+ *
+ * The three pre-existing pins on this wrapper partition coverage along
+ * bundled lines — pin #1 (`writesEntryUnderCompositeRouteKey`) covers
+ * the empty-map happy path where routeKey composition, state/until
+ * threading, and retryCount=1 all fire together; pin #2
+ * (`preservesM43MergeInvariant`) covers the longer-existing branch of
+ * `buildRouteHealthEntry`; pin #3
+ * (`invokesPersistFnThroughM68RecordWrapper`) covers the durability
+ * pair. None of them exercises the three axes below that each
+ * correspond to a plausible single-line sabotage:
+ *
+ * 1. **`lookupRouteHealthByIdentifiers` feeds the SHORTER-existing
+ *    branch so retryCount carries across a won-merge.** Pin #2 asserts
+ *    the longer-existing branch (state/until preserved, retryCount
+ *    bumped from 1 → 2). It never exercises the else-branch where
+ *    incoming `newUntil > existing.until` so the new (state, until)
+ *    win BUT `retryCount` still carries `existing.retryCount + 1`.
+ *    That branch is the one readers rely on to observe "this route
+ *    has failed N times in a row across N distinct backoff windows"
+ *    — a signal `buildAgentVisibleBackoffStatus` and the health-report
+ *    synopsis both surface to the agent. A refactor that dropped the
+ *    lookup (passing `undefined` as `existing`) would silently reset
+ *    retryCount to 1 on every write, hiding the retry-escalation
+ *    trail from the agent and from operator health reports. Pin #2
+ *    fires additively because its longer-existing fixture also
+ *    depends on the lookup, but the failure message
+ *    (`state: model_not_found` vs `quota`) points at the M43 merge
+ *    rather than at the retryCount carry specifically. The M136 Pin A
+ *    fixture uses a SHORTER existing so the (state, until) stay on
+ *    the incoming path and the ONLY observable difference is
+ *    `retryCount`, which localizes the sabotage to the lookup call
+ *    itself.
+ *
+ * 2. **`composeRouteKey` dedupe when `modelID` is already
+ *    `${providerID}/...`.** Pin #1 uses `("iflowcn", "kimi-k2-0905")`
+ *    and pin #2 uses `("openrouter", "xiaomi/mimo-v2-pro")` — both
+ *    land in the WRAP branch of `composeRouteKey` (the model id does
+ *    not start with `${provider}/`). The STARTSWITH-dedupe branch,
+ *    reached when an aggregator-resolved runtime model id is already
+ *    composite (e.g. `openrouter/xiaomi/mimo-v2-pro:free` arriving as
+ *    the runtime `model.id` on an openrouter route), is unpinned at
+ *    this layer. A refactor that inlined `routeKey` as
+ *    `` `${providerID}/${modelID}` `` "for clarity" would double-prefix
+ *    the already-composite form and write the entry under a key no
+ *    reader looks at. The penalty would be silently invisible to
+ *    `isRouteCurrentlyHealthy`, `findFirstHealthyRouteInEntry`, and
+ *    the persisted health file's classifier — the route would be
+ *    reported healthy, retry traffic would keep hitting the failing
+ *    upstream, and the agent would never see the backoff. The M136
+ *    Pin B uses an already-composite runtime model id so the WRAP
+ *    branch and the STARTSWITH branch produce DIFFERENT routeKeys,
+ *    turning the sabotage into an observable map.has failure.
+ *
+ * 3. **`recordRouteHealthPenalty` delegation vs inline
+ *    `modelRouteHealthMap.set`.** Pin #3 asserts the durability pair
+ *    via a persistCalls counter — under the inline-set sabotage,
+ *    persistCalls is 0 instead of 1 and the pin fires. But pin #3
+ *    ALSO asserts reference equality on both maps, so if a future
+ *    refactor introduced a new route-level ritual that copied the
+ *    inline-set sabotage, pin #3's failure could be read as "wrong
+ *    reference threaded" rather than "M68 durability pair broken".
+ *    The M136 Pin C is the narrowest possible persistCalls-alone
+ *    assertion — one counter, one `assert.equal(persistCalls, 1)` —
+ *    so the failure signature under S3 is unambiguous: the wrapper
+ *    no longer funnels through `recordRouteHealthPenalty`. A
+ *    dedicated narrow pin means an engineer bisecting across the
+ *    ritual can read "M136 Pin C fired alone" and go directly to
+ *    the delegate-vs-inline line.
+ *
+ * Asymmetry invariant: each sabotage fires exactly one of {A, B, C}
+ * uniquely among the new pins (pre-existing pins firing additively
+ * is acceptable and expected). Pin A uses `("iflowcn",
+ * "qwen3-coder-plus")` with a shorter existing entry and asserts
+ * `retryCount === existing.retryCount + 1`; S1 (lookup → undefined)
+ * collapses retryCount to 1; S2 (inline routeKey template) produces
+ * an identical key because `qwen3-coder-plus` does not start with
+ * `iflowcn/` so WRAP and inline coincide; S3 (inline set) writes
+ * the same `health` payload so retryCount is unchanged. Pin B uses
+ * `("openrouter", "openrouter/xiaomi/mimo-v2-pro:free")` — an
+ * already-composite runtime id — and asserts `map.has` on the
+ * dedupe key; S1 is a no-op because the fixture has no existing
+ * entry; S2 double-prefixes the key; S3 writes under the correct
+ * dedupe key. Pin C uses a persistCalls counter with an empty map
+ * and a simple write; S1/S2 both still funnel through
+ * `recordRouteHealthPenalty` so persistCalls remains 1; S3 skips
+ * it so persistCalls is 0.
  */
 export function recordRouteHealthByIdentifiers(
   modelRouteHealthMap: Map<string, ModelRouteHealth>,
