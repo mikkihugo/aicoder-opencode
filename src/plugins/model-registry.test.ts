@@ -11,6 +11,7 @@ import {
   buildRouteHealthEntry,
   classifyProviderApiError,
   clearSessionHangState,
+  countHealthyVisibleRoutes,
   composeRouteKey,
   computeProviderHealthUpdate,
   computeRegistryEntryHealthReport,
@@ -21,6 +22,7 @@ import {
   parsePersistedHealthEntry,
   recommendTaskModelRoute,
   selectBestModelForRoleAndTask,
+  summarizeVisibleRouteHealth,
 } from "./model-registry.js";
 
 function buildModelRegistryEntry(
@@ -1526,4 +1528,248 @@ test("classifyProviderApiError_whenStatusIs500AndNoKeywords_returnsUnclassified"
   // trigger a provider penalty.
   const result = classifyProviderApiError(500, "");
   assert.equal(result, "unclassified");
+});
+
+test("countHealthyVisibleRoutes_whenNoPenaltiesActive_returnsAllVisibleRoutes", () => {
+  const entry = buildModelRegistryEntry(
+    "test-model",
+    ["builder"],
+    "standard",
+    [
+      { provider: "ollama-cloud", model: "ollama-cloud/test-model", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/test-model", priority: 2 },
+    ],
+  );
+
+  const count = countHealthyVisibleRoutes(
+    entry,
+    new Map(),
+    new Map(),
+    Date.now(),
+  );
+
+  assert.equal(count, 2);
+});
+
+test("countHealthyVisibleRoutes_whenOneProviderPenalized_excludesItsRoute", () => {
+  const entry = buildModelRegistryEntry(
+    "test-model",
+    ["builder"],
+    "standard",
+    [
+      { provider: "ollama-cloud", model: "ollama-cloud/test-model", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/test-model", priority: 2 },
+    ],
+  );
+  const now = Date.now();
+  const providerHealth = new Map([
+    ["ollama-cloud", { state: "quota" as const, until: now + 60 * 60 * 1000, retryCount: 1 }],
+  ]);
+
+  const count = countHealthyVisibleRoutes(entry, providerHealth, new Map(), now);
+
+  assert.equal(count, 1, "only the iflowcn route remains healthy");
+});
+
+test("countHealthyVisibleRoutes_whenOneRoutePenalizedAtRouteLevel_excludesIt", () => {
+  const entry = buildModelRegistryEntry(
+    "test-model",
+    ["builder"],
+    "standard",
+    [
+      { provider: "ollama-cloud", model: "ollama-cloud/test-model", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/test-model", priority: 2 },
+    ],
+  );
+  const now = Date.now();
+  const routeHealth = new Map([
+    [
+      "ollama-cloud/test-model",
+      { state: "model_not_found" as const, until: now + 60 * 60 * 1000, retryCount: 1 },
+    ],
+  ]);
+
+  const count = countHealthyVisibleRoutes(entry, new Map(), routeHealth, now);
+
+  assert.equal(count, 1);
+});
+
+test("countHealthyVisibleRoutes_whenPenaltyExpired_routeCountsAsHealthy", () => {
+  const entry = buildModelRegistryEntry(
+    "test-model",
+    ["builder"],
+    "standard",
+    [{ provider: "ollama-cloud", model: "ollama-cloud/test-model", priority: 1 }],
+  );
+  const now = Date.now();
+  // Expired penalty — until is in the past.
+  const routeHealth = new Map([
+    [
+      "ollama-cloud/test-model",
+      { state: "quota" as const, until: now - 1000, retryCount: 1 },
+    ],
+  ]);
+
+  const count = countHealthyVisibleRoutes(entry, new Map(), routeHealth, now);
+
+  assert.equal(count, 1, "expired penalty must not suppress the route");
+});
+
+test("selectBestModelForRoleAndTask_whenDeadSingleRouteCompetesWithPartiallyHealthyMultiRoute_prefersPartiallyHealthy", () => {
+  // Regression: the old sort comparator used `aUnhealthyCount - bUnhealthyCount`
+  // (ascending), so a `1/1 dead` candidate (0 healthy) beat a `2/5 dead`
+  // candidate (3 healthy) because `1 < 2`. The dead candidate won the
+  // ranking and the router then had no live route to try.
+  //
+  // Both candidates must be in the same capability tier, or the prior
+  // tier-ordering sort key dominates.
+  const deadSingleRoute = buildModelRegistryEntry(
+    "dead-single",
+    ["builder"],
+    "standard",
+    [{ provider: "ollama-cloud", model: "ollama-cloud/dead-single", priority: 1 }],
+  );
+  const partiallyHealthyMultiRoute = buildModelRegistryEntry(
+    "multi-route",
+    ["builder"],
+    "standard",
+    [
+      { provider: "ollama-cloud", model: "ollama-cloud/multi-route", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/multi-route", priority: 2 },
+      { provider: "openrouter", model: "openrouter/multi-route:free", priority: 3 },
+      { provider: "xiaomi-direct", model: "xiaomi-direct/multi-route", priority: 4 },
+      { provider: "huggingface", model: "huggingface/multi-route", priority: 5 },
+    ],
+  );
+
+  const now = Date.now();
+  const providerHealth = new Map<string, { state: "quota" | "key_dead" | "no_credit" | "key_missing" | "model_not_found" | "timeout"; until: number; retryCount: number }>();
+  const routeHealth = new Map([
+    // deadSingleRoute's only route is dead.
+    [
+      "ollama-cloud/dead-single",
+      { state: "model_not_found" as const, until: now + 60 * 60 * 1000, retryCount: 1 },
+    ],
+    // partiallyHealthyMultiRoute has 2 dead routes out of 5.
+    [
+      "ollama-cloud/multi-route",
+      { state: "quota" as const, until: now + 60 * 60 * 1000, retryCount: 1 },
+    ],
+    [
+      "iflowcn/multi-route",
+      { state: "timeout" as const, until: now + 60 * 60 * 1000, retryCount: 1 },
+    ],
+  ]);
+
+  const best = selectBestModelForRoleAndTask(
+    [deadSingleRoute, partiallyHealthyMultiRoute],
+    providerHealth,
+    routeHealth,
+    now,
+    "builder",
+    null,
+    null,
+  );
+
+  assert.ok(best, "selection must not be null when at least one candidate has a live route");
+  assert.equal(best.id, "multi-route", "partially-healthy multi-route wins over totally-dead single-route");
+});
+
+test("summarizeVisibleRouteHealth_whenMixOfHealthyAndPenalized_returnsBothCounts", () => {
+  const entry = buildModelRegistryEntry(
+    "mixed-model",
+    ["builder"],
+    "standard",
+    [
+      { provider: "ollama-cloud", model: "ollama-cloud/mixed-model", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/mixed-model", priority: 2 },
+      { provider: "openrouter", model: "openrouter/mixed-model:free", priority: 3 },
+    ],
+  );
+  const now = Date.now();
+  const providerHealth = new Map([
+    ["ollama-cloud", { state: "quota" as const, until: now + 60 * 60 * 1000, retryCount: 1 }],
+  ]);
+  const routeHealth = new Map([
+    [
+      "iflowcn/mixed-model",
+      { state: "timeout" as const, until: now + 60 * 60 * 1000, retryCount: 1 },
+    ],
+  ]);
+
+  const summary = summarizeVisibleRouteHealth(entry, providerHealth, routeHealth, now);
+
+  assert.equal(summary.healthy, 1, "only openrouter route is live");
+  assert.equal(summary.unhealthy, 2, "ollama-cloud (provider-dead) + iflowcn (route-dead)");
+});
+
+test("summarizeVisibleRouteHealth_whenAllRoutesHealthy_returnsZeroUnhealthy", () => {
+  const entry = buildModelRegistryEntry(
+    "clean-model",
+    ["builder"],
+    "standard",
+    [
+      { provider: "ollama-cloud", model: "ollama-cloud/clean-model", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/clean-model", priority: 2 },
+    ],
+  );
+  const summary = summarizeVisibleRouteHealth(entry, new Map(), new Map(), Date.now());
+  assert.equal(summary.healthy, 2);
+  assert.equal(summary.unhealthy, 0);
+});
+
+test("selectBestModelForRoleAndTask_whenHealthyCountsTie_prefersCandidateWithFewerDeadSiblings", () => {
+  // Regression: after M40 switched the ranking comparator from
+  // `unhealthy ascending` to `healthy descending`, the tiebreaker signal
+  // vanished. A candidate with `1 healthy / 1 dead` tied with a cleaner
+  // `1 healthy / 0 dead` candidate on the primary key, then fell
+  // through to billing preference / original order — allowing the dirty
+  // candidate to win when it should obviously lose (the dead sibling is
+  // known friction and future retry waste). This test pins the
+  // secondary-key tiebreaker behavior: cleaner wins when healthy ties.
+  const now = Date.now();
+
+  const dirtyCandidate = buildModelRegistryEntry(
+    "dirty",
+    ["builder"],
+    "standard",
+    [
+      { provider: "missing-provider", model: "missing-provider/dirty", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/dirty", priority: 2 },
+    ],
+  );
+  const cleanCandidate = buildModelRegistryEntry(
+    "clean",
+    ["builder"],
+    "standard",
+    [
+      { provider: "iflowcn", model: "iflowcn/clean", priority: 1 },
+    ],
+  );
+
+  // Dirty has one dead provider route (missing-provider) + one healthy.
+  // Clean has one healthy route and nothing else.
+  // Both candidates tie on healthy=1; dirty has unhealthy=1, clean has 0.
+  const providerHealth = new Map([
+    [
+      "missing-provider",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+  ]);
+
+  // IMPORTANT: list dirty FIRST so a naive stable sort that stops at
+  // `healthy` descending would leave dirty in position 0 — only a real
+  // tiebreaker test catches this.
+  const best = selectBestModelForRoleAndTask(
+    [dirtyCandidate, cleanCandidate],
+    providerHealth,
+    new Map(),
+    now,
+    "builder",
+    null,
+    null,
+  );
+
+  assert.ok(best);
+  assert.equal(best.id, "clean", "cleaner candidate wins when healthy counts tie");
 });

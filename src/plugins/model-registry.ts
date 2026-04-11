@@ -659,6 +659,86 @@ export function classifyProviderApiError(
   return "unclassified";
 }
 
+/**
+ * Count the number of visible provider routes of a registry entry that
+ * are currently healthy (neither provider-level nor route-level penalty
+ * is active).
+ *
+ * Used by `selectBestModelForRoleAndTask` to rank candidates by how many
+ * live routes they still have. Previously the sort comparator used
+ * `aUnhealthyCount - bUnhealthyCount` (ascending by unhealthy count),
+ * which produced a subtle but reachable misordering: a candidate with
+ * `1/1` unhealthy routes (0 healthy, totally dead) out-ranked a
+ * candidate with `2/5` unhealthy routes (3 healthy, mostly live) because
+ * `1 < 2`. The dead candidate won and the router then had no route to
+ * actually try. Ranking by healthy count instead sorts the mostly-live
+ * candidate first, which matches the intent ("prefer the model with the
+ * most live fallback breadth").
+ *
+ * `filterVisibleProviderRoutes` is applied first so we ignore hidden /
+ * paid-only / blocked routes — ranking should only consider routes the
+ * plugin would actually select at runtime.
+ *
+ * Args:
+ *   entry: The registry entry whose routes we are counting.
+ *   providerHealthMap: In-memory provider health table.
+ *   modelRouteHealthMap: In-memory composite-route health table.
+ *   now: Wall-clock timestamp in ms.
+ *
+ * Returns:
+ *   The integer count of visible routes whose provider AND composite
+ *   route key are both unblocked at `now`.
+ */
+export function countHealthyVisibleRoutes(
+  entry: ModelRegistryEntry,
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  now: number,
+): number {
+  return summarizeVisibleRouteHealth(entry, providerHealthMap, modelRouteHealthMap, now).healthy;
+}
+
+/**
+ * Pair-valued companion to `countHealthyVisibleRoutes`: returns both the
+ * healthy AND unhealthy visible-route counts in a single pass.
+ *
+ * `selectBestModelForRoleAndTask` ranks first by `healthy` descending so
+ * candidates with the most live fallback breadth win. When two candidates
+ * tie on `healthy` (e.g. both have 1 live route) it needs a secondary
+ * signal to prefer the cleaner one — a `1 healthy / 0 dead` candidate
+ * should beat a `1 healthy / 1 dead` candidate because the dead sibling
+ * route represents known friction and future retry waste. A prior
+ * iteration (M40) removed the `unhealthy` signal entirely in favor of
+ * pure healthy-count ranking, which broke this tiebreaker and let dirty
+ * candidates with a lucky primary route win over cleaner siblings.
+ * Returning both numbers from one walk keeps the comparator branchless
+ * and the helper pure / unit-testable.
+ */
+export function summarizeVisibleRouteHealth(
+  entry: ModelRegistryEntry,
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  now: number,
+): { healthy: number; unhealthy: number } {
+  const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
+  let healthy = 0;
+  let unhealthy = 0;
+  for (const route of visibleRoutes) {
+    const providerHealth = providerHealthMap.get(route.provider);
+    if (providerHealth && providerHealth.until > now) {
+      unhealthy++;
+      continue;
+    }
+    const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
+    if (routeHealth && routeHealth.until > now) {
+      unhealthy++;
+      continue;
+    }
+    healthy++;
+  }
+  return { healthy, unhealthy };
+}
+
 export function clearSessionHangState(
   sessionID: string,
   sessionStartTimeMap: Map<string, number>,
@@ -1454,29 +1534,17 @@ export function selectBestModelForRoleAndTask(
     const bTierIdx = tierOrder.indexOf(b.capability_tier as typeof tierOrder[number]);
     if (aTierIdx !== bTierIdx) return aTierIdx - bTierIdx;
 
-    // Count unhealthy visible routes for each model. A route is unhealthy
-    // if EITHER its provider is penalized OR its composite route key has
-    // a route-level penalty (model_not_found / zero-token quota / hang
-    // timeout). Previously this only checked provider health, so a
-    // candidate whose only visible routes were all route-level-dead ranked
-    // as "0 unhealthy" and could win over a candidate with fully-live
-    // visible routes. Reachable via any session that hits a bad model id
-    // on an otherwise-healthy provider.
-    const isRouteUnhealthy = (route: { provider: string; model: string }): boolean => {
-      if (!isProviderHealthy(providerHealthMap, route.provider, now)) return true;
-      const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
-      if (routeHealth && routeHealth.until > now) return true;
-      return false;
-    };
+    // Rank by healthy visible routes first (descending — more live
+    // fallback breadth wins). When healthy counts tie, break the tie by
+    // preferring FEWER unhealthy routes (the "cleaner candidate" signal):
+    // a candidate with `1 healthy / 0 dead` should beat `1 healthy / 1
+    // dead` because the dead sibling is known friction. See M40/M41
+    // Completion Notes and `summarizeVisibleRouteHealth`.
+    const aHealth = summarizeVisibleRouteHealth(a, providerHealthMap, modelRouteHealthMap, now);
+    const bHealth = summarizeVisibleRouteHealth(b, providerHealthMap, modelRouteHealthMap, now);
 
-    const aVisibleRoutes = filterVisibleProviderRoutes(a.provider_order);
-    const bVisibleRoutes = filterVisibleProviderRoutes(b.provider_order);
-
-    const aUnhealthyCount = aVisibleRoutes.filter(isRouteUnhealthy).length;
-    const bUnhealthyCount = bVisibleRoutes.filter(isRouteUnhealthy).length;
-
-    // Prefer models with fewer unhealthy visible routes
-    if (aUnhealthyCount !== bUnhealthyCount) return aUnhealthyCount - bUnhealthyCount;
+    if (aHealth.healthy !== bHealth.healthy) return bHealth.healthy - aHealth.healthy;
+    if (aHealth.unhealthy !== bHealth.unhealthy) return aHealth.unhealthy - bHealth.unhealthy;
 
     // Then prefer billing mode
     const aBillingIdx = BILLING_MODE_PREFERENCE_ORDER.indexOf(a.billing_mode as typeof BILLING_MODE_PREFERENCE_ORDER[number]);
