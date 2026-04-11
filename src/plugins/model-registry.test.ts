@@ -13,6 +13,8 @@ import {
   classifyProviderApiError,
   isFallbackBlocked,
   isZeroTokenQuotaSignal,
+  parseAgentFrontmatter,
+  stripYamlScalarQuotes,
   ROUTE_MODEL_NOT_FOUND_DURATION_MS,
   ROUTE_QUOTA_BACKOFF_DURATION_MS,
   shouldClassifyAsModelNotFound,
@@ -2765,4 +2767,153 @@ test("isZeroTokenQuotaSignal_whenTopLevelSiblingCounterIsNonZero_returnsFalse", 
     isZeroTokenQuotaSignal({ input: 0, output: 0, total: 5_000 }),
     false,
   );
+});
+
+// M53: `parseAgentFrontmatter` + `stripYamlScalarQuotes` — the agent
+// frontmatter parser historically kept literal YAML quote chars in scalar
+// values (`model:`, `routing_role:`, `routing_complexity:`), so any agent
+// that quoted its model preference (required for model ids containing a
+// colon-suffix like `:free` under strict YAML, and idiomatic for copy-
+// pasted values) would have the preference silently dropped at the
+// strict-equal preferred-model lookup in `recommendTaskModelRoute`. The
+// block-list models parser ALREADY stripped quotes, so the scalar path
+// was the only vulnerable site — and the inconsistency itself was a
+// smell. Extract a pure helper so the parser contract can be tested
+// directly without filesystem fixtures.
+
+test("stripYamlScalarQuotes_whenUnquoted_returnsValueUnchanged", () => {
+  assert.equal(
+    stripYamlScalarQuotes("openrouter/stepfun/step-3.5-flash:free"),
+    "openrouter/stepfun/step-3.5-flash:free",
+  );
+});
+
+test("stripYamlScalarQuotes_whenDoubleQuoted_stripsOneLayer", () => {
+  assert.equal(
+    stripYamlScalarQuotes('"openrouter/stepfun/step-3.5-flash:free"'),
+    "openrouter/stepfun/step-3.5-flash:free",
+  );
+});
+
+test("stripYamlScalarQuotes_whenSingleQuoted_stripsOneLayer", () => {
+  assert.equal(
+    stripYamlScalarQuotes("'ollama-cloud/kimi-k2-thinking'"),
+    "ollama-cloud/kimi-k2-thinking",
+  );
+});
+
+test("stripYamlScalarQuotes_whenAsymmetricQuotes_leavesValueAlone", () => {
+  // Matched-pair rule: only strip when BOTH ends carry the SAME quote
+  // char. Asymmetric input is preserved verbatim so accidental
+  // copy-paste errors upstream surface as a visible mismatch rather than
+  // a silent corruption.
+  assert.equal(stripYamlScalarQuotes('"foo'), '"foo');
+  assert.equal(stripYamlScalarQuotes("foo'"), "foo'");
+  assert.equal(stripYamlScalarQuotes("\"foo'"), "\"foo'");
+});
+
+test("stripYamlScalarQuotes_whenEmptyOrTooShort_returnsValueUnchanged", () => {
+  assert.equal(stripYamlScalarQuotes(""), "");
+  assert.equal(stripYamlScalarQuotes('"'), '"');
+});
+
+test("parseAgentFrontmatter_whenUnquotedModel_returnsRawValue", () => {
+  const metadata = parseAgentFrontmatter([
+    "name: codebase_explorer",
+    "model: ollama-cloud/kimi-k2-thinking",
+    "routing_role: long_context_reader",
+    "routing_complexity: large",
+  ].join("\n"));
+
+  assert.equal(metadata.model, "ollama-cloud/kimi-k2-thinking");
+  assert.equal(metadata.routing_role, "long_context_reader");
+  assert.equal(metadata.routing_complexity, "large");
+});
+
+test("parseAgentFrontmatter_whenModelScalarIsDoubleQuoted_stripsQuotes", () => {
+  // **Headline regression pin**: an agent authoring
+  //   model: "openrouter/stepfun/step-3.5-flash:free"
+  // must yield a metadata.model value EQUAL to the unquoted composite
+  // route string so `recommendTaskModelRoute`'s strict-equal
+  // preferred-model lookup matches it against registry routes. Before
+  // this fix the value was `'"openrouter/stepfun/step-3.5-flash:free"'`
+  // (literal quote chars) and the preference was silently dropped.
+  const metadata = parseAgentFrontmatter([
+    "name: stepfun_agent",
+    'model: "openrouter/stepfun/step-3.5-flash:free"',
+  ].join("\n"));
+
+  assert.equal(metadata.model, "openrouter/stepfun/step-3.5-flash:free");
+});
+
+test("parseAgentFrontmatter_whenRoutingRoleIsSingleQuoted_stripsQuotes", () => {
+  // Covers the `routing_role:` scalar path alongside the model pin above.
+  // Single-quoted scalar variant — YAML permits both quote styles.
+  const metadata = parseAgentFrontmatter([
+    "name: deep_reviewer_agent",
+    "routing_role: 'deep_reviewer'",
+  ].join("\n"));
+
+  assert.equal(metadata.routing_role, "deep_reviewer");
+});
+
+test("parseAgentFrontmatter_whenRoutingComplexityIsQuoted_acceptsStrippedValue", () => {
+  // If the quote-strip happens BEFORE the complexity enum membership
+  // check, `"small"` becomes `small` and is accepted. If quote-stripping
+  // happens AFTER (or not at all), the literal `"small"` string fails
+  // the `["small", "medium", "large"].includes` check and
+  // `routing_complexity` is silently dropped. Pin the order.
+  const metadata = parseAgentFrontmatter([
+    "name: small_change_worker",
+    'routing_complexity: "small"',
+  ].join("\n"));
+
+  assert.equal(metadata.routing_complexity, "small");
+});
+
+test("parseAgentFrontmatter_whenModelsBlockListHasQuotedItems_stripsQuotesPerItem", () => {
+  // Regression pin for the block-list path: already worked before M53
+  // via the inline `.replace(/^["']|["']$/g, "")`, but the refactor
+  // routes it through `stripYamlScalarQuotes` so the behavior needs to
+  // stay identical.
+  const metadata = parseAgentFrontmatter([
+    "name: multi_model_agent",
+    "models:",
+    '  - "ollama-cloud/glm-5"',
+    "  - 'ollama-cloud/kimi-k2-thinking'",
+    "  - opencode/minimax-m2.5-free",
+  ].join("\n"));
+
+  assert.deepEqual(metadata.models, [
+    "ollama-cloud/glm-5",
+    "ollama-cloud/kimi-k2-thinking",
+    "opencode/minimax-m2.5-free",
+  ]);
+});
+
+test("parseAgentFrontmatter_whenModelsInlineFlowStyleIsQuoted_stripsQuotesPerItem", () => {
+  // Inline flow-style `[a, b, c]` variant — the old inline branch did
+  // NOT strip quotes from flow-style items; the refactor does. Pin the
+  // stronger contract.
+  const metadata = parseAgentFrontmatter([
+    "name: flow_style_agent",
+    'models: ["ollama-cloud/glm-5", \'ollama-cloud/minimax-m2.7\']',
+  ].join("\n"));
+
+  assert.deepEqual(metadata.models, [
+    "ollama-cloud/glm-5",
+    "ollama-cloud/minimax-m2.7",
+  ]);
+});
+
+test("parseAgentFrontmatter_whenRoutingComplexityIsInvalid_leavesFieldUnset", () => {
+  // Pre-existing contract: unknown complexity values are silently
+  // rejected (not assigned) so the caller falls back to inference.
+  // Pin it so a future refactor doesn't regress the rejection.
+  const metadata = parseAgentFrontmatter([
+    "name: bad_complexity_agent",
+    "routing_complexity: enormous",
+  ].join("\n"));
+
+  assert.equal(metadata.routing_complexity, undefined);
 });

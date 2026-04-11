@@ -1567,6 +1567,125 @@ function inferTaskComplexity(prompt: string, _explicitComplexity: TaskComplexity
 }
 
 /**
+ * Strip a single layer of matching leading/trailing YAML quote characters
+ * from a scalar value. Idempotent on unquoted input; only strips quotes
+ * when BOTH ends carry the SAME quote character so asymmetric inputs
+ * (`"foo` or `foo'`) are preserved verbatim rather than corrupted.
+ *
+ * History: the old `readAgentMetadata` frontmatter parser read scalar
+ * values (`model:`, `routing_role:`, `routing_complexity:`) with a bare
+ * `line.slice(colonIndex + 1).trim()` and assigned the trimmed string
+ * directly. An agent that authored its model preference as a quoted YAML
+ * scalar — perfectly valid YAML, and arguably required when the model id
+ * contains colons like `openrouter/stepfun/step-3.5-flash:free` — would
+ * end up with `metadata.model === '"openrouter/stepfun/step-3.5-flash:free"'`
+ * (literal quote chars baked into the string). The preferred-models
+ * lookup in `recommendTaskModelRoute` then does strict `route.model ===
+ * preferredModel` comparison against unquoted registry routes and silently
+ * misses every match, dropping the explicit agent preference and falling
+ * back to `selectBestModelForRoleAndTask`. The inline models-block parser
+ * (`metadata.models`) already stripped quotes from list items via
+ * `.replace(/^["']|["']$/g, "")`, so the scalar path was the only site
+ * still vulnerable — and the inconsistency itself was a smell.
+ *
+ * The matched-pair rule is stricter than the old models-block helper
+ * (which accepted mismatched quote chars at either end), because the
+ * scalar case has no inner-quote semantics to defend and a stricter rule
+ * catches accidental copy-paste errors upstream.
+ *
+ * Args:
+ *   rawValue: The already-trimmed scalar from one frontmatter line.
+ *
+ * Returns:
+ *   The value with one layer of matching quotes removed, or the original
+ *   string unchanged when it is not quoted or when the quote characters
+ *   do not match.
+ */
+export function stripYamlScalarQuotes(rawValue: string): string {
+  if (rawValue.length < 2) return rawValue;
+  const firstChar = rawValue[0];
+  const lastChar = rawValue[rawValue.length - 1];
+  if ((firstChar === '"' || firstChar === "'") && firstChar === lastChar) {
+    return rawValue.slice(1, -1);
+  }
+  return rawValue;
+}
+
+/**
+ * Parse an agent file's YAML-frontmatter block into typed metadata.
+ *
+ * Split out of `readAgentMetadata` so the parsing contract — including
+ * quote stripping, block-list collection, and invalid-complexity
+ * rejection — can be exercised directly without touching the filesystem.
+ *
+ * Args:
+ *   frontmatterText: The text between the opening `---` and closing
+ *     `---` fences (NOT including the fences themselves).
+ *
+ * Returns:
+ *   An `AgentMetadata` object populated from recognized keys. Keys the
+ *   parser does not recognize are silently ignored. Returns a metadata
+ *   object with no populated fields (rather than `null`) when every line
+ *   is ignored — the `readAgentMetadata` caller is responsible for
+ *   deciding whether an empty metadata object is useful.
+ */
+export function parseAgentFrontmatter(frontmatterText: string): AgentMetadata {
+  const metadata: AgentMetadata = {};
+
+  // Line-oriented parser that also understands YAML block lists:
+  //   models:
+  //     - provider/model-a
+  //     - provider/model-b
+  // When a `key:` has an empty scalar value, peek the next lines and
+  // collect indented `- item` entries until we hit a non-list line.
+  const frontmatterLines = frontmatterText.split("\n");
+  let lineIndex = 0;
+  while (lineIndex < frontmatterLines.length) {
+    const line = frontmatterLines[lineIndex] ?? "";
+    lineIndex += 1;
+
+    const colonIndex = line.indexOf(":");
+    if (colonIndex < 1) continue;
+
+    const key = line.slice(0, colonIndex).trim();
+    const rawValue = line.slice(colonIndex + 1).trim();
+    const value = stripYamlScalarQuotes(rawValue);
+
+    if (key === "model") {
+      metadata.model = value;
+    } else if (key === "models") {
+      const inlineItems = rawValue.length > 0
+        ? rawValue
+            .replace(/^\[|\]$/g, "") // strip flow-style brackets if present
+            .split(/\s*,\s*/)
+            .map((item) => stripYamlScalarQuotes(item.trim()))
+            .filter((item) => item.length > 0)
+        : [];
+
+      const blockItems: string[] = [];
+      while (lineIndex < frontmatterLines.length) {
+        const peekLine = frontmatterLines[lineIndex] ?? "";
+        const blockMatch = peekLine.match(/^\s+-\s+(.*)$/);
+        if (!blockMatch) break;
+        const item = stripYamlScalarQuotes((blockMatch[1] ?? "").trim());
+        if (item.length > 0) blockItems.push(item);
+        lineIndex += 1;
+      }
+
+      metadata.models = [...inlineItems, ...blockItems];
+    } else if (key === "routing_role") {
+      metadata.routing_role = value;
+    } else if (key === "routing_complexity") {
+      if (["small", "medium", "large"].includes(value)) {
+        metadata.routing_complexity = value as TaskComplexity;
+      }
+    }
+  }
+
+  return metadata;
+}
+
+/**
  * Read agent metadata from the local .opencode/agents/ directory.
  */
 async function readAgentMetadata(
@@ -1583,62 +1702,11 @@ async function readAgentMetadata(
     }
 
     const frontmatter = frontmatterMatch[1];
-    const metadata: AgentMetadata = {};
-
     if (!frontmatter) {
       return null;
     }
 
-    // Line-oriented parser that also understands YAML block lists:
-    //   models:
-    //     - provider/model-a
-    //     - provider/model-b
-    // When a `key:` has an empty scalar value, peek the next lines and
-    // collect indented `- item` entries until we hit a non-list line.
-    const frontmatterLines = frontmatter.split("\n");
-    let lineIndex = 0;
-    while (lineIndex < frontmatterLines.length) {
-      const line = frontmatterLines[lineIndex] ?? "";
-      lineIndex += 1;
-
-      const colonIndex = line.indexOf(":");
-      if (colonIndex < 1) continue;
-
-      const key = line.slice(0, colonIndex).trim();
-      const value = line.slice(colonIndex + 1).trim();
-
-      if (key === "model") {
-        metadata.model = value;
-      } else if (key === "models") {
-        const inlineItems = value.length > 0
-          ? value
-              .replace(/^\[|\]$/g, "") // strip flow-style brackets if present
-              .split(/\s*,\s*/)
-              .map((item) => item.trim())
-              .filter((item) => item.length > 0)
-          : [];
-
-        const blockItems: string[] = [];
-        while (lineIndex < frontmatterLines.length) {
-          const peekLine = frontmatterLines[lineIndex] ?? "";
-          const blockMatch = peekLine.match(/^\s+-\s+(.*)$/);
-          if (!blockMatch) break;
-          const item = (blockMatch[1] ?? "").trim().replace(/^["']|["']$/g, "");
-          if (item.length > 0) blockItems.push(item);
-          lineIndex += 1;
-        }
-
-        metadata.models = [...inlineItems, ...blockItems];
-      } else if (key === "routing_role") {
-        metadata.routing_role = value;
-      } else if (key === "routing_complexity") {
-        if (["small", "medium", "large"].includes(value)) {
-          metadata.routing_complexity = value as TaskComplexity;
-        }
-      }
-    }
-
-    return metadata;
+    return parseAgentFrontmatter(frontmatter);
   } catch {
     return null;
   }
