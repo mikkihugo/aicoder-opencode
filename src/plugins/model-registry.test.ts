@@ -4325,6 +4325,135 @@ test("computeRegistryEntryHealthReport_whenPrimaryTransientQuotaButSiblingHealth
   assert.equal(report, null);
 });
 
+// M123 asymmetric pin A — visibility-filtered primary extraction.
+// Fixture: [hidden xai primary, visible iflowcn sibling], iflowcn has
+// a live key_missing entry. Normal: `filterVisibleProviderRoutes` drops
+// xai, `[0]` picks iflowcn, provider-penalty lookup finds key_missing
+// and returns {scope: "provider", state: "key_missing"}. S1 sabotage
+// (drop `filterVisibleProviderRoutes` wrap) picks raw provider_order[0]
+// = xai, xai has no health entry, function returns null. This pin
+// asserts the exact scope+state tuple, so the S1 drop flips it from a
+// concrete report to null and the pin fires ALONE — S2 drop still
+// picks the visible iflowcn primary (filter intact) and returns the
+// same report; S3 drop (precedence flip) is moot because only the
+// provider map has an entry, so both orderings return the same result.
+test("computeRegistryEntryHealthReport_whenHiddenPrimaryAndVisibleSiblingKeyMissing_reportsVisibleProvider", () => {
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "m-a",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "xai", model: "xai/grok-4", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/m-a", priority: 2 },
+    ],
+  );
+  const providerHealthMap = new Map<string, ProviderHealth>([
+    [
+      "iflowcn",
+      { state: "key_missing", until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+  ]);
+
+  const report = computeRegistryEntryHealthReport(
+    entry,
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+
+  assert.ok(report);
+  assert.equal(report.scope, "provider");
+  assert.equal(report.state, "key_missing");
+});
+
+// M123 asymmetric pin B — "any healthy route → null" short-circuit.
+// Fixture: [opencode primary (blocked via no_credit provider penalty),
+// iflowcn sibling (healthy, no entry anywhere)]. Normal:
+// `findFirstHealthyRouteInEntry` finds the iflowcn sibling live → short
+// circuit → return null. S2 sabotage (drop the short-circuit) proceeds
+// to the penalty lookups and returns the opencode primary's no_credit
+// provider penalty. This pin asserts `report === null` so it fires
+// ALONE on S2 — S1 drop (no hidden routes in fixture) is a no-op; S3
+// drop (precedence flip) is moot because only the provider map has an
+// entry for the primary, both orderings return the same provider-scope
+// report, and the pin's `report === null` assertion is unaffected
+// since the short-circuit still fires.
+test("computeRegistryEntryHealthReport_whenBlockedPrimaryAndHealthySibling_shortCircuitsToNull", () => {
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "m-b",
+    ["coding"],
+    "strong",
+    [
+      { provider: "opencode", model: "opencode/m-b-free", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/m-b", priority: 2 },
+    ],
+  );
+  const providerHealthMap = new Map<string, ProviderHealth>([
+    [
+      "opencode",
+      { state: "no_credit", until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  const report = computeRegistryEntryHealthReport(
+    entry,
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+
+  assert.equal(report, null);
+});
+
+// M123 asymmetric pin C — provider-before-route penalty precedence.
+// Fixture: single-route entry [iflowcn/m-c] with BOTH a live provider
+// penalty (quota) AND a live route penalty (model_not_found, distinct
+// state). Normal: provider check runs FIRST → reports scope:"provider"
+// state:"quota". S3 sabotage (flip route check before provider check)
+// reports scope:"route" state:"model_not_found". This pin asserts
+// BOTH scope === "provider" AND state === "quota" so the flip is
+// detected via either field — S1 drop (no hidden routes) is a no-op;
+// S2 drop (short-circuit removed) is also a no-op because no visible
+// route is healthy, so the short-circuit wouldn't have fired anyway
+// and removing it changes nothing about the provider-first penalty
+// precedence check that runs next.
+test("computeRegistryEntryHealthReport_whenBothMapsLivePenaltyProviderWinsScope", () => {
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "m-c",
+    ["coding"],
+    "standard",
+    [
+      { provider: "iflowcn", model: "iflowcn/m-c", priority: 1 },
+    ],
+  );
+  const providerHealthMap = new Map<string, ProviderHealth>([
+    [
+      "iflowcn",
+      { state: "quota", until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    [
+      "iflowcn/m-c",
+      { state: "model_not_found", until: now + 30_000, retryCount: 1 },
+    ],
+  ]);
+
+  const report = computeRegistryEntryHealthReport(
+    entry,
+    providerHealthMap,
+    modelRouteHealthMap,
+    now,
+  );
+
+  assert.ok(report);
+  assert.equal(report.scope, "provider");
+  assert.equal(report.state, "quota");
+});
+
 test("selectBestModelForRoleAndTask_whenLongTaskPromptContainsBestForToken_keepsMatchingCandidate", () => {
   // Headline regression (M46): the task-filter substring direction was
   // reversed. `bf.toLowerCase().includes(lowerTask)` asked "does the

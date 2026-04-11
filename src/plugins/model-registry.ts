@@ -4449,6 +4449,88 @@ export function buildRoleRecommendationRoutes(
  *   route is blocked (provider-scope preferred, route-scope when the
  *   provider itself is fine but the route-level penalty is the only
  *   block).
+ *
+ * ## Drift surfaces (M123 PDD)
+ *
+ * The body is forty lines of routing-policy glue compressed into three
+ * orthogonal load-bearing invariants. The six pre-existing pins give
+ * good coverage along each invariant individually, but the asymmetry
+ * the M123 triple locks down is distinct: the three surfaces below
+ * must each fail ALONE under a single-line sabotage, without the
+ * failure signatures correlating with each other. Pre-M61 the function
+ * was an inline `provider_order[0]` + provider-health read, and every
+ * one of the three drift surfaces below was a latent bug that landed
+ * in production across the M29/M30/M61 sequence.
+ *
+ *   1. **Visibility-filtered primary extraction.** The first two lines
+ *      of the body run `filterVisibleProviderRoutes(entry.provider_order)`
+ *      and take `[0]` of the result. Those two lines encode a strict
+ *      contract: "the primary route this report describes is the first
+ *      route the router would actually use for this entry," which is
+ *      DEFINITIONALLY the first VISIBLE route in priority order, not
+ *      the first authored route. A refactor that drops the filter and
+ *      uses `modelRegistryEntry.provider_order[0]` directly — an easy
+ *      "simplification" pass since the two subsequent penalty lookups
+ *      key off `primaryRoute.provider` / `.model` and would still
+ *      typecheck — silently flips the report to describe a hidden
+ *      paid route (e.g. `openrouter/xiaomi/mimo-v2-pro` primary with
+ *      `opencode-go/mimo-v2-pro` visible sibling). When the hidden
+ *      route has no health entry, the function returns `null` ("all
+ *      good") even though the real visible primary is `key_missing`,
+ *      lying to `list_curated_models` about which entries are
+ *      agent-routable. Pre-existing pin P2
+ *      (`whenPrimaryRouteIsHiddenPaid_walksToVisibleSibling`) fires on
+ *      this drift in one direction (hidden has penalty, visible
+ *      doesn't) but not in the mirror direction (visible has penalty,
+ *      hidden doesn't) — the M123 pin A closes that mirror.
+ *
+ *   2. **"Any healthy route → null" short-circuit.** Line 4469 is
+ *      `if (findFirstHealthyRouteInEntry(...)) return null`. This is
+ *      the post-M58 fix: when the primary is `key_missing` but a
+ *      sibling visible route is healthy, the entry is still routable
+ *      (the router walks past the dead primary transparently) and the
+ *      report must say null. Dropping the short-circuit reintroduces
+ *      the M58 regression literally — every entry whose primary lives
+ *      on an uncredentialed provider gets reported as blocked even
+ *      though the router serves traffic through a healthy sibling.
+ *      Since the default config ships with many such entries
+ *      (`opencode/glm-5.1-free` primary with `iflowcn/glm-5.1`
+ *      sibling), the agent sees entire classes of routable models
+ *      flagged as permanently blocked and avoids them. P4/P6 cover
+ *      this surface bundled with the primary-key_missing and
+ *      primary-transient-quota entry shapes; the M123 pin B uses the
+ *      narrowest possible fixture so it can partition cleanly against
+ *      pins A and C.
+ *
+ *   3. **Provider-before-route penalty precedence.** Lines 4473–4497
+ *      run `findLiveProviderPenalty` FIRST, `findLiveRoutePenalty`
+ *      SECOND, returning the first one that fires. The ordering is
+ *      load-bearing: when both maps carry a live entry for the primary,
+ *      the provider-level state is STRICTLY WIDER (it blocks every
+ *      route on that provider, not just the one composite route key)
+ *      and must win in the `scope` field. A drift that flips the
+ *      order — an innocuous-looking dedupe pass that hoists the route
+ *      check first "since route-level is more specific" — inverts the
+ *      invariant and reports `scope: "route"` for an entry whose
+ *      ENTIRE provider is quota-backed-off, confusing agents reading
+ *      the report into thinking only one model is affected when every
+ *      model on that provider is. No pre-existing pin exercises the
+ *      both-maps-populated case where the flip would be observable;
+ *      the M123 pin C is the only route-precedence regression pin.
+ *
+ * Asymmetry invariant: each sabotage must fire exactly one of pins
+ * {A, B, C}. Pin A uses hidden-primary+visible-sibling where only the
+ * VISIBLE sibling has a key_missing entry — S1 drop leaves the hidden
+ * primary with no health entry and the function returns null, A fires
+ * alone. Pin B uses all-visible routes where the primary is blocked
+ * but a later visible sibling is healthy — S2 drop skips the
+ * short-circuit and returns the primary's provider-scope report, B
+ * fires alone. Pin C uses a single-route entry where the same route
+ * carries BOTH a live provider penalty and a live route penalty with
+ * distinct states — S3 flip inverts `scope` from "provider" to "route",
+ * C fires alone. The fixtures are deliberately narrow so pre-existing
+ * pins P2 / P4 / P6 fire as additive coverage without correlating the
+ * M123 pin signatures.
  */
 export function computeRegistryEntryHealthReport(
   modelRegistryEntry: ModelRegistryEntry,
