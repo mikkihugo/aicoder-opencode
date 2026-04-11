@@ -7460,6 +7460,67 @@ async function recommendTaskModelRoute(
  * 1. Primary provider is currently healthy (not in any penalty state)
  * 2. Billing mode preference: free > subscription > quota > paid_api
  * 3. Capability tier match if requested
+ *
+ * ## Drift surfaces (M138 PDD)
+ *
+ * Three orthogonal drift axes in this function are NOT covered by the
+ * existing pins (`whenLongTaskPromptContainsBestForToken…`,
+ * `whenTaskPromptMentionsNoBestForTokenOrRole…`,
+ * `whenCandidateHasDeadVisibleRoutes…`,
+ * `whenDeadSingleRouteCompetesWithPartiallyHealthyMultiRoute…`,
+ * `whenHealthyCountsTie_prefersCandidateWithFewerDeadSiblings`) and
+ * could silently regress:
+ *
+ * 1. **Capability tier is the FIRST sort key, and `tierOrder` is
+ *    highest-to-lowest.** `tierOrder = ["frontier", "strong",
+ *    "standard", "fast", "tiny"]` and the comparator returns
+ *    `aTierIdx - bTierIdx` — ascending index order, which means
+ *    smaller index (frontier = 0) wins. A refactor that "fixes" what
+ *    looks like an inverted subtraction and writes `bTierIdx -
+ *    aTierIdx` would flip the order: `tiny` would rank above
+ *    `frontier`. All existing pins at this function keep BOTH
+ *    candidates on the same tier deliberately (`standard` pair,
+ *    `strong` pair, matching fixtures) to isolate later sort stages,
+ *    so none of them would catch a reversed tier comparator. Fires:
+ *    pair a `standard` candidate passed FIRST with a `frontier`
+ *    candidate passed SECOND, both healthy, both free billing, no
+ *    role/task filter, no `capabilityTier` arg → correct impl picks
+ *    frontier; reversed comparator picks standard.
+ *
+ * 2. **`capabilityTier` arg is an EXACT-match filter, not "≥".** The
+ *    filter line `if (capabilityTier && entry.capability_tier !==
+ *    capabilityTier) return false;` rejects entries whose tier
+ *    differs — even if they're a HIGHER tier. Callers pass
+ *    `capabilityTier: "strong"` when they explicitly want strong (not
+ *    "at least strong"); a frontier candidate must be filtered out,
+ *    not promoted. A refactor that reads the filter as "minimum tier"
+ *    and replaces `!==` with a tierOrder comparison would leak
+ *    frontier candidates into the `"strong"` selection, and the tier
+ *    sort above would then promote frontier to winner. Pin 1 doesn't
+ *    catch this because it passes `null` as capabilityTier; pins 3-5
+ *    either pass `"strong"` with no frontier candidate present or
+ *    `null`. Fires: fixture with a `frontier` candidate passed FIRST
+ *    and a `strong` candidate passed SECOND, both healthy, both free,
+ *    request `capabilityTier: "strong"` → correct impl filters out
+ *    frontier and returns strong; filter-removed impl keeps both and
+ *    the tier sort promotes frontier.
+ *
+ * 3. **Billing mode preference is the LAST tiebreaker, after tier +
+ *    healthy + unhealthy.** When two candidates tie on tier, healthy
+ *    count, and unhealthy count, `BILLING_MODE_PREFERENCE_ORDER`
+ *    (free > subscription > quota > paid_api) decides. A refactor
+ *    that drops the billing comparator block thinking "the primary
+ *    keys already differentiate everything" would fall through to a
+ *    stable sort on original input order, silently handing wins to
+ *    whichever candidate happened to be listed first in
+ *    `modelRegistryEntries`. Existing pin 5 (`whenHealthyCountsTie…`)
+ *    uses two `free`-billed candidates so the billing comparator is
+ *    inert; none of the existing pins exercise the billing tiebreak
+ *    in isolation. Fires: two candidates same tier, both with 1
+ *    healthy / 0 unhealthy, one `paid_api` passed FIRST and one
+ *    `free` passed SECOND → correct impl applies billing preference
+ *    and returns the free candidate; removed billing comparator
+ *    leaves paid_api in position 0 via stable-sort fallthrough.
  */
 export function selectBestModelForRoleAndTask(
   modelRegistryEntries: ModelRegistryEntry[],

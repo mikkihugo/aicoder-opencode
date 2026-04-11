@@ -6797,6 +6797,178 @@ test("selectBestModelForRoleAndTask_whenHealthyCountsTie_prefersCandidateWithFew
   assert.equal(best.id, "clean", "cleaner candidate wins when healthy counts tie");
 });
 
+// M138 pin A — tier comparator direction. `tierOrder` is
+// highest-first (`frontier` = index 0), so the comparator returns
+// `aTierIdx - bTierIdx` (ascending → smaller index wins). Pair a
+// `standard` (index 2) passed FIRST with a `frontier` (index 0)
+// passed SECOND; both healthy, both free, no role/task filter, no
+// capabilityTier arg. Correct impl: frontier wins. Sabotage that
+// flips the subtraction to `bTierIdx - aTierIdx` makes standard win
+// (and tiny would now rank above frontier in the general case).
+// Asymmetry: pin B passes a `capabilityTier: "strong"` arg so the
+// pre-filter removes frontier before the tier comparator runs — a
+// reversed comparator is inert on a single surviving candidate. Pin
+// C keeps both candidates on the SAME tier (`standard`), so the tier
+// comparator always returns 0 and the direction swap is irrelevant.
+test("selectBestModelForRoleAndTask_whenCapabilityTiersDiffer_prefersFrontierOverStandardViaTierComparator", () => {
+  const now = Date.now();
+  const standardCandidate = buildModelRegistryEntry(
+    "standard-candidate",
+    ["builder"],
+    "standard",
+    [{ provider: "iflowcn", model: "iflowcn/standard-candidate", priority: 1 }],
+  );
+  const frontierCandidate = buildModelRegistryEntry(
+    "frontier-candidate",
+    ["builder"],
+    "frontier",
+    [{ provider: "iflowcn", model: "iflowcn/frontier-candidate", priority: 1 }],
+  );
+
+  // Pass standard FIRST so a reversed comparator (or stable-sort
+  // fallthrough) would leave standard in position 0.
+  const best = selectBestModelForRoleAndTask(
+    [standardCandidate, frontierCandidate],
+    new Map(),
+    new Map(),
+    now,
+    "builder",
+    null,
+    null,
+  );
+
+  assert.ok(best);
+  assert.equal(
+    best.id,
+    "frontier-candidate",
+    "frontier must outrank standard because tierOrder places frontier at index 0",
+  );
+});
+
+// M138 pin B — `capabilityTier` arg is an EXACT-match filter, not
+// "at least". Fixture: a `frontier` candidate passed FIRST and a
+// `strong` candidate passed SECOND, request `capabilityTier:
+// "strong"`. Correct impl: the filter rejects frontier via
+// `entry.capability_tier !== capabilityTier`, leaving only strong.
+// Sabotage that removes the filter line (or rewrites `!==` to a
+// "≥-tier" comparison) leaks frontier through; the tier comparator
+// above then promotes frontier to position 0 and the returned id
+// becomes `"frontier-leak"` instead of `"strong-target"`. Asymmetry:
+// pin A passes `null` as capabilityTier so the filter line is inert
+// and removing it does not change pin A's result. Pin C also passes
+// `null` capabilityTier and both candidates are `standard` anyway,
+// so removing the filter is a no-op for pin C.
+test("selectBestModelForRoleAndTask_whenCapabilityTierFilterRequestsStrong_excludesFrontierLeak", () => {
+  const now = Date.now();
+  const frontierLeak = buildModelRegistryEntry(
+    "frontier-leak",
+    ["builder"],
+    "frontier",
+    [{ provider: "iflowcn", model: "iflowcn/frontier-leak", priority: 1 }],
+  );
+  const strongTarget = buildModelRegistryEntry(
+    "strong-target",
+    ["builder"],
+    "strong",
+    [{ provider: "iflowcn", model: "iflowcn/strong-target", priority: 1 }],
+  );
+
+  // Pass frontier FIRST so a removed filter would leave frontier in
+  // position 0 after the tier comparator promotes it.
+  const best = selectBestModelForRoleAndTask(
+    [frontierLeak, strongTarget],
+    new Map(),
+    new Map(),
+    now,
+    "builder",
+    null,
+    "strong",
+  );
+
+  assert.ok(best);
+  assert.equal(
+    best.id,
+    "strong-target",
+    "capabilityTier='strong' must EXACT-match — frontier candidates are rejected, not promoted",
+  );
+});
+
+// M138 pin C — billing mode is the LAST tiebreaker, applied only
+// after tier + healthy + unhealthy all tie.
+// `BILLING_MODE_PREFERENCE_ORDER` is `free > subscription > quota >
+// paid_api`. Fixture: two candidates on the same tier (`standard`),
+// each with one healthy visible route and no dead siblings
+// (healthy=1, unhealthy=0 for both), one `paid_api` passed FIRST and
+// one `free` passed SECOND. Correct impl: the first three sort keys
+// all tie, the billing comparator fires, and the free candidate
+// wins. Sabotage that removes the billing comparator block (or
+// replaces it with `return 0` prematurely) leaves the sort stable on
+// input order; paid_api stays at position 0 and the returned id
+// becomes `"paid-first"` instead of `"free-second"`. Asymmetry: pin
+// A's fixture has both candidates on `free` billing, so the removed
+// block is a no-op (the billing indices tie and the comparator
+// returns 0 either way). Pin B's fixture passes `capabilityTier:
+// "strong"` with one strong candidate surviving, so sort runs on a
+// single element and the removed block cannot change the result.
+test("selectBestModelForRoleAndTask_whenTierAndHealthTie_prefersFreeOverPaidViaBillingComparator", () => {
+  const now = Date.now();
+  const paidFirst: ModelRegistryEntry = {
+    id: "paid-first",
+    enabled: true,
+    description: "paid-first",
+    capability_tier: "standard",
+    cost_tier: "expensive",
+    billing_mode: "paid_api",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: ["builder"],
+    not_for: [],
+    default_roles: ["builder"],
+    provider_order: [
+      { provider: "iflowcn", model: "iflowcn/paid-first", priority: 1 },
+    ],
+    notes: [],
+  };
+  const freeSecond: ModelRegistryEntry = {
+    id: "free-second",
+    enabled: true,
+    description: "free-second",
+    capability_tier: "standard",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: ["builder"],
+    not_for: [],
+    default_roles: ["builder"],
+    provider_order: [
+      { provider: "iflowcn", model: "iflowcn/free-second", priority: 1 },
+    ],
+    notes: [],
+  };
+
+  // Pass paid_api FIRST so stable-sort fallthrough (billing
+  // comparator removed) would leave paid_api in position 0.
+  const best = selectBestModelForRoleAndTask(
+    [paidFirst, freeSecond],
+    new Map(),
+    new Map(),
+    now,
+    "builder",
+    null,
+    null,
+  );
+
+  assert.ok(best);
+  assert.equal(
+    best.id,
+    "free-second",
+    "when tier and health tie, billing preference (free > paid_api) must break the tie",
+  );
+});
+
 test("evaluateSessionHangForTimeoutPenalty_whenSessionAlreadyCompleted_returnsNull", () => {
   // clearSessionHangState removes the start-time entry when a session
   // completes cleanly. A late-firing hang timer must become a no-op in
