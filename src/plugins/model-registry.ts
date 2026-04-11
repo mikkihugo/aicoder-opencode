@@ -546,6 +546,65 @@ export function findRegistryEntryByModel(
   );
 }
 
+/**
+ * Load the curated registry and resolve the entry matching an opencode
+ * `input.model` tuple in one call.
+ *
+ * ## Drift shape this closes
+ *
+ * Both `chat.params` and `experimental.chat.system.transform` perform the
+ * same two-step ritual at the top of their body: `await
+ * loadModelRegistry(CONTROL_PLANE_ROOT_DIRECTORY)`, then
+ * `findRegistryEntryByModel(registry.models, { id: input.model.id,
+ * providerID: input.model.providerID })`. The two sites are textually
+ * identical except for the surrounding hook body, and the object
+ * literal that narrows `input.model` to the `ModelIdentity` shape is a
+ * silent drift surface: if a future opencode release grows `input.model`
+ * new fields AND one hook is refactored to spread `{...input.model}`
+ * verbatim while the other keeps the explicit narrow, the two sites
+ * begin comparing different subsets of the runtime model against the
+ * registry. Worse, if one site drops the `providerID` field during a
+ * refactor the lookup collapses to matching-by-id-only, which silently
+ * "succeeds" for any curated entry whose first provider route happens
+ * to share the same model id — a false-positive match that would
+ * inject the wrong temperature override or the wrong routing-context
+ * system prompt without any observable error.
+ *
+ * Centralising the load + narrow + lookup in one helper makes the
+ * `{ id, providerID }` narrowing a property of the helper instead of a
+ * property the two call sites must preserve in lock-step by hand.
+ *
+ * Both call sites still need the loaded `registry` for other work
+ * (`transform` uses `registry.models` three more times to build the
+ * provider-health and available-models prompts), so the helper returns
+ * the `{ registry, entry }` tuple rather than just the entry.
+ *
+ * Args:
+ *   controlPlaneRootDirectory: Absolute path to the control-plane root,
+ *     forwarded verbatim to the loader. Tests inject a throwing or
+ *     fixture-returning loader via `loadFn`.
+ *   inputModel: The runtime model tuple. Only `id` and `providerID`
+ *     are read — any extra fields the runtime may grow are ignored.
+ *   loadFn: Injected registry loader. Defaults to `loadModelRegistry`
+ *     so production call sites do not need to pass it.
+ *
+ * Returns:
+ *   `{ registry, entry }` where `entry` is `undefined` when the
+ *   runtime model does not resolve to any curated registry row.
+ */
+export async function loadRegistryAndLookupEntryForInputModel(
+  controlPlaneRootDirectory: string,
+  inputModel: { id: string; providerID: string },
+  loadFn: (root: string) => Promise<ModelRegistry> = loadModelRegistry,
+): Promise<{ registry: ModelRegistry; entry: ModelRegistryEntry | undefined }> {
+  const registry = await loadFn(controlPlaneRootDirectory);
+  const entry = findRegistryEntryByModel(registry.models, {
+    id: inputModel.id,
+    providerID: inputModel.providerID,
+  });
+  return { registry, entry };
+}
+
 function buildRoutingContextSystemPrompt(modelRegistryEntry: ModelRegistryEntry): string {
   return [
     ACTIVE_MODEL_ROUTING_CONTEXT_HEADER,
@@ -4226,11 +4285,15 @@ export const ModelRegistryPlugin: Plugin = async () => {
           sessionActiveModelMap,
         );
 
-        const modelRegistry = await loadModelRegistry(CONTROL_PLANE_ROOT_DIRECTORY);
-        const modelRegistryEntry = findRegistryEntryByModel(modelRegistry.models, {
-          id: input.model.id,
-          providerID: input.model.providerID,
-        });
+        // M82: `loadRegistryAndLookupEntryForInputModel` SSoTs the two-step
+        // load+narrow+lookup ritual that was previously inlined at both
+        // this site and the `experimental.chat.system.transform` site. See
+        // the helper docstring for the drift shape it closes.
+        const { entry: modelRegistryEntry } =
+          await loadRegistryAndLookupEntryForInputModel(
+            CONTROL_PLANE_ROOT_DIRECTORY,
+            input.model,
+          );
 
         if (modelRegistryEntry) {
           output.temperature =
@@ -4311,18 +4374,21 @@ export const ModelRegistryPlugin: Plugin = async () => {
     async "experimental.chat.system.transform"(input, output) {
       try {
         const now = Date.now();
-        const modelRegistry = await loadModelRegistry(CONTROL_PLANE_ROOT_DIRECTORY);
+        // M82: see `loadRegistryAndLookupEntryForInputModel` docstring.
+        // This site still needs `modelRegistry` for the prompt builders
+        // below, so the helper returns both the registry and the
+        // pre-looked-up entry.
+        const { registry: modelRegistry, entry: modelRegistryEntry } =
+          await loadRegistryAndLookupEntryForInputModel(
+            CONTROL_PLANE_ROOT_DIRECTORY,
+            input.model,
+          );
 
         // Expire stale health entries in BOTH maps. The transform hook
         // runs on every message, so this keeps memory and the persisted
         // providerHealth.json file bounded. Previously only the provider
         // map was expired; route-health entries accumulated forever.
         expireHealthMaps(providerHealthMap, modelRouteHealthMap, now);
-
-        const modelRegistryEntry = findRegistryEntryByModel(modelRegistry.models, {
-          id: input.model.id,
-          providerID: input.model.providerID,
-        });
 
         if (modelRegistryEntry) {
           output.system.push(buildRoutingContextSystemPrompt(modelRegistryEntry));

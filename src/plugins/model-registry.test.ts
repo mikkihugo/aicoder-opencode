@@ -54,6 +54,7 @@ import {
   filterProviderModelsByRouteHealth,
   findCuratedFallbackRoute,
   findRegistryEntryByModel,
+  loadRegistryAndLookupEntryForInputModel,
   inferTaskComplexity,
   parsePersistedHealthEntry,
   recommendTaskModelRoute,
@@ -732,6 +733,92 @@ test("serializeHealthEntryForPersistence_whenCalled_preservesStateAndRetryCount"
 
   assert.equal(serialized.state, "no_credit");
   assert.equal(serialized.retryCount, 7);
+});
+
+test("loadRegistryAndLookupEntryForInputModel_whenEntryMatches_returnsRegistryAndEntry", async () => {
+  // M82 pin: when the injected loader resolves with a registry that
+  // contains a matching entry, the helper returns BOTH the registry
+  // object (unchanged, same reference) AND the looked-up entry. A
+  // sabotage that hardcodes `entry: undefined` fires this pin alone —
+  // the misses in pins 2 and 3 still produce `undefined` naturally.
+  const matchingEntry = buildModelRegistryEntry(
+    "test-model",
+    ["build"],
+    "fast",
+    [{ provider: "ollama-cloud", model: "ollama-cloud/test-model", priority: 1 }],
+  );
+  const fakeRegistry = {
+    version: 1,
+    defaults: { fields: [] },
+    models: [matchingEntry],
+  };
+
+  const result = await loadRegistryAndLookupEntryForInputModel(
+    "/fake/root",
+    { id: "test-model", providerID: "ollama-cloud" },
+    async () => fakeRegistry,
+  );
+
+  assert.strictEqual(result.registry, fakeRegistry);
+  assert.strictEqual(result.entry, matchingEntry);
+});
+
+test("loadRegistryAndLookupEntryForInputModel_whenProviderIdMismatches_returnsUndefinedEntry", async () => {
+  // M82 pin: if the helper's narrowing silently drops `providerID` and
+  // lookups collapse to id-only, a runtime model whose id matches a
+  // registry row but whose provider differs would false-positive match.
+  // This pin passes a registry entry whose id equals the input id but
+  // whose provider differs; the correct helper returns `undefined`
+  // because `findRegistryEntryByModel` normalises both sides via
+  // `composeRouteKey`. A sabotage that passes `{ id: inputModel.id }`
+  // (dropping providerID) fires this pin alone — pin 1 still passes
+  // because its registry entry matches on both fields, and pin 3 still
+  // produces undefined for its own reason.
+  const wrongProviderEntry = buildModelRegistryEntry(
+    "shared-id",
+    ["build"],
+    "fast",
+    [{ provider: "ollama-cloud", model: "ollama-cloud/shared-id", priority: 1 }],
+  );
+  const fakeRegistry = {
+    version: 1,
+    defaults: { fields: [] },
+    models: [wrongProviderEntry],
+  };
+
+  const result = await loadRegistryAndLookupEntryForInputModel(
+    "/fake/root",
+    { id: "shared-id", providerID: "openrouter" },
+    async () => fakeRegistry,
+  );
+
+  assert.strictEqual(result.registry, fakeRegistry);
+  assert.strictEqual(result.entry, undefined);
+});
+
+test("loadRegistryAndLookupEntryForInputModel_whenLoaderCalled_forwardsControlPlaneRootVerbatim", async () => {
+  // M82 pin: the `controlPlaneRootDirectory` argument MUST be forwarded
+  // to the loader unchanged. A sabotage that hardcodes the path (e.g.
+  // `loadFn("")` or `loadFn(".")`) fires this pin alone — pins 1 and
+  // 2 do not inspect the captured root argument because their
+  // injected loaders ignore it.
+  let capturedRoot: string | null = null;
+  const fakeRegistry = {
+    version: 1,
+    defaults: { fields: [] },
+    models: [] as ModelRegistryEntry[],
+  };
+
+  await loadRegistryAndLookupEntryForInputModel(
+    "/very/specific/root/path",
+    { id: "anything", providerID: "anything" },
+    async (root) => {
+      capturedRoot = root;
+      return fakeRegistry;
+    },
+  );
+
+  assert.equal(capturedRoot, "/very/specific/root/path");
 });
 
 test("logPluginHookFailure_whenCalled_forwardsMessageContainingHookName", () => {
