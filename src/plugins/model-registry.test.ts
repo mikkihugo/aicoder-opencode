@@ -7984,6 +7984,75 @@ test("renderAvailableModelsSystemPromptBody_whenMapIsEmpty_returnsNullNotEmptySt
   assert.equal(rendered, null);
 });
 
+// M135 pin A — header-at-line-zero assembly order: the rendered section
+// must begin with the canonical `## Available models by role/task`
+// header as line 0. A refactor that flips the spread from
+// `[AVAILABLE_MODELS_HEADER, ...lines]` to `[...lines, AVAILABLE_MODELS_HEADER]`
+// moves the header to the LAST line and the downstream agent's
+// section parser (which locates the block by matching the header
+// literal on line zero) silently loses every section anchored on that
+// header. Single-role fixture so pin C's cap/order surface is
+// untouched; the separator is still single-`\n` so pin B is unaffected.
+test("renderAvailableModelsSystemPromptBody_whenRoleRowPresent_headerLandsAtLineZero", () => {
+  const roleToModels = new Map<string, string[]>([
+    ["planner", ["alpha-model (free)"]],
+  ]);
+
+  const rendered = renderAvailableModelsSystemPromptBody(roleToModels);
+
+  assert.ok(rendered !== null);
+  assert.equal(rendered.split("\n")[0], "## Available models by role/task");
+});
+
+// M135 pin B — single-newline inter-line separator: the final
+// `.join("\n")` uses exactly one LF between the header and every row,
+// and between adjacent rows. A refactor to `.join("\n\n")` (the "add
+// breathing room" drift class, or a copy-paste from the multi-section
+// `buildProviderHealthSystemPrompt` assembler where blank lines ARE
+// correct) would silently double every separator. Uses a tiny N=2
+// fixture so the expected split-line count is exactly 3 (header + two
+// rows, no blanks). Pin A is unaffected — header is still at line
+// zero regardless of separator width. Pin C is unaffected — two
+// roles is well under the cap and insertion order is the natural
+// ordering.
+test("renderAvailableModelsSystemPromptBody_whenTwoRoleRows_rowsSeparatedBySingleNewlineOnly", () => {
+  const roleToModels = new Map<string, string[]>([
+    ["planner", ["alpha-model (free)"]],
+    ["coder", ["beta-model (free)"]],
+  ]);
+
+  const rendered = renderAvailableModelsSystemPromptBody(roleToModels);
+
+  assert.ok(rendered !== null);
+  assert.equal(rendered.split("\n").length, 3);
+});
+
+// M135 pin C — `.slice(0, CAP)` truncates from the START of iteration
+// order, preserving the first N roles in insertion order. A refactor to
+// `.slice(-CAP)` (the "keep the most-recently-added N" drift) still
+// produces exactly 8 rows but shifts the window from roles [0..7] to
+// roles [2..9] on a 10-role fixture. The M92 cap pin counts rows and
+// would still see 8 — it is unaffected. The existing M92 row-format
+// pin uses a single role and is also unaffected. This pin uses 10
+// roles named `role_0` through `role_9` in insertion order and asserts
+// `role_0` is rendered while `role_9` is absent — the slice-from-end
+// sabotage is the only way to flip BOTH assertions simultaneously.
+// Pin A is unaffected — header position is independent of slice
+// direction. Pin B is unaffected — 10-role output still uses single-
+// newline joins.
+test("renderAvailableModelsSystemPromptBody_whenMapExceedsCap_preservesFirstInsertedRolesNotLast", () => {
+  const roleToModels = new Map<string, string[]>();
+  for (let index = 0; index < 10; index += 1) {
+    roleToModels.set(`role_${index}`, [`model_${index} (free)`]);
+  }
+
+  const rendered = renderAvailableModelsSystemPromptBody(roleToModels);
+
+  assert.ok(rendered !== null);
+  assert.ok(rendered.includes("role_0:"), "first-inserted role must be present");
+  assert.ok(!rendered.includes("role_9:"), "last-inserted role must be sliced off");
+});
+
 // M93 pin A — enabled-gate: a disabled entry with an otherwise-matching
 // role must never survive. Uses a concrete role (not null) so sabotages
 // 2 and 3 can't fire this pin — they only affect the role predicate.

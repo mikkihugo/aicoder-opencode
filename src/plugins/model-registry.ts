@@ -5844,6 +5844,64 @@ export function buildProviderHealthSystemPrompt(
  * Returns:
  *   The fully assembled section string (header + rows), or `null` when
  *   the input map is empty.
+ *
+ * ## Drift surfaces (M135 PDD)
+ *
+ * The pre-existing M92 pin triad (cap=8, row-format, empty-null) covers
+ * three drift classes but leaves three structurally-independent assembly
+ * invariants with no pin coverage. Each of the three surfaces below is
+ * a plausible refactor path that the M92 triad silently tolerates:
+ *
+ *  1. **Header-at-line-zero assembly order.** The final return statement
+ *     builds the section as `[AVAILABLE_MODELS_HEADER, ...lines]` — the
+ *     header literal is spread FIRST and every row follows. A refactor
+ *     that flips to `[...lines, AVAILABLE_MODELS_HEADER]` (the "append
+ *     header after body" drift class, which looks identical under a
+ *     `join("\n")` but flips the first-line contract) moves the header
+ *     to the LAST line of the section. The downstream agent's section-
+ *     parser locates the block by matching the header literal on line
+ *     zero; a header that lands at the end is invisible to every header-
+ *     anchored read. The M92 cap pin counts `allLines.length - 1` and
+ *     never inspects position-zero content, so the drift is silent. The
+ *     M92 row-format pin filters by `.startsWith("- ")` and asserts
+ *     against bullet rows, so it also never looks at line zero. Only
+ *     a new pin that asserts `.split("\n")[0] === AVAILABLE_MODELS_HEADER`
+ *     isolates this surface.
+ *
+ *  2. **Single-newline inter-line separator.** The `.join("\n")` at the
+ *     end of the return statement uses a SINGLE LF between the header
+ *     line and every row. A refactor to `.join("\n\n")` (the "add
+ *     breathing room between sections" drift class, or a copy-paste
+ *     from the multi-section assembler in `buildProviderHealthSystemPrompt`
+ *     where blank-line separators are correct) would silently double-
+ *     space every row, doubling the section's token budget on a real
+ *     8-role prompt (16 newlines instead of 8). Downstream agents that
+ *     parse the body as a contiguous bullet list would also see
+ *     interstitial blank lines as a section-end marker and ignore every
+ *     row after the first. The M92 cap pin subtracts ONE header line
+ *     and expects the remaining count to equal 8, but does so via
+ *     `allLines.length - 1`; a `\n\n` sabotage on an N=8 fixture
+ *     produces `2*(N+1) - 1 = 17` split elements and the M92 cap pin
+ *     fails additively — but via a side effect (count mismatch), not by
+ *     asserting the separator invariant directly. A new dedicated pin
+ *     on a TINY fixture (e.g. `N=2` roles) asserts `splitLines.length
+ *     === 3` exactly, pinning the single-newline contract without
+ *     borrowing the cap pin's fixture.
+ *
+ *  3. **`.slice(0, CAP)` truncates from the START of iteration order.**
+ *     The `Array.from(...entries()).slice(0, MAX_AVAILABLE_MODELS_ROLES_RENDERED)`
+ *     expression preserves the first N roles in insertion order, which
+ *     is the canonical order the upstream walker emits. A refactor to
+ *     `.slice(-CAP)` (the "keep the most-recently-added N" drift class,
+ *     a plausible reading of "most relevant roles come last") keeps the
+ *     LAST N roles instead. For a 10-role fixture the sliced window
+ *     shifts from roles [0..7] to roles [2..9] — still exactly 8 rows,
+ *     so the M92 cap pin passes unchanged. The M92 row-format pin uses
+ *     a SINGLE-role fixture and is unaffected. Only a new pin that
+ *     exceeds the cap AND asserts `role_0` is rendered while e.g.
+ *     `role_9` is absent isolates the slice-from-start surface. The
+ *     pin must use more than 8 roles (so the cap applies) and must
+ *     assert on identifiable early-order roles by name.
  */
 export function renderAvailableModelsSystemPromptBody(
   roleToModels: Map<string, string[]>,
