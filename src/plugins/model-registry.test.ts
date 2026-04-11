@@ -55,6 +55,7 @@ import {
   recommendTaskModelRoute,
   evaluateSessionHangForTimeoutPenalty,
   finalizeHungSessionState,
+  finalizeHungSessionStateAndRecordPenalty,
   selectBestModelForRoleAndTask,
   summarizeVisibleRouteHealth,
 } from "./model-registry.js";
@@ -4287,6 +4288,119 @@ test("finalizeHungSessionState_whenDurationStillWithinBudget_leavesMapsIntactAnd
 
   assert.equal(result, null);
   assert.equal(startMap.has("s3"), true, "still-running session must not be evicted");
+  assert.equal(providerMap.has("s3"), true);
+  assert.equal(modelMap.has("s3"), true);
+});
+
+test("finalizeHungSessionStateAndRecordPenalty_whenSessionHung_writesPenaltyAndFiresPersistAndClearsSessionMaps", () => {
+  // M77: end-to-end hang-timer wrapper. When the session hung past the
+  // timeout budget, the helper MUST: (1) write the "timeout" route-health
+  // entry under the composite route key, (2) fire persistFn exactly once
+  // through the M68 recordRouteHealthPenalty pair, and (3) clear the
+  // three per-session maps so silent-death sessions don't leak memory.
+  // This pin proves the full finalize → record ritual fires on the
+  // non-null path.
+  const now = Date.now();
+  const startMap = new Map<string, number>([["s1", now - 1000]]);
+  const providerMap = new Map<string, string>([["s1", "iflowcn"]]);
+  const modelMap = new Map<string, { id: string; providerID: string }>([
+    ["s1", { id: "qwen3-coder-plus", providerID: "iflowcn" }],
+  ]);
+  const routeHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  let persistCalls = 0;
+
+  finalizeHungSessionStateAndRecordPenalty(
+    "s1",
+    startMap,
+    providerMap,
+    modelMap,
+    routeHealthMap,
+    providerHealthMap,
+    20,
+    now,
+    () => {
+      persistCalls += 1;
+    },
+  );
+
+  const entry = routeHealthMap.get("iflowcn/qwen3-coder-plus");
+  assert.ok(entry, "penalty must be written under composite route key");
+  assert.equal(entry!.state, "timeout");
+  assert.equal(persistCalls, 1, "persistFn must fire exactly once through M68 pair");
+  assert.equal(startMap.has("s1"), false, "sessionStartTimeMap must be evicted");
+  assert.equal(providerMap.has("s1"), false, "sessionActiveProviderMap must be evicted");
+  assert.equal(modelMap.has("s1"), false, "sessionActiveModelMap must be evicted");
+});
+
+test("finalizeHungSessionStateAndRecordPenalty_whenSessionAlreadyCompleted_doesNotWriteOrFirePersist", () => {
+  // M77: null-guard invariant. The hang timer fires late for a session
+  // that already completed (start-time was cleared by the terminal
+  // handler). The wrapper must short-circuit on finalizeHungSessionState
+  // returning null — no write to routeHealthMap, no persistFn call. A
+  // refactor that dropped the null-check would call
+  // recordRouteHealthPenalty with undefined fields and crash the
+  // async-isolated setTimeout closure with an unhandled exception.
+  const now = Date.now();
+  const startMap = new Map<string, number>(); // empty — session completed
+  const providerMap = new Map<string, string>();
+  const modelMap = new Map<string, { id: string; providerID: string }>();
+  const routeHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  let persistCalls = 0;
+
+  finalizeHungSessionStateAndRecordPenalty(
+    "s2",
+    startMap,
+    providerMap,
+    modelMap,
+    routeHealthMap,
+    providerHealthMap,
+    20,
+    now,
+    () => {
+      persistCalls += 1;
+    },
+  );
+
+  assert.equal(routeHealthMap.size, 0, "no entry must be written on null path");
+  assert.equal(persistCalls, 0, "persistFn must not fire on null path");
+});
+
+test("finalizeHungSessionStateAndRecordPenalty_whenDurationStillWithinBudget_doesNotWriteOrFirePersist", () => {
+  // M77: budget-respected invariant. Hang timer fired early (e.g. the
+  // setTimeout returned slightly before the full duration elapsed, or
+  // the session's budget hadn't yet been exceeded because the underlying
+  // model is legitimately slow). The wrapper must not write a penalty,
+  // must not fire persistFn, and must leave the session maps intact so
+  // a later finalize call can still catch the real hang.
+  const now = Date.now();
+  const startMap = new Map<string, number>([["s3", now - 10]]); // 10ms vs 20ms budget
+  const providerMap = new Map<string, string>([["s3", "iflowcn"]]);
+  const modelMap = new Map<string, { id: string; providerID: string }>([
+    ["s3", { id: "qwen3-coder-plus", providerID: "iflowcn" }],
+  ]);
+  const routeHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  let persistCalls = 0;
+
+  finalizeHungSessionStateAndRecordPenalty(
+    "s3",
+    startMap,
+    providerMap,
+    modelMap,
+    routeHealthMap,
+    providerHealthMap,
+    20,
+    now,
+    () => {
+      persistCalls += 1;
+    },
+  );
+
+  assert.equal(routeHealthMap.size, 0);
+  assert.equal(persistCalls, 0);
+  assert.equal(startMap.has("s3"), true, "still-running session state must survive early-fire");
   assert.equal(providerMap.has("s3"), true);
   assert.equal(modelMap.has("s3"), true);
 });

@@ -1812,6 +1812,101 @@ export function finalizeHungSessionState(
 }
 
 /**
+ * End-to-end hang-timer wrapper: evaluate whether the session hung,
+ * clear its per-session state, and (if a penalty was produced) write it
+ * through the M68 `recordRouteHealthPenalty` pair — as one atomic
+ * operation.
+ *
+ * ## Drift shape this closes
+ *
+ * The `chat.params` hang-timer `setTimeout` callback inlined the
+ * two-step ritual by hand:
+ *
+ *     const result = finalizeHungSessionState(...);
+ *     if (!result) return;
+ *     recordRouteHealthPenalty(
+ *       modelRouteHealthMap, providerHealthMap,
+ *       result.routeKey, result.health, persistProviderHealth,
+ *     );
+ *
+ * Three steps, each with its own failure mode:
+ *
+ *   - Forgetting the `if (!result) return` guard → `recordRouteHealthPenalty`
+ *     runs with null fields and throws inside the setTimeout closure,
+ *     which is async-isolated and has no surrounding handler; the crash
+ *     silently lost AND Node's default unhandledRejection behavior
+ *     emits noise in prod logs.
+ *   - Forgetting to call `recordRouteHealthPenalty` at all → the hang
+ *     was detected, per-session state was cleared, but the penalty was
+ *     never persisted. The next identical hang would re-accrue on the
+ *     same route with no backoff — infinite retry on a dead
+ *     long-reasoning endpoint. This is the worst failure mode because
+ *     it silently degrades the backoff contract.
+ *   - Mixing up the `finalizeHungSessionState` return shape with the
+ *     arguments to `recordRouteHealthPenalty` (e.g. passing
+ *     `result.health` as `routeKey`) → compile-time error if typed,
+ *     runtime write-to-wrong-key bug if untyped. TypeScript catches it
+ *     today, but the shape-pairing is another surface for future drift.
+ *
+ * The wrapper collapses all three steps into one call, guarantees the
+ * null-check is never forgotten, and lets the test harness pin the
+ * "finalize returned non-null → record MUST fire" contract with a spy.
+ *
+ * ## Why a wrapper, not a rewrite of `finalizeHungSessionState`
+ *
+ * `finalizeHungSessionState` is a pure function that returns the
+ * computed penalty so its existing unit tests can pin the
+ * computation-and-cleanup contract without coupling to the durability
+ * layer. Rewriting it to perform the write internally would force
+ * every test to pass a stub persister and a fresh `providerHealthMap`,
+ * blurring the "compute vs persist" boundary. The wrapper sits on top
+ * and adds the durability step, keeping the pure/impure split clean.
+ *
+ * Args:
+ *   sessionID: Opaque session identifier.
+ *   sessionStartTimeMap: Turn-start timestamp map.
+ *   sessionActiveProviderMap: Provider-id-per-session map.
+ *   sessionActiveModelMap: Active model-per-session map.
+ *   modelRouteHealthMap: Route-level health map (mutated when penalty
+ *     is recorded).
+ *   providerHealthMap: Provider-level health map (threaded for the
+ *     atomic-snapshot shape).
+ *   timeoutMs: Hang-timeout threshold.
+ *   now: Wall-clock timestamp in ms.
+ *   persistFn: Injected persister (production passes
+ *     `persistProviderHealth`; tests pass a spy).
+ */
+export function finalizeHungSessionStateAndRecordPenalty(
+  sessionID: string,
+  sessionStartTimeMap: Map<string, number>,
+  sessionActiveProviderMap: Map<string, string>,
+  sessionActiveModelMap: Map<string, { id: string; providerID: string }>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  providerHealthMap: Map<string, ProviderHealth>,
+  timeoutMs: number,
+  now: number,
+  persistFn: PersistProviderHealthFn,
+): void {
+  const result = finalizeHungSessionState(
+    sessionID,
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+    modelRouteHealthMap,
+    timeoutMs,
+    now,
+  );
+  if (result === null) return;
+  recordRouteHealthPenalty(
+    modelRouteHealthMap,
+    providerHealthMap,
+    result.routeKey,
+    result.health,
+    persistFn,
+  );
+}
+
+/**
  * Pure helper invoked by the `chat.params` hang-timer `setTimeout` closure.
  *
  * Previously the closure captured the full opencode `input` object — a
@@ -3953,27 +4048,26 @@ export const ModelRegistryPlugin: Plugin = async () => {
           const capturedSessionID = input.sessionID;
           const capturedTimeoutMs = timeoutMs;
           const hangTimer = setTimeout(() => {
-            // `finalizeHungSessionState` (not the bare `evaluate…` query)
-            // so the three per-session maps are also evicted when a
-            // penalty is recorded. Silent-death sessions (network drop,
-            // client kill, parent crash) never fire session.error or
-            // assistant.message.completed, so this hang-timer firing is
-            // the ONLY cleanup opportunity for their session tuples.
-            const result = finalizeHungSessionState(
+            // `finalizeHungSessionStateAndRecordPenalty` (M77) collapses
+            // the three-step `finalize → null-guard → record` ritual
+            // into one call. The wrapper also guarantees the null-check
+            // is never forgotten — forgetting it used to be a viable
+            // drift target where a future maintainer accidentally called
+            // recordRouteHealthPenalty with null fields and crashed the
+            // async-isolated setTimeout closure. Silent-death sessions
+            // (network drop, client kill, parent crash) never fire
+            // session.error or assistant.message.completed, so this
+            // hang-timer firing is the ONLY cleanup opportunity for
+            // their session tuples.
+            finalizeHungSessionStateAndRecordPenalty(
               capturedSessionID,
               sessionStartTimeMap,
               sessionActiveProviderMap,
               sessionActiveModelMap,
               modelRouteHealthMap,
+              providerHealthMap,
               capturedTimeoutMs,
               Date.now(),
-            );
-            if (!result) return;
-            recordRouteHealthPenalty(
-              modelRouteHealthMap,
-              providerHealthMap,
-              result.routeKey,
-              result.health,
               persistProviderHealth,
             );
           }, timeoutMs + 100); // Check slightly after the timeout threshold
