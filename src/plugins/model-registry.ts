@@ -1858,16 +1858,64 @@ export function hasAgentVisiblePenalty(
   now: number,
 ): boolean {
   for (const health of providerHealthMap.values()) {
-    if (health.until > now && isAgentVisibleHealthState(health.state)) {
+    if (isAgentVisibleLivePenalty(health, now)) {
       return true;
     }
   }
   for (const health of modelRouteHealthMap.values()) {
-    if (health.until > now && isAgentVisibleHealthState(health.state)) {
+    if (isAgentVisibleLivePenalty(health, now)) {
       return true;
     }
   }
   return false;
+}
+
+/**
+ * Return `true` when a health entry is both live (not expired) and one
+ * the agent can act on (not a structural plumbing state).
+ *
+ * Canonical form of the predicate
+ * `health.until > now && isAgentVisibleHealthState(health.state)` that
+ * pre-M69 lived inlined across six sites:
+ *   - `hasAgentVisiblePenalty` (provider loop)
+ *   - `hasAgentVisiblePenalty` (route loop)
+ *   - `buildAgentVisibleBackoffStatus` (provider loop)
+ *   - `buildAgentVisibleBackoffStatus` (route loop)
+ *   - `buildProviderHealthSystemPrompt` (provider filter)
+ *   - `buildProviderHealthSystemPrompt` (route filter)
+ *
+ * All six sites answered the same question: "should this entry be
+ * surfaced in the agent-visible view right now?" The conjunction is
+ * load-bearing on BOTH halves — dropping `health.until > now` leaks
+ * already-expired penalties (breaks M29 route-level expiration
+ * semantics), and dropping `isAgentVisibleHealthState(health.state)`
+ * floods every agent turn with `key_missing` structural plumbing
+ * (the exact M59 bug that M63's `buildAgentVisibleBackoffStatus`
+ * extraction closed at the tool boundary but left inline at the five
+ * other sites).
+ *
+ * A future refinement — a new comparison operator (`>=` semantics for
+ * boundary ticks), a new agent-visible state, an additional
+ * `retryCount > 0` clause to hide soft-retries — has to land in one
+ * named place now instead of six.
+ *
+ * Args:
+ *   health: A `ProviderHealth` or `ModelRouteHealth` entry. The two
+ *     types share the `{state, until}` shape this predicate reads, so
+ *     one helper covers both maps without a discriminated union.
+ *   now: Wall-clock ms.
+ *
+ * Returns:
+ *   `true` when the entry's expiration is strictly in the future AND
+ *   its state is one the agent can route around. `false` for expired
+ *   entries, `key_missing` sentinels, or any future state added to the
+ *   `isAgentVisibleHealthState` exclusion list.
+ */
+export function isAgentVisibleLivePenalty(
+  health: { state: ProviderHealthState; until: number },
+  now: number,
+): boolean {
+  return health.until > now && isAgentVisibleHealthState(health.state);
 }
 
 /**
@@ -1940,8 +1988,7 @@ export function buildAgentVisibleBackoffStatus(
   > = {};
 
   for (const [providerID, health] of providerHealthMap.entries()) {
-    if (health.until <= now) continue;
-    if (!isAgentVisibleHealthState(health.state)) continue;
+    if (!isAgentVisibleLivePenalty(health, now)) continue;
     status[providerID] = {
       state: health.state,
       until: formatHealthExpiry(health.until),
@@ -1951,8 +1998,7 @@ export function buildAgentVisibleBackoffStatus(
   }
 
   for (const [routeKey, health] of modelRouteHealthMap.entries()) {
-    if (health.until <= now) continue;
-    if (!isAgentVisibleHealthState(health.state)) continue;
+    if (!isAgentVisibleLivePenalty(health, now)) continue;
     status[routeKey] = {
       state: health.state,
       until: formatHealthExpiry(health.until),
@@ -1981,27 +2027,19 @@ export function buildProviderHealthSystemPrompt(
   modelRouteHealthMap: Map<string, ModelRouteHealth>,
   now: number,
 ): string | null {
-  // key_missing entries are excluded via `isAgentVisibleHealthState`: they
-  // are permanent plumbing state the agent can't route around, not a
-  // transient backoff. See the helper's docstring for the full rationale —
-  // in short, post-M58 every cold start installs key_missing for every
-  // uncredentialed curated provider, and surfacing them here would dump
-  // 15–25 "Provider X [KEY MISSING] until never" sections into every single
-  // agent turn's system prompt. The internal `isProviderHealthy` path
-  // still uses key_missing to skip dead providers in the fallback scanner.
-  // key_missing entries are excluded via `isAgentVisibleHealthState`: they
-  // are permanent plumbing state the agent can't route around, not a
-  // transient backoff. See the helper's docstring for the full rationale —
-  // in short, post-M58 every cold start installs key_missing for every
-  // uncredentialed curated provider, and surfacing them here would dump
-  // 15–25 "Provider X [KEY MISSING] until never" sections into every single
-  // agent turn's system prompt. The internal `isProviderHealthy` path
-  // still uses key_missing to skip dead providers in the fallback scanner.
+  // Agent-visible live penalties: `isAgentVisibleLivePenalty` excludes
+  // `key_missing` structural plumbing (post-M58 every cold start installs
+  // it for every uncredentialed curated provider, and surfacing them here
+  // would dump 15–25 "Provider X [KEY MISSING] until never" sections into
+  // every single agent turn's system prompt) AND already-expired entries
+  // whose `until <= now`. The internal `isProviderHealthy` path still uses
+  // `key_missing` to skip dead providers in the fallback scanner — this
+  // filter only gates the system-prompt surface.
   const activeProviderPenalties = Array.from(providerHealthMap.entries()).filter(
-    ([, health]) => health.until > now && isAgentVisibleHealthState(health.state),
+    ([, health]) => isAgentVisibleLivePenalty(health, now),
   );
   const activeRoutePenalties = Array.from(modelRouteHealthMap.entries()).filter(
-    ([, health]) => health.until > now && isAgentVisibleHealthState(health.state),
+    ([, health]) => isAgentVisibleLivePenalty(health, now),
   );
 
   if (activeProviderPenalties.length === 0 && activeRoutePenalties.length === 0) {

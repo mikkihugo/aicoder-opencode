@@ -33,6 +33,7 @@ import {
   countHealthyVisibleRoutes,
   composeRouteKey,
   lookupRouteHealthByIdentifiers,
+  isAgentVisibleLivePenalty,
   recordRouteHealthPenalty,
   computeProviderHealthUpdate,
   computeRegistryEntryHealthReport,
@@ -1382,6 +1383,62 @@ test("composeRouteKey_whenRegistryEntryIsUnprefixed_producesCompositeKey", () =>
   assert.equal(
     composeRouteKey({ provider: "openrouter", model: "openrouter/xiaomi/mimo-v2-pro" }),
     "openrouter/xiaomi/mimo-v2-pro",
+  );
+});
+
+test("isAgentVisibleLivePenalty_whenEntryLiveAndAgentVisible_returnsTrue", () => {
+  // M69: canonical happy path — a live transient penalty that the agent
+  // can route around (quota, key_dead, no_credit, model_not_found, timeout)
+  // must be surfaced.
+  assert.equal(
+    isAgentVisibleLivePenalty({ state: "quota", until: 2_000 }, 1_000),
+    true,
+  );
+  assert.equal(
+    isAgentVisibleLivePenalty({ state: "model_not_found", until: 5_000 }, 1_000),
+    true,
+  );
+});
+
+test("isAgentVisibleLivePenalty_whenEntryExpired_returnsFalse", () => {
+  // M69: expiration-gate pin — an entry with `until <= now` is already
+  // past its backoff window and must not be surfaced. The strict `>`
+  // comparison mirrors M29 route-level expiration semantics where a
+  // boundary tick counts as expired.
+  assert.equal(
+    isAgentVisibleLivePenalty({ state: "quota", until: 1_000 }, 1_000),
+    false,
+  );
+  assert.equal(
+    isAgentVisibleLivePenalty({ state: "quota", until: 500 }, 1_000),
+    false,
+  );
+});
+
+test("isAgentVisibleLivePenalty_whenEntryIsKeyMissing_returnsFalse", () => {
+  // M69: structural-plumbing pin — `key_missing` sentinels are installed
+  // at boot by `initializeProviderHealthState` for every uncredentialed
+  // curated provider, with `until: Number.POSITIVE_INFINITY`. They are
+  // live (not expired), but the agent cannot route around a missing
+  // credential — surfacing them floods every system prompt. The M59
+  // `isAgentVisibleHealthState` gate excludes them; this predicate
+  // inherits the gate.
+  assert.equal(
+    isAgentVisibleLivePenalty(
+      { state: "key_missing", until: Number.POSITIVE_INFINITY },
+      1_000,
+    ),
+    false,
+  );
+});
+
+test("isAgentVisibleLivePenalty_whenKeyMissingButAlsoExpired_returnsFalse", () => {
+  // M69: both-gates pin — `key_missing` with a finite past `until` (a
+  // broken or hand-rolled test fixture) must still be excluded. The
+  // predicate must not short-circuit on `until > now` alone.
+  assert.equal(
+    isAgentVisibleLivePenalty({ state: "key_missing", until: 500 }, 1_000),
+    false,
   );
 });
 
