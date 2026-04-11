@@ -114,6 +114,9 @@ test("recommendTaskModelRoute_whenAgentModelsIncludeHealthyFallback_usesNextHeal
     );
 
   assert.equal(decision.selectedModelRoute, "opencode-go/glm-5.1");
+  // Lock in the fix: this must resolve via the preferred-list fallback,
+  // not accidentally via last-resort registry-order traversal.
+  assert.match(decision.reasoning, /Preferred model from agent metadata/);
 });
 
 test("recommendTaskModelRoute_whenNoAgentMetadataExists_usesRegistryRoleAndComplexity", async () => {

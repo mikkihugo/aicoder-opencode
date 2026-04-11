@@ -663,24 +663,49 @@ async function recommendTaskModelRoute(
     });
   }
 
-  // If agent has preferred models, try those first
+  // If agent has preferred models, try those first.
+  //
+  // Matching semantics: the agent declares composite routes like
+  // `ollama-cloud/glm-5.1`. We find the registry entry that contains that
+  // exact route, then return the first HEALTHY visible route from that
+  // entry — which may be a different provider for the same model family
+  // (e.g. `opencode-go/glm-5.1`) when the declared provider is unhealthy.
+  // This honors the agent's model-family preference without stranding it
+  // on a single provider.
   if (preferredModels.length > 0) {
+    const isRouteHealthy = (route: { provider: string; model: string }): boolean => {
+      if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
+      const routeHealth = modelRouteHealthMap.get(route.model);
+      return !routeHealth || routeHealth.until <= now;
+    };
+
     for (const preferredModel of preferredModels) {
       for (const entry of roleMatchedEntries) {
         const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
-        for (const route of visibleRoutes) {
-          if (route.model === preferredModel) {
-            const providerHealthy = isProviderHealthy(providerHealthMap, route.provider, now);
-            const routeHealthy = !modelRouteHealthMap.has(route.model) ||
-              (modelRouteHealthMap.get(route.model)?.until ?? 0) <= now;
+        const entryContainsPreferred = visibleRoutes.some(
+          (route) => route.model === preferredModel,
+        );
+        if (!entryContainsPreferred) continue;
 
-            if (providerHealthy && routeHealthy) {
-              return {
-                selectedModelRoute: route.model,
-                reasoning: `Preferred model from agent metadata, healthy provider`,
-              };
-            }
-          }
+        // Prefer the exact preferred route if it is healthy.
+        const exactRoute = visibleRoutes.find(
+          (route) => route.model === preferredModel && isRouteHealthy(route),
+        );
+        if (exactRoute) {
+          return {
+            selectedModelRoute: exactRoute.model,
+            reasoning: `Preferred model from agent metadata, healthy provider`,
+          };
+        }
+
+        // Otherwise fall back to any healthy visible route in the same
+        // registry entry (same model family, different provider).
+        const fallbackRoute = visibleRoutes.find((route) => isRouteHealthy(route));
+        if (fallbackRoute) {
+          return {
+            selectedModelRoute: fallbackRoute.model,
+            reasoning: `Preferred model from agent metadata, healthy fallback provider`,
+          };
         }
       }
     }

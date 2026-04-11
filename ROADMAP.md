@@ -172,6 +172,16 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M18: Preferred-model fallback stranded on declared provider (agent family preference ignored when declared provider unhealthy) `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `recommendTaskModelRoute` preferred-list walk matched agent-declared routes like `ollama-cloud/glm-5.1` by exact composite `route.model === preferredModel`. When `ollama-cloud` was unhealthy, the walk rejected the exact route and never tried other providers for the same model family — even though the registry entry for `glm-5.1` also contained a healthy `opencode-go/glm-5.1` route. The path fell through to `selectBestModelForRoleAndTask` or the last-resort loop, which sometimes returned the right answer by registry-order luck (e.g. `whenAgentModelsIncludeHealthyFallback_usesNextHealthyRoute` passed via last-resort, not via the preferred path the test name implied).
+- **Why it mattered**: every fleet agent that declared a composite route and hit provider quota would silently switch *model families* instead of *providers*, bypassing the agent author's intent. On a heavy ollama-cloud quota day, a `glm-5.1`-preferring agent could end up on `glm-4.7` or worse — indistinguishable from "we chose the model registry's default" — even though a healthy `opencode-go/glm-5.1` route existed.
+- **Fix**: rewrite the preferred-list walk. For each preferred composite route, find the registry entry that *contains* that route, then try (a) the exact route if healthy, (b) any healthy visible route in the same entry as a same-family fallback. New reasoning tag `"Preferred model from agent metadata, healthy fallback provider"` distinguishes the fallback path from the exact-match path.
+- **Test**: strengthen `recommendTaskModelRoute_whenAgentModelsIncludeHealthyFallback_usesNextHealthyRoute` to assert `decision.reasoning` matches `/Preferred model from agent metadata/` — locks in that the resolution goes through the preferred-list fallback and prevents silent regression back to last-resort-order luck.
+- **Verification**: 123/123 tests pass (unchanged count, strengthened assertion), `tsc --noEmit` clean, dist rebuilt.
+- **Files**: `src/plugins/model-registry.ts`, `src/plugins/model-registry.test.ts`.
+
 ### M17: Agent frontmatter `models:` block-list silently dropped (per-agent preferences ignored fleet-wide) `✅ COMPLETED`
 
 Completion Notes (2026-04-11):
