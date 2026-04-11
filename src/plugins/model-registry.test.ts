@@ -5691,6 +5691,104 @@ test("summarizeVisibleRouteHealth_whenAllRoutesHealthy_returnsZeroUnhealthy", ()
   assert.equal(summary.unhealthy, 0);
 });
 
+// M119 pin A — isolated drift surface 1: `filterVisibleProviderRoutes`
+// gate. Entry has ONE visible route (openrouter `:free` route is the
+// only shape that survives the filter among three-provider openrouter
+// mixes) and TWO hidden routes (paid openrouter, togetherai — both
+// filtered out by the visibility filter). Empty health maps means
+// every route, if it reaches the walk, counts as healthy. Asserts
+// `healthy + unhealthy === 1` so a sabotage that drops the filter and
+// lets all three routes through (yielding {3, 0}) flips the sum. Pin B
+// (unhealthy === 1 with a provider-dead single-visible fixture) cannot
+// fire here because the only live route here is healthy; pin C
+// (healthy === 0 with a route-level penalty fixture) cannot fire here
+// because no route carries a route-level penalty.
+test("summarizeVisibleRouteHealth_whenEntryHasHiddenRoutes_excludesHiddenFromBothCounts", () => {
+  const entry = buildModelRegistryEntry(
+    "visibility-gate-model",
+    ["builder"],
+    "standard",
+    [
+      { provider: "openrouter", model: "openrouter/visibility-gate-model:free", priority: 1 },
+      { provider: "openrouter", model: "openrouter/visibility-gate-model", priority: 2 },
+      { provider: "togetherai", model: "togetherai/visibility-gate-model", priority: 3 },
+    ],
+  );
+
+  const summary = summarizeVisibleRouteHealth(entry, new Map(), new Map(), Date.now());
+
+  assert.equal(
+    summary.healthy + summary.unhealthy,
+    1,
+    "only the :free route is visible; hidden paid + togetherai routes must not contribute",
+  );
+});
+
+// M119 pin B — isolated drift surface 2: exclusive `if / else` counter
+// pair. Single visible route whose provider is quota-penalised, empty
+// route health map. Expected `{healthy: 0, unhealthy: 1}`. Asserts
+// `unhealthy === 1` specifically: a sabotage that drops the `else`
+// branch silently pins `unhealthy` at 0 for every entry, fails this
+// pin, but pin A is unaffected (pin A's entry had `healthy: 1 /
+// unhealthy: 0` already so the dropped `else` doesn't move it), and
+// pin C is unaffected (pin C asserts `healthy === 0` which remains
+// true regardless of the else branch). Pin B does not depend on
+// hidden-route filtering because the fixture has zero hidden routes.
+test("summarizeVisibleRouteHealth_whenSingleVisibleRouteIsProviderDead_incrementsUnhealthyViaElseBranch", () => {
+  const entry = buildModelRegistryEntry(
+    "provider-dead-model",
+    ["builder"],
+    "standard",
+    [
+      { provider: "ollama-cloud", model: "ollama-cloud/provider-dead-model", priority: 1 },
+    ],
+  );
+  const now = Date.now();
+  const providerHealth = new Map([
+    ["ollama-cloud", { state: "quota" as const, until: now + 60 * 60 * 1000, retryCount: 1 }],
+  ]);
+
+  const summary = summarizeVisibleRouteHealth(entry, providerHealth, new Map(), now);
+
+  assert.equal(summary.unhealthy, 1);
+});
+
+// M119 pin C — isolated drift surface 3: per-route composite
+// `isRouteCurrentlyHealthy` call. Single visible route, EMPTY
+// providerHealthMap, but the composite `provider/model` key carries a
+// live `model_not_found` route-level penalty. A correct implementation
+// routes the check through `isRouteCurrentlyHealthy` → composite-key
+// lookup → returns false → `{healthy: 0, unhealthy: 1}`. A sabotage
+// that "simplifies" to `isProviderHealthy(route.provider, ...)` drops
+// the composite-key half, treats the route as healthy (empty provider
+// map), and flips counts to `{1, 0}`. Asserts `healthy === 0` so the
+// sabotage fires this pin uniquely: pin A is unaffected (its fixture
+// has a healthy route and a visibility gate, not a route-level
+// penalty); pin B is unaffected (its fixture has a provider-level
+// penalty which `isProviderHealthy` catches regardless of the
+// composite-key half).
+test("summarizeVisibleRouteHealth_whenVisibleRouteHasRouteLevelPenalty_checkedViaCompositeKey", () => {
+  const entry = buildModelRegistryEntry(
+    "route-dead-model",
+    ["builder"],
+    "standard",
+    [
+      { provider: "iflowcn", model: "iflowcn/route-dead-model", priority: 1 },
+    ],
+  );
+  const now = Date.now();
+  const routeHealth = new Map([
+    [
+      "iflowcn/route-dead-model",
+      { state: "model_not_found" as const, until: now + 60 * 60 * 1000, retryCount: 1 },
+    ],
+  ]);
+
+  const summary = summarizeVisibleRouteHealth(entry, new Map(), routeHealth, now);
+
+  assert.equal(summary.healthy, 0);
+});
+
 test("selectBestModelForRoleAndTask_whenHealthyCountsTie_prefersCandidateWithFewerDeadSiblings", () => {
   // Regression: after M40 switched the ranking comparator from
   // `unhealthy ascending` to `healthy descending`, the tiebreaker signal

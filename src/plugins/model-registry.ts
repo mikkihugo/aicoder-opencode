@@ -3382,6 +3382,71 @@ export function isRouteCurrentlyHealthy(
  * candidates with a lucky primary route win over cleaner siblings.
  * Returning both numbers from one walk keeps the comparator branchless
  * and the helper pure / unit-testable.
+ *
+ * ## Drift surfaces (M119 PDD)
+ *
+ * The three load-bearing lines of the body — (1) the
+ * `filterVisibleProviderRoutes(entry.provider_order)` gate, (2) the
+ * exclusive `if / else` counter pair, (3) the per-route
+ * `isRouteCurrentlyHealthy(...)` call — each sit on top of one
+ * orthogonal production invariant, and all three are reachable from the
+ * `selectBestModelForRoleAndTask` comparator that ranks every role/task
+ * query in the plugin. The two pre-existing pins exercise mixed-state
+ * route fixtures and assert exact `{healthy, unhealthy}` totals, but
+ * their sabotage signatures are not orthogonal — a refactor that
+ * touches any of the three lines flips the same pair of counts, which
+ * means a failure message cannot tell an engineer WHICH invariant
+ * broke. These three drift surfaces partition the failure modes:
+ *
+ *  1. **`filterVisibleProviderRoutes` gating.** The walk MUST iterate
+ *     the FILTERED route set. Hidden routes (paid openrouter
+ *     non-`:free`, `cloudflare-ai-gateway`, `togetherai`, `cerebras`,
+ *     `xai`, `deepseek`, `github-copilot`, `minimax-cn*`, openrouter
+ *     `auto` / `bodybuilder/*` / `openrouter/free` meta models) are
+ *     filtered out at every OTHER visibility site in this plugin, so
+ *     letting them leak into the ranking comparator via this helper
+ *     would silently restore paid/deprecated routes to the routing
+ *     decision even though every renderer, health-report, and fallback
+ *     path treats them as non-existent. A refactor that drops
+ *     `filterVisibleProviderRoutes` and iterates `entry.provider_order`
+ *     directly inflates BOTH `healthy` and `unhealthy` with routes the
+ *     operator pinned as hidden — and because the comparator sorts by
+ *     `healthy` descending, an entry with two hidden paid routes would
+ *     suddenly out-rank an entry with zero hidden routes on a tie that
+ *     nothing in the agent-visible registry explains.
+ *
+ *  2. **Exclusive `if / else` counter pair.** Every visible route must
+ *     increment exactly ONE of the two counters — no drops, no
+ *     double-counts. A refactor that drops the `else` clause (e.g. a
+ *     "simplification" that keeps only `if (isRouteCurrentlyHealthy)
+ *     healthy++;`) silently pins every entry's `unhealthy` to zero,
+ *     which breaks the M40-regression tiebreaker (a `1 healthy / 0
+ *     dead` candidate should beat a `1 healthy / 1 dead` candidate —
+ *     but with `unhealthy` wedged at zero, both tie on both keys and
+ *     the dirty candidate wins on the billing-preference fallback). A
+ *     refactor that replaces `else` with a second independent `if
+ *     (!isRouteCurrentlyHealthy)` is equivalent in intent but at risk
+ *     of being further "simplified" to `if (isProviderHealthy === false)`
+ *     or similar, which collapses the counts asymmetrically.
+ *
+ *  3. **Per-route composite `isRouteCurrentlyHealthy` check.** The
+ *     per-route health predicate must consult BOTH halves of the
+ *     dual-map architecture: the provider-level `providerHealthMap`
+ *     via `isProviderHealthy` AND the composite-route
+ *     `modelRouteHealthMap` via `composeRouteKey(route)` lookup. A
+ *     refactor that "simplifies" to `isProviderHealthy(providerHealthMap,
+ *     route.provider, now)` drops the route-level half entirely, and
+ *     routes with an active `model_not_found` or `timeout` penalty but
+ *     a healthy provider are re-counted as healthy. The dead route
+ *     re-enters the fallback cascade on the very next turn, hits the
+ *     same composite-key penalty, and the loop continues until the 1h
+ *     route-level backoff expires — a silent regression of the M42
+ *     composite-key dual-map split.
+ *
+ * Each surface lives on one line of the seven-line body. The three
+ * surfaces are orthogonal: a sabotage on line 1 cannot fire pins
+ * designed for surfaces 2 or 3, and vice versa. The body is
+ * bitwise-unchanged — documentation and pins only.
  */
 export function summarizeVisibleRouteHealth(
   entry: ModelRegistryEntry,
