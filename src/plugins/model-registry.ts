@@ -575,6 +575,18 @@ export function computeProviderHealthUpdate(
 export const ROUTE_QUOTA_BACKOFF_DURATION_MS = 60 * 60 * 1000; // 1h
 export const PROVIDER_KEY_DEAD_DURATION_MS = 2 * 60 * 60 * 1000; // 2h
 export const PROVIDER_NO_CREDIT_DURATION_MS = 2 * 60 * 60 * 1000; // 2h
+// `model_not_found` is structurally longer-lived than `quota`: a quota
+// window refills on a clock, but a missing model means the upstream
+// provider does not expose this model id at all — retrying on the 1h
+// quota schedule produces guaranteed 404s every hour, polluting health
+// telemetry and wasting a request budget. 6h is long enough to skip an
+// entire interactive session without re-probing, short enough that a
+// newly-deployed model the next morning gets picked up on the first
+// attempt. Safe to bump independently of quota after M43 made
+// `buildRouteHealthEntry` preserve the longer-lived penalty on merge,
+// so interleaving a shorter quota penalty on the same route cannot
+// shrink an active model_not_found window.
+export const ROUTE_MODEL_NOT_FOUND_DURATION_MS = 6 * 60 * 60 * 1000; // 6h
 
 export function buildRouteHealthEntry(
   providerID: string,
@@ -615,6 +627,51 @@ export function buildRouteHealthEntry(
       retryCount: (existing?.retryCount ?? 0) + 1,
     },
   };
+}
+
+/**
+ * Build a route-level `model_not_found` penalty entry using the
+ * dedicated `ROUTE_MODEL_NOT_FOUND_DURATION_MS` (6h) rather than the
+ * shorter `ROUTE_QUOTA_BACKOFF_DURATION_MS` (1h).
+ *
+ * History: the `session.error` handler used to pass the quota backoff
+ * duration directly for the model-missing path. Semantically this is
+ * wrong — a quota window expires on a refill clock, but a missing model
+ * is a structural property of the upstream: the provider simply does
+ * not serve that model id. Retrying on the 1h quota cadence produces a
+ * guaranteed 404 every hour. A dedicated longer window skips the
+ * wasted retries across an interactive session while still being short
+ * enough to pick up a newly-deployed model the next morning.
+ *
+ * Thin wrapper around `buildRouteHealthEntry` — the M43 preserve-longer
+ * invariant still applies, so a previously-set longer penalty (e.g. if
+ * another process persisted an even-longer window, or a future writer
+ * introduces a longer duration) continues to dominate the merge.
+ *
+ * Args:
+ *   providerID: Provider identifier from the runtime session.
+ *   modelID: Model identifier from the runtime session.
+ *   existing: Current entry for the composite route key, if any.
+ *   now: Wall-clock timestamp in ms.
+ *
+ * Returns:
+ *   `{ routeKey, health }` — the caller writes `map.set(routeKey, health)`
+ *   and triggers persistence.
+ */
+export function buildModelNotFoundRouteHealth(
+  providerID: string,
+  modelID: string,
+  existing: ModelRouteHealth | undefined,
+  now: number,
+): { routeKey: string; health: ModelRouteHealth } {
+  return buildRouteHealthEntry(
+    providerID,
+    modelID,
+    "model_not_found",
+    ROUTE_MODEL_NOT_FOUND_DURATION_MS,
+    existing,
+    now,
+  );
 }
 
 // HTTP status codes that are authoritative signals for specific penalty
@@ -2134,20 +2191,22 @@ export const ModelRegistryPlugin: Plugin = async () => {
         if (!providerID) return;
         const modelID = model?.id;
 
-        // "Model not found" message → model_not_found backoff (1h).
-        // Gated on `shouldClassifyAsModelNotFound`: authoritative status
-        // codes 401/402/403/429 suppress the keyword match so a dead key
-        // or quota-throttled provider isn't misclassified as a per-route
+        // "Model not found" message → model_not_found backoff (6h,
+        // `ROUTE_MODEL_NOT_FOUND_DURATION_MS`). Structurally longer than
+        // the 1h quota backoff because a missing model is a property of
+        // the upstream, not a refill clock — retrying hourly produces
+        // guaranteed 404s and pollutes health telemetry. Gated on
+        // `shouldClassifyAsModelNotFound`: authoritative status codes
+        // 401/402/403/429 suppress the keyword match so a dead key or
+        // quota-throttled provider isn't misclassified as a per-route
         // missing-model problem. Accepted statuses: 0 (no status), 404
         // (direct providers), 500 (openrouter router synthesis).
         const isModelNotFound =
           modelID !== undefined && shouldClassifyAsModelNotFound(statusCode, message);
         if (isModelNotFound && modelID) {
-          const { routeKey, health } = buildRouteHealthEntry(
+          const { routeKey, health } = buildModelNotFoundRouteHealth(
             providerID,
             modelID,
-            "model_not_found",
-            QUOTA_BACKOFF_DURATION_MS,
             modelRouteHealthMap.get(
               composeRouteKey({ provider: providerID, model: modelID }),
             ),

@@ -9,7 +9,10 @@ import {
   buildAvailableModelsSystemPrompt,
   buildProviderHealthSystemPrompt,
   buildRouteHealthEntry,
+  buildModelNotFoundRouteHealth,
   classifyProviderApiError,
+  ROUTE_MODEL_NOT_FOUND_DURATION_MS,
+  ROUTE_QUOTA_BACKOFF_DURATION_MS,
   shouldClassifyAsModelNotFound,
   clearSessionHangState,
   countHealthyVisibleRoutes,
@@ -1917,6 +1920,85 @@ test("shouldClassifyAsModelNotFound_when404WithUnrelatedMessage_returnsFalse", (
     shouldClassifyAsModelNotFound(404, "not found"),
     false,
   );
+});
+
+test("ROUTE_MODEL_NOT_FOUND_DURATION_MS_isStrictlyLongerThan_ROUTE_QUOTA_BACKOFF_DURATION_MS", () => {
+  // Semantic pin: a missing-model penalty must outlast a quota penalty,
+  // because a quota refills on a clock whereas a missing model is a
+  // structural property of the upstream. If a refactor ever collapses
+  // both to the same duration the behavioral difference is lost and the
+  // session.error handler silently regresses to hourly 404 retries.
+  assert.equal(
+    ROUTE_MODEL_NOT_FOUND_DURATION_MS > ROUTE_QUOTA_BACKOFF_DURATION_MS,
+    true,
+  );
+});
+
+test("buildModelNotFoundRouteHealth_whenNoExistingEntry_returnsSixHourWindow", () => {
+  // Value pin: the builder uses the dedicated 6h duration, not the 1h
+  // quota fallback. If a future edit wires the wrong constant the
+  // `until` delta against `now` will not equal the constant and this
+  // test fires. The handler's call site is a thin pass-through to this
+  // helper, so pinning the helper transitively covers the handler.
+  const now = 1_700_000_000_000;
+  const { routeKey, health } = buildModelNotFoundRouteHealth(
+    "openrouter",
+    "openrouter/meituan/longcat-flash-chat",
+    undefined,
+    now,
+  );
+
+  assert.equal(routeKey, "openrouter/meituan/longcat-flash-chat");
+  assert.equal(health.state, "model_not_found");
+  assert.equal(health.until - now, ROUTE_MODEL_NOT_FOUND_DURATION_MS);
+  assert.equal(health.retryCount, 1);
+});
+
+test("buildModelNotFoundRouteHealth_whenUnprefixedRegistryShape_composesIdempotentKey", () => {
+  // longcat-shape regression (mirrors M30 / M47): the helper must
+  // tolerate both raw and already-composite runtime ids and land on
+  // the same canonical route key. Verifies the thin wrapper inherits
+  // `composeRouteKey`'s idempotent behavior from buildRouteHealthEntry.
+  const now = 1_700_000_000_000;
+  const rawIdResult = buildModelNotFoundRouteHealth(
+    "longcat",
+    "LongCat-Flash-Chat",
+    undefined,
+    now,
+  );
+  const compositeIdResult = buildModelNotFoundRouteHealth(
+    "longcat",
+    "longcat/LongCat-Flash-Chat",
+    undefined,
+    now,
+  );
+
+  assert.equal(rawIdResult.routeKey, "longcat/LongCat-Flash-Chat");
+  assert.equal(compositeIdResult.routeKey, "longcat/LongCat-Flash-Chat");
+});
+
+test("buildModelNotFoundRouteHealth_whenExistingPenaltyOutlivesNewWindow_preservesLongerPenalty", () => {
+  // M43 preserve-longer parity: a previously-persisted longer window
+  // (e.g. from another process, or a future writer with a longer
+  // duration) must survive the merge. Bumping the duration constant
+  // is only safe because this invariant holds — if the preserve-longer
+  // branch ever regresses, a shorter quota penalty on the same route
+  // would silently shrink an active model_not_found window.
+  const now = 1_700_000_000_000;
+  const existingUntil = now + ROUTE_MODEL_NOT_FOUND_DURATION_MS * 2;
+  const { health } = buildModelNotFoundRouteHealth(
+    "openrouter",
+    "openrouter/foo",
+    {
+      state: "model_not_found",
+      until: existingUntil,
+      retryCount: 3,
+    },
+    now,
+  );
+
+  assert.equal(health.until, existingUntil);
+  assert.equal(health.retryCount, 4);
 });
 
 test("countHealthyVisibleRoutes_whenNoPenaltiesActive_returnsAllVisibleRoutes", () => {
