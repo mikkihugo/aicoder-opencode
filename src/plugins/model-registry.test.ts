@@ -54,6 +54,7 @@ import {
   filterProviderModelsByRouteHealth,
   findCuratedFallbackRoute,
   classifyPersistedHealthKey,
+  extractSessionErrorExplicitModel,
   findRegistryEntryByModel,
   loadRegistryAndLookupEntryForInputModel,
   inferTaskComplexity,
@@ -734,6 +735,46 @@ test("serializeHealthEntryForPersistence_whenCalled_preservesStateAndRetryCount"
 
   assert.equal(serialized.state, "no_credit");
   assert.equal(serialized.retryCount, 7);
+});
+
+test("extractSessionErrorExplicitModel_whenShapeIsValid_returnsNarrowedTuple", () => {
+  // M84 pin: a well-formed `{model: {id, providerID}}` payload must
+  // return the narrowed `{id, providerID}` tuple verbatim. A sabotage
+  // that hardcodes `return undefined` fires this pin alone — pins 2
+  // and 3 already expect `undefined` for their malformed inputs.
+  const result = extractSessionErrorExplicitModel({
+    sessionID: "sess-1",
+    error: { name: "APIError" },
+    model: { id: "claude-3.5-sonnet", providerID: "openrouter" },
+  });
+
+  assert.deepEqual(result, { id: "claude-3.5-sonnet", providerID: "openrouter" });
+});
+
+test("extractSessionErrorExplicitModel_whenModelIsMissingId_returnsUndefined", () => {
+  // M84 pin: a candidate model with `providerID` but no `id` must be
+  // rejected. A sabotage that drops the `typeof candidateObj.id !==
+  // "string"` check fires this pin alone — pin 1's input has both
+  // fields, and pin 3's input lacks `providerID` so a missing-id
+  // sabotage still returns `undefined` via the providerID check.
+  const result = extractSessionErrorExplicitModel({
+    model: { providerID: "openrouter" },
+  });
+
+  assert.equal(result, undefined);
+});
+
+test("extractSessionErrorExplicitModel_whenModelIsMissingProviderID_returnsUndefined", () => {
+  // M84 pin: a candidate model with `id` but no `providerID` must be
+  // rejected. A sabotage that drops the `typeof candidateObj.providerID
+  // !== "string"` check fires this pin alone — pin 1's input has
+  // both fields, and pin 2's input lacks `id` so a missing-providerID
+  // sabotage still returns `undefined` via the id check.
+  const result = extractSessionErrorExplicitModel({
+    model: { id: "claude-3.5-sonnet" },
+  });
+
+  assert.equal(result, undefined);
 });
 
 test("classifyPersistedHealthKey_whenKeyHasNoSlash_returnsProvider", () => {

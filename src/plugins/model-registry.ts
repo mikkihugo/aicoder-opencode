@@ -1496,6 +1496,94 @@ export function parseHangTimeoutMs(rawValue: string | undefined): number {
   return Math.trunc(parsedValue);
 }
 
+/**
+ * Runtime-validate and extract an explicit `{ id, providerID }` model
+ * tuple from a `session.error` event payload.
+ *
+ * Motivation — the `session.error` handler previously read the explicit
+ * model off the event with an `as any` type assertion:
+ *
+ *     const model = (sessionError as any).model ?? mappedModel;
+ *
+ * Two silent drift surfaces:
+ *
+ *   1. The cast swallows every TypeScript error about the shape of
+ *      `sessionError.model`. If a future opencode release moves the
+ *      field (to `sessionError.data.model`, `sessionError.context.model`,
+ *      `sessionError.routeInfo.model`), the expression silently
+ *      evaluates to `undefined` and the `?? mappedModel` fallback
+ *      covers for it — the session-mapped model is always populated
+ *      from the chat.params binding path, so the classification branch
+ *      keeps running against the STALE session-mapped model instead of
+ *      the potentially-divergent error-specific model the event was
+ *      meant to carry. No exception, no warning, no telemetry. The
+ *      explicit-vs-mapped distinction exists specifically for cases
+ *      where the two diverge (e.g. fallback routing where the failing
+ *      model is not the one the session was originally bound to), so
+ *      silently collapsing into the fallback corrupts classification
+ *      exactly in the scenarios the field was added to handle.
+ *
+ *   2. No runtime validation on the extracted value. A malformed
+ *      `sessionError.model = "bare-string"` or `sessionError.model = {}`
+ *      would previously pass through as-is and crash (or silently
+ *      no-op) at the downstream `.id` access a few lines later. The
+ *      `modelID = model?.id` guard catches the crash case but not the
+ *      semantic case — a `{model: {id: "x"}}` without `providerID`
+ *      hands the wrong-shape tuple to `recordModelNotFoundRouteHealthByIdentifiers`
+ *      (which takes `providerID, modelID` as positional strings, not
+ *      a tuple, so the tuple-shape bug actually can't reach that
+ *      helper today — but the guard is structural, not dependent on
+ *      the current call-site wiring).
+ *
+ * This helper replaces the `as any` cast with explicit
+ * field-by-field narrowing, returning `undefined` unless the event
+ * carries a structurally valid `{ id: string, providerID: string }`
+ * under the `.model` key. The caller retains the `?? mappedModel`
+ * fallback externally so the explicit-preference policy stays
+ * visible at the call site.
+ *
+ * ## Drift shape this closes
+ *
+ * Per-narrowing-step drift: the three runtime checks (object shape,
+ * `id` type, `providerID` type) form a defensive ladder where
+ * dropping any one step silently widens the accepted input. The test
+ * split pins each step independently so a sabotage that drops a
+ * single check fires exactly one pin — the same per-narrowing-step
+ * partition that M81 and M82 used at different layers of the plugin.
+ *
+ * Args:
+ *   sessionError: The `event.properties` payload for a `session.error`
+ *     event — type `unknown` because the opencode host does not
+ *     currently export a stable TypeScript shape for the `model`
+ *     field, and the whole point of this helper is to narrow it
+ *     defensively rather than trust an `as any` cast.
+ *
+ * Returns:
+ *   The structurally valid `{ id, providerID }` tuple from the event,
+ *   or `undefined` when the field is missing or malformed. Callers
+ *   should supply their own fallback (e.g. `?? mappedModel`) at the
+ *   call site so the policy is visible.
+ */
+export function extractSessionErrorExplicitModel(
+  sessionError: unknown,
+): { id: string; providerID: string } | undefined {
+  if (sessionError === null || typeof sessionError !== "object") {
+    return undefined;
+  }
+  const candidate = (sessionError as Record<string, unknown>).model;
+  if (candidate === null || typeof candidate !== "object") {
+    return undefined;
+  }
+  const candidateObj = candidate as Record<string, unknown>;
+  if (typeof candidateObj.id !== "string") {
+    return undefined;
+  }
+  if (typeof candidateObj.providerID !== "string") {
+    return undefined;
+  }
+  return { id: candidateObj.id, providerID: candidateObj.providerID };
+}
+
 export function buildRouteHealthEntry(
   providerID: string,
   modelID: string,
@@ -4227,7 +4315,14 @@ export const ModelRegistryPlugin: Plugin = async () => {
           sessionActiveProviderMap,
           sessionActiveModelMap,
         );
-        const model = (sessionError as any).model ?? mappedModel;
+        // M84: `extractSessionErrorExplicitModel` replaces the former
+        // `(sessionError as any).model` cast with explicit runtime
+        // narrowing. The `?? mappedModel` fallback stays visible at the
+        // call site — that policy is intentional and the helper is
+        // deliberately minimal so the explicit-vs-mapped decision lives
+        // here, not inside shared code. See the helper docstring for
+        // the drift shape it closes.
+        const model = extractSessionErrorExplicitModel(sessionError) ?? mappedModel;
         if (!providerID) return;
         const modelID = model?.id;
 
