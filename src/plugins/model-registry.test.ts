@@ -6,6 +6,7 @@ import test from "node:test";
 
 import type { ModelRegistryEntry } from "../model-registry.js";
 import {
+  buildAvailableModelsSystemPrompt,
   buildProviderHealthSystemPrompt,
   clearSessionHangState,
   expireHealthMaps,
@@ -691,5 +692,102 @@ test("buildProviderHealthSystemPrompt_whenOnlyRoutePenaltiesExist_emitsRouteSect
 
 test("buildProviderHealthSystemPrompt_whenNoPenalties_returnsNull", () => {
   const prompt = buildProviderHealthSystemPrompt([], new Map(), new Map(), Date.now());
+  assert.equal(prompt, null);
+});
+
+test("buildAvailableModelsSystemPrompt_whenPrimaryRouteIsHiddenPaid_walksToVisibleSibling", () => {
+  // Regression: this function used to take `entry.provider_order[0]`
+  // as "the primary route" and only check provider-level health. If
+  // the first route was a hidden paid provider (the real mimo-v2-pro
+  // case in config/models.jsonc: the first openrouter route is the
+  // paid xiaomi/mimo-v2-pro), the entry was either listed under a
+  // route the rest of the plugin actively blocks, or skipped entirely
+  // depending on whether the hidden provider happened to be marked
+  // unhealthy. Same bug class as M23/M24 at the agent-visible prompt
+  // layer. Fix walks filterVisibleProviderRoutes and checks both
+  // provider AND route health.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = {
+    id: "mimo-v2-pro",
+    enabled: true,
+    description: "mimo-v2-pro",
+    capability_tier: "frontier",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: [],
+    not_for: [],
+    default_roles: ["long_context_reader"],
+    provider_order: [
+      // Hidden paid route — must NOT be the route we use to judge availability.
+      { provider: "togetherai", model: "togetherai/mimo-v2-pro", priority: 1 },
+      // Visible + healthy sibling.
+      { provider: "opencode-go", model: "opencode-go/mimo-v2-pro", priority: 2 },
+    ],
+    notes: [],
+  };
+  // Seed a route-only penalty on an UNRELATED entry so the outer
+  // "any health map nonempty" guard is triggered without any
+  // provider-level penalty or any penalty on this entry.
+  const modelRouteHealthMap = new Map([
+    [
+      "iflowcn/qwen3-coder-plus",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  const prompt = buildAvailableModelsSystemPrompt(
+    [entry],
+    new Map(),
+    modelRouteHealthMap,
+    now,
+  );
+
+  assert.notEqual(prompt, null);
+  assert.match(prompt as string, /long_context_reader: mimo-v2-pro \(free\)/);
+});
+
+test("buildAvailableModelsSystemPrompt_whenOnlyVisibleRouteIsUnhealthyAtRouteLevel_skipsEntry", () => {
+  // Regression: previously only provider-level health was considered,
+  // so an entry whose only visible route had `model_not_found` or
+  // route-level quota was still listed as "available" despite being
+  // provably dead. Fix consults modelRouteHealthMap.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = {
+    id: "dead-model",
+    enabled: true,
+    description: "dead-model",
+    capability_tier: "strong",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: [],
+    not_for: [],
+    default_roles: ["implementation_worker"],
+    provider_order: [
+      { provider: "iflowcn", model: "iflowcn/dead-model", priority: 1 },
+    ],
+    notes: [],
+  };
+  const modelRouteHealthMap = new Map([
+    [
+      "iflowcn/dead-model",
+      { state: "model_not_found" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  const prompt = buildAvailableModelsSystemPrompt(
+    [entry],
+    new Map(),
+    modelRouteHealthMap,
+    now,
+  );
+
+  // The whole prompt collapses to null because no entries survive
+  // the route-health filter and the roleToModels map is empty.
   assert.equal(prompt, null);
 });

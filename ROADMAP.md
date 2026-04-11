@@ -172,6 +172,19 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M28: `buildAvailableModelsSystemPrompt` used raw `provider_order[0]` and ignored route health — listed dead models as "available" `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `buildAvailableModelsSystemPrompt` decided whether to surface each registry entry under the "Available models" section of the penalty-mode system prompt by reading `entry.provider_order[0]` (raw first route) and only checking `isProviderHealthy(primaryRoute.provider)`. Two independent defects, both reachable:
+  1. Raw `provider_order[0]` leaked hidden paid routes (togetherai, xai, cerebras, cloudflare-ai-gateway, non-`:free` openrouter, deepseek, github-copilot, minimax-cn*) into the decision. For entries whose first route is such a hidden provider, the function was asking "is the hidden paid provider healthy?" — often yes, leading to the entry being listed under a route the rest of the plugin actively blocks. Same bug class as M23/M24 at yet another call site.
+  2. Route-level health was ignored entirely. An entry whose primary had `model_not_found` / route-level quota / hang-timer `timeout` but a healthy overall provider was listed as "available" despite being provably dead.
+- **Secondary bug**: the function guarded with `if (providerHealthMap.size === 0) return null;` — same M27 short-circuit. Route-only penalties produced no "Available models" block even when the rest of the transform (post-M27) emitted the route-level warning. Inconsistent with the sibling `buildProviderHealthSystemPrompt` after M27.
+- **Fix**: walk `filterVisibleProviderRoutes(entry.provider_order)` and select the first route that is both provider-healthy AND route-healthy (`modelRouteHealthMap.get(route.model)?.until <= now`). Skip the entry if no such route exists. Expand the outer guard to `providerHealthMap.size === 0 && modelRouteHealthMap.size === 0`. Thread `modelRouteHealthMap` through from the transform hook call site. Export for direct unit testing.
+- **Semantic choice**: an entry with a hidden paid primary and a visible+healthy sibling is now listed as "available". Previously it was skipped or mis-listed. This matches the intent — the plugin will route the actual request through the visible sibling via M23's `best` branch.
+- **Tests**: (a) `buildAvailableModelsSystemPrompt_whenPrimaryRouteIsHiddenPaid_walksToVisibleSibling` — seeds `[togetherai hidden, opencode-go visible]`, triggers the outer guard with an unrelated route-only penalty, asserts the entry appears in the prompt under its role. (b) `buildAvailableModelsSystemPrompt_whenOnlyVisibleRouteIsUnhealthyAtRouteLevel_skipsEntry` — pins the route-health filter by marking the single visible route as `model_not_found` and asserting the entire prompt collapses to null because no entries survive.
+- **Verification**: 137/137 tests pass (135 + 2 new), `tsc -p tsconfig.json` clean.
+- **Files**: `src/plugins/model-registry.ts`, `src/plugins/model-registry.test.ts`.
+
 ### M27: system prompt silently ignored route-level penalties — short-circuit on `providerHealthMap.size === 0` skipped the whole health block `✅ COMPLETED`
 
 Completion Notes (2026-04-11):

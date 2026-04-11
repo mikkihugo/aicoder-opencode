@@ -476,24 +476,42 @@ export function buildProviderHealthSystemPrompt(
  * Build a role+task filtered view of currently healthy models for the system prompt.
  * Only injected when at least one provider has a health penalty.
  */
-function buildAvailableModelsSystemPrompt(
+export function buildAvailableModelsSystemPrompt(
   modelRegistryEntries: ModelRegistryEntry[],
   providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
   now: number,
 ): string | null {
-  if (providerHealthMap.size === 0) {
+  // Fire whenever EITHER map has entries. Route-only penalties (from
+  // M27) need the fallback "what else is available" view just as much
+  // as provider-level ones.
+  if (providerHealthMap.size === 0 && modelRouteHealthMap.size === 0) {
     return null;
   }
 
-  // Group enabled models by their first default_role, filtering to healthy primary provider.
+  // Group enabled models by their first default_role, filtering to an
+  // entry whose first VISIBLE route is both provider-healthy AND
+  // route-healthy. Previously this walked raw `provider_order[0]` and
+  // only checked provider health — same bug class as M23/M24 at a
+  // different call site. An entry whose primary is a hidden/paid route
+  // (e.g. openrouter/xiaomi/mimo-v2-pro, togetherai/*) was either
+  // listed based on a route the rest of the plugin blocks, or skipped
+  // entirely depending on the hidden route's provider health. An entry
+  // whose primary had `model_not_found` but a healthy provider was
+  // listed as available despite being dead.
   const roleToModels = new Map<string, string[]>();
 
   for (const entry of modelRegistryEntries) {
     if (!entry.enabled) continue;
 
-    const primaryRoute = entry.provider_order[0];
-    if (!primaryRoute) continue;
-    if (!isProviderHealthy(providerHealthMap, primaryRoute.provider, now)) continue;
+    const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
+    const firstHealthyVisibleRoute = visibleRoutes.find((route) => {
+      if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
+      const routeHealth = modelRouteHealthMap.get(route.model);
+      if (routeHealth && routeHealth.until > now) return false;
+      return true;
+    });
+    if (!firstHealthyVisibleRoute) continue;
 
     for (const role of entry.default_roles) {
       const existing = roleToModels.get(role) ?? [];
@@ -1491,6 +1509,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
         const availableModelsPrompt = buildAvailableModelsSystemPrompt(
           modelRegistry.models,
           providerHealthMap,
+          modelRouteHealthMap,
           now,
         );
         if (availableModelsPrompt) {
