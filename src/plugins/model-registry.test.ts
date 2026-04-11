@@ -33,6 +33,7 @@ import {
   countHealthyVisibleRoutes,
   composeRouteKey,
   lookupRouteHealthByIdentifiers,
+  recordRouteHealthPenalty,
   computeProviderHealthUpdate,
   computeRegistryEntryHealthReport,
   expireHealthMaps,
@@ -1382,6 +1383,96 @@ test("composeRouteKey_whenRegistryEntryIsUnprefixed_producesCompositeKey", () =>
     composeRouteKey({ provider: "openrouter", model: "openrouter/xiaomi/mimo-v2-pro" }),
     "openrouter/xiaomi/mimo-v2-pro",
   );
+});
+
+test("recordRouteHealthPenalty_whenCalled_writesHealthToRouteMap", () => {
+  // M68: map-set invariant — the helper must write the new health entry
+  // under the exact routeKey passed in, overwriting any prior entry.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  const health: ModelRouteHealth = {
+    state: "model_not_found",
+    until: 42_000_000,
+    retryCount: 3,
+  };
+
+  recordRouteHealthPenalty(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "iflowcn/dead-model",
+    health,
+    () => {},
+  );
+
+  assert.deepEqual(modelRouteHealthMap.get("iflowcn/dead-model"), health);
+});
+
+test("recordRouteHealthPenalty_whenCalled_invokesPersistFnWithBothMaps", () => {
+  // M68: persistence-pairing invariant — the helper MUST invoke persistFn
+  // with both the provider map AND the route map after writing the entry.
+  // Any writer that does `map.set` without the persist call silently drops
+  // the penalty on plugin reload. A spy proves the pair is enforced here
+  // so future writers cannot forget it by inlining only half the pattern.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>([
+    ["iflowcn", { state: "key_missing", until: Number.POSITIVE_INFINITY, retryCount: 0 }],
+  ]);
+  let persistCalls = 0;
+  let observedProviderMap: Map<string, ProviderHealth> | null = null;
+  let observedRouteMap: Map<string, ModelRouteHealth> | null = null;
+
+  recordRouteHealthPenalty(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "iflowcn/kimi-k2-0905",
+    { state: "quota", until: 1_000, retryCount: 1 },
+    (providerMap, routeMap) => {
+      persistCalls += 1;
+      observedProviderMap = providerMap;
+      observedRouteMap = routeMap;
+    },
+  );
+
+  assert.equal(persistCalls, 1);
+  // Reference equality: the helper must pass the LIVE maps so the
+  // persister serializes the post-write state, not a stale snapshot.
+  assert.equal(observedProviderMap, providerHealthMap);
+  assert.equal(observedRouteMap, modelRouteHealthMap);
+});
+
+test("recordRouteHealthPenalty_whenMapHasExistingEntry_overwritesItBeforePersistFires", () => {
+  // M68: write-ordering invariant — the map.set MUST happen BEFORE the
+  // persistFn invocation, otherwise the persister serializes the pre-write
+  // state and the new penalty is dropped on the next reload. A spy that
+  // reads the live map at call time proves the order.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    [
+      "ollama-cloud/glm-5",
+      { state: "quota", until: 500, retryCount: 1 },
+    ],
+  ]);
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  const newHealth: ModelRouteHealth = {
+    state: "model_not_found",
+    until: 9_000_000,
+    retryCount: 2,
+  };
+  let snapshotAtPersist: ModelRouteHealth | undefined;
+
+  recordRouteHealthPenalty(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "ollama-cloud/glm-5",
+    newHealth,
+    (_providerMap, routeMap) => {
+      snapshotAtPersist = routeMap.get("ollama-cloud/glm-5");
+    },
+  );
+
+  // By the time the persister fires, the overwrite is already visible.
+  assert.deepEqual(snapshotAtPersist, newHealth);
+  // And the post-call state matches.
+  assert.deepEqual(modelRouteHealthMap.get("ollama-cloud/glm-5"), newHealth);
 });
 
 test("lookupRouteHealthByIdentifiers_whenEntryStoredUnderCompositeKey_returnsEntry", () => {

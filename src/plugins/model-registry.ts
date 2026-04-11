@@ -536,6 +536,89 @@ export function lookupRouteHealthByIdentifiers(
 }
 
 /**
+ * Type of the persistence side-effect function injected into
+ * `recordRouteHealthPenalty`. Matches the signature of the factory-local
+ * `persistProviderHealth` helper.
+ */
+export type PersistProviderHealthFn = (
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+) => Promise<void> | void;
+
+/**
+ * Write a route-level health penalty AND schedule disk persistence as
+ * an atomic pair.
+ *
+ * Exists because four event-hook writers in the plugin factory —
+ * `session.error` model-not-found, `session.error` assistant zero-token
+ * quota, `chat.params` early-fire test timeout, and the `chat.params`
+ * setTimeout hang-detector — each inlined the same two-line sequence:
+ *
+ *   modelRouteHealthMap.set(routeKey, health);
+ *   void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
+ *
+ * The pair is a durability invariant, not a convenience: the map-set
+ * alone keeps the penalty in memory for the current plugin instance,
+ * but drops it on plugin reload, plugin crash, or cross-process handoff
+ * (dr-repo and letta-workspace shims share the same on-disk state file
+ * via opencode's plugin mechanism). Any writer that forgets the persist
+ * call silently produces penalties that work locally for a few minutes
+ * and then vanish on the next bounce — exactly the class of bug that's
+ * impossible to reproduce from a unit test and surfaces only as
+ * intermittent "why is this known-dead route being tried again?"
+ * telemetry noise.
+ *
+ * Pre-M68 the pairing was enforced by convention: each of the four
+ * call sites carried both lines because the author of the original
+ * session.error handler wrote them together, and subsequent writers
+ * copy-pasted the pattern. But there was no named boundary enforcing
+ * the pair — a fifth writer (a new health state, a new event hook, a
+ * test harness, a shim-level override) has nothing forcing it through
+ * the pair. This helper names the boundary, takes `persistFn` as an
+ * injected dependency (so tests can pass a spy instead of touching
+ * the real atomic-write path), and becomes the one place future
+ * writers have to route through.
+ *
+ * Args:
+ *   modelRouteHealthMap: Runtime composite-route-keyed health map.
+ *     Written in place.
+ *   providerHealthMap: Provider-keyed health map. Passed to `persistFn`
+ *     so provider-level entries (including `key_missing` sentinels)
+ *     are co-persisted with the new route penalty.
+ *   routeKey: Composite route key — must be produced by `composeRouteKey`
+ *     so longcat's unprefixed registry entries land under the canonical
+ *     `"longcat/LongCat-Flash-Chat"` form (M30 drift shape).
+ *   health: The new `ModelRouteHealth` entry to write. Usually the
+ *     `health` field of a `{routeKey, health}` tuple returned by
+ *     `buildRouteHealthEntry` / `buildModelNotFoundRouteHealth` (which
+ *     already honors the M43 preserve-longer merge against the existing
+ *     entry looked up via `lookupRouteHealthByIdentifiers`).
+ *   persistFn: The persistence side-effect function. In production this
+ *     is the factory-local `persistProviderHealth` (atomic tmp-file
+ *     rename to survive concurrent-writer corruption across dr-repo,
+ *     letta-workspace, and aicoder-opencode services sharing the state
+ *     file). In tests it can be a spy to verify the pairing.
+ *
+ * Returns:
+ *   `void`. The helper is fire-and-forget: it writes the map synchronously,
+ *   invokes `persistFn` without awaiting, and returns. Persistence errors
+ *   are swallowed inside `persistProviderHealth` itself (see its docstring
+ *   — best-effort cleanup of tmp files on failure, intentional because a
+ *   failed persist must not escalate into a runtime exception that crashes
+ *   the event hook).
+ */
+export function recordRouteHealthPenalty(
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  providerHealthMap: Map<string, ProviderHealth>,
+  routeKey: string,
+  health: ModelRouteHealth,
+  persistFn: PersistProviderHealthFn,
+): void {
+  modelRouteHealthMap.set(routeKey, health);
+  void persistFn(providerHealthMap, modelRouteHealthMap);
+}
+
+/**
  * Return `true` when a provider+model pair must be excluded from fallback
  * routing. Exported so the regex semantics can be unit-tested directly
  * without constructing the plugin closure.
@@ -3268,8 +3351,13 @@ export const ModelRegistryPlugin: Plugin = async () => {
             lookupRouteHealthByIdentifiers(modelRouteHealthMap, providerID, modelID),
             Date.now(),
           );
-          modelRouteHealthMap.set(routeKey, health);
-          void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
+          recordRouteHealthPenalty(
+            modelRouteHealthMap,
+            providerHealthMap,
+            routeKey,
+            health,
+            persistProviderHealth,
+          );
           return;
         }
 
@@ -3337,8 +3425,13 @@ export const ModelRegistryPlugin: Plugin = async () => {
             lookupRouteHealthByIdentifiers(modelRouteHealthMap, providerID, model.id),
             Date.now(),
           );
-          modelRouteHealthMap.set(routeKey, health);
-          void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
+          recordRouteHealthPenalty(
+            modelRouteHealthMap,
+            providerHealthMap,
+            routeKey,
+            health,
+            persistProviderHealth,
+          );
         }
         return;
       }
@@ -3382,8 +3475,13 @@ export const ModelRegistryPlugin: Plugin = async () => {
               lookupRouteHealthByIdentifiers(modelRouteHealthMap, providerID, model.id),
               Date.now(),
             );
-            modelRouteHealthMap.set(routeKey, health);
-            void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
+            recordRouteHealthPenalty(
+              modelRouteHealthMap,
+              providerHealthMap,
+              routeKey,
+              health,
+              persistProviderHealth,
+            );
           }
         } else {
           // Capture only primitive `sessionID` plus the outer Map refs so
@@ -3413,8 +3511,13 @@ export const ModelRegistryPlugin: Plugin = async () => {
               Date.now(),
             );
             if (!result) return;
-            modelRouteHealthMap.set(result.routeKey, result.health);
-            void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
+            recordRouteHealthPenalty(
+              modelRouteHealthMap,
+              providerHealthMap,
+              result.routeKey,
+              result.health,
+              persistProviderHealth,
+            );
           }, timeoutMs + 100); // Check slightly after the timeout threshold
           // Do not keep the Node event loop alive waiting on a hang timer —
           // the timer is best-effort health telemetry, not critical work.
