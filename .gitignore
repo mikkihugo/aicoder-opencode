@@ -8,3 +8,11 @@ node_modules/
 targets/dr-repo/overlay/.opencode/xdg-/
 targets/dr-repo/overlay/.opencode/state/autopilot/run.lock
 targets/dr-repo/overlay/.opencode/state/autopilot/status.json
+
+# External repos cloned locally (not our code)
+.specify/
+spec-kit/
+Product-Manager-Skills/
+
+# WIP apps
+apps/
