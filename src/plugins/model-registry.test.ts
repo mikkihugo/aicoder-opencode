@@ -2082,6 +2082,75 @@ test("hasAgentVisiblePenalty_whenKeyMissingAndLiveQuotaMixed_returnsTrue", () =>
   assert.equal(hasAgentVisiblePenalty(providerHealthMap, new Map(), now), true);
 });
 
+// M124 asymmetric pin A — provider map scan loop. Fixture: exactly one
+// live quota entry in the provider map, route map empty. Normal: the
+// provider loop finds the entry, gate passes (quota is agent-visible
+// AND until > now), returns true. S1 sabotage (drop provider
+// for-loop block) skips to the empty route loop and returns false.
+// Pin A fires ALONE on S1 — S2 drop (route loop gone) still lets the
+// provider loop detect the entry; S3 drop (gate → raw liveness) still
+// returns true because quota is also `until > now`, so the raw
+// liveness check still passes.
+test("hasAgentVisiblePenalty_whenProviderMapHasOnlyLiveQuotaEntry_returnsTrueViaProviderLoop", () => {
+  const now = Date.now();
+  const providerHealthMap = new Map<string, ProviderHealth>([
+    ["iflowcn", { state: "quota", until: now + 60_000, retryCount: 1 }],
+  ]);
+
+  assert.equal(
+    hasAgentVisiblePenalty(providerHealthMap, new Map(), now),
+    true,
+  );
+});
+
+// M124 asymmetric pin B — route map scan loop. Fixture: exactly one
+// live no_credit entry in the route map, provider map empty. Normal:
+// the provider loop sees nothing, the route loop finds the entry,
+// gate passes, returns true. S2 sabotage (drop route for-loop block)
+// leaves the empty provider loop as the only path and returns false.
+// Pin B fires ALONE on S2 — S1 drop (provider loop gone) is a no-op
+// because the provider map is empty either way; S3 drop (gate → raw
+// liveness) still returns true because no_credit is also live.
+test("hasAgentVisiblePenalty_whenRouteMapHasOnlyLiveNoCreditEntry_returnsTrueViaRouteLoop", () => {
+  const now = Date.now();
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    [
+      "iflowcn/m-pin-b",
+      { state: "no_credit", until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  assert.equal(
+    hasAgentVisiblePenalty(new Map(), modelRouteHealthMap, now),
+    true,
+  );
+});
+
+// M124 asymmetric pin C — `isAgentVisibleLivePenalty` key_missing
+// filter. Fixture: exactly one key_missing entry (until: Infinity)
+// in the provider map, route map empty. Normal: provider loop checks
+// gate, `isAgentVisibleHealthState("key_missing")` is false, continues;
+// route loop empty; returns false. S3 sabotage (replace the gate with
+// raw `health.until > now`) returns true because Infinity > now. Pin
+// C fires ALONE on S3 — S1 drop (provider loop gone) still returns
+// false via the empty route loop; S2 drop (route loop gone) still
+// returns false because the provider loop's gate suppresses the
+// key_missing entry.
+test("hasAgentVisiblePenalty_whenProviderMapHasOnlyKeyMissingEntry_returnsFalseViaGate", () => {
+  const now = Date.now();
+  const providerHealthMap = new Map<string, ProviderHealth>([
+    [
+      "iflowcn",
+      { state: "key_missing", until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+  ]);
+
+  assert.equal(
+    hasAgentVisiblePenalty(providerHealthMap, new Map(), now),
+    false,
+  );
+});
+
 test("formatPenaltySectionPrefix_whenCalled_containsProviderQuotaStatusHeader", () => {
   // Pin 1 (header constant): asserts the result contains the exact
   // `## Provider health status` banner. A sabotage that drops the

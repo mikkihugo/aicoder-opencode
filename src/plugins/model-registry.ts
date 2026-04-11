@@ -4688,6 +4688,88 @@ export function isAgentVisibleHealthState(state: ProviderHealthState): boolean {
  *   `key_missing` entries return `false`. Maps that contain only expired
  *   entries return `false`. Any single live transient penalty anywhere
  *   returns `true`.
+ *
+ * ## Drift surfaces (M124 PDD)
+ *
+ * Seven body lines compress three orthogonal load-bearing invariants
+ * that gate every agent-visible system-prompt injection and tool-output
+ * penalty report downstream. Six pre-existing pins give each invariant
+ * individual coverage, but several of them fire on MULTIPLE sabotages
+ * at once — the mixed-penalty pin and the all-transient-expired pin
+ * both bundle liveness, agent-visibility, and map-iteration into a
+ * single fixture — so a single-line refactor that drops one invariant
+ * can surface as multiple correlated pin failures whose messages do
+ * not localize the drift to one surface. The M124 triple lays down
+ * three deliberately narrow pins that each fire ALONE under one
+ * surface's sabotage, so a drift's failure signature points at exactly
+ * one surface without the existing pins' bundled coverage muddying the
+ * diagnosis.
+ *
+ *   1. **Provider map scan loop.** The first `for (const health of
+ *      providerHealthMap.values())` block is the only path that can
+ *      detect a provider-level agent-visible live penalty. A refactor
+ *      that drops this block entirely — e.g. a "simplification" pass
+ *      that convinces itself the route map suffices because
+ *      `recordRouteHealthByIdentifiers` always writes both — silently
+ *      misses every provider-only penalty. That matters because
+ *      `computeProviderHealthUpdate` writes provider-level penalties
+ *      for quota/key_dead/no_credit without touching the route map
+ *      when the offending call did not carry a model tuple (e.g.
+ *      pre-flight credential checks, cold-start health restore, or
+ *      provider-wide 402 responses). Those penalties would never
+ *      surface to the agent, and every system-prompt builder
+ *      consulting this helper would short-circuit to "nothing to
+ *      report" even though a whole provider was backed off. The
+ *      failure is silent: `buildProviderHealthSystemPrompt` returns
+ *      null, the transform hook skips the section, the agent keeps
+ *      routing to the dead provider, and retries cycle until the
+ *      entry finally lands in the route map via a second failure.
+ *
+ *   2. **Route map scan loop.** The second `for (const health of
+ *      modelRouteHealthMap.values())` block mirrors the provider
+ *      loop on a different map with an identical failure mode. Same
+ *      copy-paste drift hazard: a refactor that edits the provider
+ *      loop (adds a filter clause, narrows the predicate, renames a
+ *      local) and forgets the route loop leaves the two branches
+ *      out of sync on opposite filter policies. Pre-existing pin
+ *      `whenOnlyRouteLevelPenaltyLive_returnsTrue` covers the
+ *      all-else-empty case but bundles it with a route-fixture that
+ *      also exercises the gate on the same call. The M124 pin B
+ *      uses the narrowest possible fixture so pin B's failure
+ *      signature disambiguates "route loop gone" from "gate too
+ *      strict on routes."
+ *
+ *   3. **`isAgentVisibleLivePenalty` key_missing filter.** Both
+ *      loops pass every live entry through `isAgentVisibleLivePenalty`
+ *      which composes `health.until > now` with
+ *      `isAgentVisibleHealthState(health.state)`. The second clause
+ *      is the post-M58 key_missing suppressor: without it, every
+ *      uncredentialed curated provider installed at boot with
+ *      `until: Infinity` matches `until > now` and the helper
+ *      reports "agent-visible penalty present" on every turn of a
+ *      freshly-booted plugin with nothing actually wrong. A
+ *      "simplification" that drops the agent-visible clause and
+ *      keeps raw liveness reintroduces the M59/M60 noise bug at the
+ *      helper boundary, and since the helper is the single gate
+ *      feeding `buildProviderHealthSystemPrompt`,
+ *      `buildAvailableModelsSystemPrompt`, and the
+ *      `experimental.chat.system.transform` hook, one drift here
+ *      cascades into 15–25 spurious system-prompt sections per turn
+ *      on a default install.
+ *
+ * Asymmetry invariant: each sabotage fires exactly one of {A, B, C}.
+ * Pin A populates the provider map with one live quota entry and
+ * leaves the route map empty — S1 (drop provider loop) flips the
+ * answer from true to false; S2 is a no-op because the route loop
+ * sees nothing; S3 (drop key_missing filter) still returns true
+ * because the quota entry is also `until > now`. Pin B mirrors with
+ * a live no_credit entry in the route map only — S2 flips, S1 and
+ * S3 are no-ops. Pin C populates the provider map with a single
+ * key_missing entry (until: Infinity) — S3 (gate → raw liveness)
+ * flips the answer from false to true by treating the boot-time
+ * plumbing entry as a live agent-visible penalty; S1 drops the loop
+ * entirely and the function still returns false via the empty route
+ * loop; S2 is a no-op because the route map is empty either way.
  */
 export function hasAgentVisiblePenalty(
   providerHealthMap: Map<string, ProviderHealth>,
