@@ -37,6 +37,7 @@ import {
   clearSessionHangState,
   logPluginHookFailure,
   readAndClearSessionHangState,
+  serializeHealthEntryForPersistence,
   countHealthyVisibleRoutes,
   composeRouteKey,
   findLiveProviderPenalty,
@@ -684,6 +685,53 @@ test("clearSessionHangState_whenSessionTerminates_dropsFromAllThreeSessionMaps",
   assert.equal(sessionStartTimeMap.has("session-b"), true);
   assert.equal(sessionActiveProviderMap.has("session-b"), true);
   assert.equal(sessionActiveModelMap.has("session-b"), true);
+});
+
+test("serializeHealthEntryForPersistence_whenUntilIsInfinity_emitsNeverString", () => {
+  // M81 pin: `key_missing` entries store `until: Number.POSITIVE_INFINITY`
+  // in memory, but `JSON.stringify(Infinity)` emits `null`, which
+  // `parsePersistedHealthEntry` rejects as a missing field. The
+  // serializer MUST convert infinity to the sentinel string `"never"`
+  // so the on-disk form round-trips cleanly through the load path.
+  // A sabotage that forgets the conversion fires this pin alone.
+  const serialized = serializeHealthEntryForPersistence({
+    state: "key_missing",
+    until: Number.POSITIVE_INFINITY,
+    retryCount: 0,
+  });
+
+  assert.equal(serialized.until, "never");
+});
+
+test("serializeHealthEntryForPersistence_whenUntilIsFinite_passesNumberThrough", () => {
+  // M81 pin: finite `until` timestamps must serialize verbatim as
+  // numbers — a sabotage that incorrectly stringifies all `until`
+  // values (e.g. `String(until)` or a blanket `"never"`) fires this
+  // pin alone. Isolated from the infinity-conversion pin so the two
+  // failure modes partition cleanly.
+  const serialized = serializeHealthEntryForPersistence({
+    state: "quota",
+    until: 1_700_000_000_000,
+    retryCount: 3,
+  });
+
+  assert.equal(serialized.until, 1_700_000_000_000);
+});
+
+test("serializeHealthEntryForPersistence_whenCalled_preservesStateAndRetryCount", () => {
+  // M81 pin: the spread must carry `state` and `retryCount` through
+  // unchanged — a sabotage that switches from `{...health, until: ...}`
+  // to explicit field listing and forgets one of the fields (or typos
+  // one) fires this pin alone. Pins 1 and 2 test `until` only, so
+  // this pin specifically covers the spread-preservation contract.
+  const serialized = serializeHealthEntryForPersistence({
+    state: "no_credit",
+    until: 1_700_000_000_000,
+    retryCount: 7,
+  });
+
+  assert.equal(serialized.state, "no_credit");
+  assert.equal(serialized.retryCount, 7);
 });
 
 test("logPluginHookFailure_whenCalled_forwardsMessageContainingHookName", () => {

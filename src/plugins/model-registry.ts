@@ -133,7 +133,61 @@ type ModelRouteDecision = {
   reasoning: string;
 };
 
-type PersistedHealthMap = Record<string, Omit<ProviderHealth, 'until'> & { until: number | "never" }>;
+export type PersistedHealthEntry = Omit<ProviderHealth, 'until'> & { until: number | "never" };
+
+type PersistedHealthMap = Record<string, PersistedHealthEntry>;
+
+/**
+ * Convert an in-memory health entry to its on-disk serialized form.
+ *
+ * SSoT for the two-site spread + infinity-to-"never" transform inside
+ * `persistProviderHealth`. The function used to inline this shape in
+ * two places: once for `providerHealthMap` entries (flattened via
+ * `Object.fromEntries`) and once for `modelRouteHealthMap` entries
+ * (added via a for-loop). The two blocks converged on the same output
+ * shape by copy-paste convention, not by a named boundary — a future
+ * edit that grew the persisted shape (e.g. adding a `reason` telemetry
+ * field) would have to propagate the change to both blocks by hand,
+ * and forgetting one silently produces asymmetric JSON where route
+ * entries carry the new field and provider entries do not (or vice
+ * versa). The asymmetry would not throw at persist time because both
+ * shapes are still valid `PersistedHealthEntry` values — it would
+ * only surface as missing fields on one half of the health state
+ * after a plugin restart, which is the exact class of
+ * impossible-to-reproduce-from-a-unit-test bug M68 / M73 closed at
+ * the record layer.
+ *
+ * The helper accepts the `ProviderHealth | ModelRouteHealth` union
+ * because both types are structurally identical today (`state`,
+ * `until`, `retryCount`) — routing through a single serializer makes
+ * that identity explicit and pins the contract at the compiler
+ * level. If the two types ever diverge, the helper's parameter shape
+ * will have to be updated in one place rather than two.
+ *
+ * The `Number.POSITIVE_INFINITY → "never"` conversion is the one
+ * non-spread part of the transform: `key_missing` entries are stored
+ * in-memory with `until = Number.POSITIVE_INFINITY` (so the expiry
+ * check `until <= now` is always false and the sentinel never
+ * expires), but `JSON.stringify(Infinity)` emits `null`, which
+ * `parsePersistedHealthEntry` would reject as a missing field. The
+ * `"never"` string is the stable on-disk form, hydrated back to
+ * `Number.POSITIVE_INFINITY` on load.
+ *
+ * Args:
+ *   health: In-memory health entry — either provider-scope or
+ *     route-scope.
+ *
+ * Returns:
+ *   The `PersistedHealthEntry` shape ready for `JSON.stringify`.
+ */
+export function serializeHealthEntryForPersistence(
+  health: ProviderHealth | ModelRouteHealth,
+): PersistedHealthEntry {
+  return {
+    ...health,
+    until: health.until === Number.POSITIVE_INFINITY ? "never" : health.until,
+  };
+}
 
 type ModelIdentity = {
   id: string;
@@ -331,23 +385,23 @@ async function persistProviderHealth(
 ): Promise<void> {
   try {
     await mkdir(path.dirname(PROVIDER_HEALTH_STATE_FILE), { recursive: true });
+    // M81: route both provider and route serialization through
+    // `serializeHealthEntryForPersistence` so the spread +
+    // infinity-to-"never" transform lives in exactly one place. Prior
+    // to this both blocks copy-pasted the same shape, so a future
+    // field added to the persisted form would ship asymmetrically
+    // across provider vs route entries if the maintainer updated only
+    // one block.
     const obj: PersistedHealthMap = Object.fromEntries(
       Array.from(healthMap.entries()).map(([key, health]) => [
         key,
-        {
-          ...health,
-          until: health.until === Number.POSITIVE_INFINITY ? "never" : health.until,
-        },
+        serializeHealthEntryForPersistence(health),
       ]),
     );
 
-    // Also persist model route health
     if (routeHealthMap) {
       for (const [routeKey, health] of routeHealthMap.entries()) {
-        obj[routeKey] = {
-          ...health,
-          until: health.until === Number.POSITIVE_INFINITY ? "never" : health.until,
-        };
+        obj[routeKey] = serializeHealthEntryForPersistence(health);
       }
     }
 
