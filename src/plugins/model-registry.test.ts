@@ -54,6 +54,7 @@ import {
   filterProviderModelsByRouteHealth,
   findCuratedFallbackRoute,
   HANG_TIMEOUT_IMMEDIATE_THRESHOLD_MS,
+  assembleHealthAwareSystemPrompts,
   classifyPersistedHealthKey,
   extractAssistantMessageCompletedPayload,
   extractSessionErrorExplicitModel,
@@ -738,6 +739,42 @@ test("serializeHealthEntryForPersistence_whenCalled_preservesStateAndRetryCount"
 
   assert.equal(serialized.state, "no_credit");
   assert.equal(serialized.retryCount, 7);
+});
+
+test("assembleHealthAwareSystemPrompts_whenBothPromptsPresent_returnsProviderFirst", () => {
+  // M87 pin: both builders returned non-null strings. The helper
+  // must return a length-2 array with provider-health FIRST and
+  // available-models SECOND — the canonical transform-hook order.
+  // A sabotage that reverses the order (or rebuilds the array
+  // differently) fires this pin alone — pins 2 and 3 each have
+  // only one non-null input, so their arrays are length-1 and
+  // insensitive to order.
+  const result = assembleHealthAwareSystemPrompts(
+    "PROVIDER_HEALTH_BODY",
+    "AVAILABLE_MODELS_BODY",
+  );
+  assert.deepEqual(result, ["PROVIDER_HEALTH_BODY", "AVAILABLE_MODELS_BODY"]);
+});
+
+test("assembleHealthAwareSystemPrompts_whenProviderHealthIsNull_returnsAvailableOnly", () => {
+  // M87 pin: provider-health builder returned null. The helper
+  // must drop it and return a length-1 array with only the
+  // available-models body. A sabotage that drops the null filter
+  // on the provider-health input fires this pin alone — pin 1
+  // has both non-null so the filter is a no-op, and pin 3 is
+  // broken on the other axis.
+  const result = assembleHealthAwareSystemPrompts(null, "AVAILABLE_MODELS_BODY");
+  assert.deepEqual(result, ["AVAILABLE_MODELS_BODY"]);
+});
+
+test("assembleHealthAwareSystemPrompts_whenAvailableModelsIsNull_returnsProviderOnly", () => {
+  // M87 pin: available-models builder returned null. The helper
+  // must drop it and return a length-1 array with only the
+  // provider-health body. A sabotage that drops the null filter
+  // on the available-models input fires this pin alone — pin 1
+  // has both non-null and pin 2 is broken on the other axis.
+  const result = assembleHealthAwareSystemPrompts("PROVIDER_HEALTH_BODY", null);
+  assert.deepEqual(result, ["PROVIDER_HEALTH_BODY"]);
 });
 
 test("shouldRecordImmediateTimeoutPenalty_whenAllConditionsHold_returnsTrue", () => {

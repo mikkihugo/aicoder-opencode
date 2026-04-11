@@ -1579,6 +1579,80 @@ export function shouldRecordImmediateTimeoutPenalty(
 }
 
 /**
+ * Assemble the ordered health-aware system-prompt list that the
+ * `experimental.chat.system.transform` hook appends to `output.system`.
+ *
+ * ## Drift shape
+ *
+ * Previously the transform hook carried two near-identical inline
+ * blocks:
+ *
+ *     const providerHealthPrompt = buildProviderHealthSystemPrompt(...);
+ *     if (providerHealthPrompt) {
+ *       output.system.push(providerHealthPrompt);
+ *     }
+ *     const availableModelsPrompt = buildAvailableModelsSystemPrompt(...);
+ *     if (availableModelsPrompt) {
+ *       output.system.push(availableModelsPrompt);
+ *     }
+ *
+ * Four drift surfaces sat on that twelve-line fragment:
+ *
+ *   1. **Order**. Provider-health must land in `output.system` BEFORE
+ *      the available-models block — the former describes "what's
+ *      broken right now" and the latter describes "what to use
+ *      instead". A future refactor that reorders the two `push` calls
+ *      silently inverts the prompt narrative the agent reads top-to-
+ *      bottom, which changes both the first-hit salience and the
+ *      way the health story frames the fallback list.
+ *   2. **Null filter** (provider-health). Dropping the `if (...)` guard
+ *      on the first block silently pushes `null` into `output.system`,
+ *      which is typed as `string[]` at the opencode layer — the push
+ *      succeeds through the TypeScript `string | null` widening at
+ *      the call site and the broken prompt surfaces only downstream.
+ *   3. **Null filter** (available-models). Mirror of surface 2 on the
+ *      second block.
+ *   4. **Asymmetric guard loss**. A refactor could delete the guard on
+ *      ONE block but keep it on the other, producing an arrangement
+ *      where one builder's null output crashes and the other
+ *      silently tolerates it — the worst kind of inconsistency
+ *      because it manifests only when one specific builder returns
+ *      null, which is itself rare in production.
+ *
+ * The helper collapses the fragment into one call-site conditional
+ * whose ordering, null-filter, and single-source-of-truth invariant
+ * are all properties of one exported function. The two builders are
+ * still invoked at the call site so the 4-arg registry+maps calls
+ * remain visible and type-checked there — the helper's job is the
+ * ordering-and-null-filter policy, not the builder invocation.
+ *
+ * Args:
+ *   providerHealthPrompt: The `buildProviderHealthSystemPrompt` output,
+ *     which is `string | null` — null when no agent-visible penalties
+ *     exist or the renderer produces an empty body.
+ *   availableModelsPrompt: The `buildAvailableModelsSystemPrompt`
+ *     output, same nullable contract.
+ *
+ * Returns:
+ *   A zero-to-two-element string array in canonical transform-hook
+ *   order (provider-health first, available-models second). Spread
+ *   into `output.system.push(...)`. Empty when both inputs are null.
+ */
+export function assembleHealthAwareSystemPrompts(
+  providerHealthPrompt: string | null,
+  availableModelsPrompt: string | null,
+): string[] {
+  const systemPrompts: string[] = [];
+  if (providerHealthPrompt !== null) {
+    systemPrompts.push(providerHealthPrompt);
+  }
+  if (availableModelsPrompt !== null) {
+    systemPrompts.push(availableModelsPrompt);
+  }
+  return systemPrompts;
+}
+
+/**
  * Runtime-validate and extract an explicit `{ id, providerID }` model
  * tuple from a `session.error` event payload.
  *
@@ -4726,25 +4800,30 @@ export const ModelRegistryPlugin: Plugin = async () => {
           return;
         }
 
-        const providerHealthPrompt = buildProviderHealthSystemPrompt(
-          modelRegistry.models,
-          providerHealthMap,
-          modelRouteHealthMap,
-          now,
+        // M87: `assembleHealthAwareSystemPrompts` replaces the two
+        // inline `build*Prompt` + null-filter + push blocks with one
+        // ordering-and-null-filter helper. See the helper docstring
+        // for the four drift surfaces it closes (order, dual null
+        // filter, and asymmetric guard loss between the two blocks).
+        // The two builder invocations stay at the call site so the
+        // shared 4-arg registry+maps signature remains visible and
+        // type-checked here.
+        output.system.push(
+          ...assembleHealthAwareSystemPrompts(
+            buildProviderHealthSystemPrompt(
+              modelRegistry.models,
+              providerHealthMap,
+              modelRouteHealthMap,
+              now,
+            ),
+            buildAvailableModelsSystemPrompt(
+              modelRegistry.models,
+              providerHealthMap,
+              modelRouteHealthMap,
+              now,
+            ),
+          ),
         );
-        if (providerHealthPrompt) {
-          output.system.push(providerHealthPrompt);
-        }
-
-        const availableModelsPrompt = buildAvailableModelsSystemPrompt(
-          modelRegistry.models,
-          providerHealthMap,
-          modelRouteHealthMap,
-          now,
-        );
-        if (availableModelsPrompt) {
-          output.system.push(availableModelsPrompt);
-        }
       } catch (error) {
         // M80: see `logPluginHookFailure`. The transform hook was the
         // second silent-swallow site — registry parse errors, prompt
