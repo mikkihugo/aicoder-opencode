@@ -1078,6 +1078,72 @@ test("extractSessionErrorExplicitModel_whenModelIsMissingProviderID_returnsUndef
   assert.equal(result, undefined);
 });
 
+test("extractSessionErrorExplicitModel_whenSessionErrorIsNull_returnsUndefinedWithoutThrowing", () => {
+  // M112 drift pin 1/3 — outer-object null-guard. `typeof null ===
+  // "object"` in JavaScript, so without the explicit
+  // `sessionError === null` disjunction the very next line's
+  // `(sessionError as Record<string, unknown>).model` would throw
+  // `TypeError: Cannot read properties of null`. Opencode emits
+  // `session.error` with `properties: null` in older versions when
+  // the error shape is not fully populated. A "simplification"
+  // refactor that drops the null disjunction as "redundant with
+  // typeof" passes every M84 pin (their inputs are real objects)
+  // but crashes on pre-populated error events. Pin: null input
+  // returns undefined, no throw.
+  const result = extractSessionErrorExplicitModel(null);
+  assert.equal(result, undefined);
+});
+
+test("extractSessionErrorExplicitModel_whenDotModelIsNull_returnsUndefinedWithoutThrowing", () => {
+  // M112 drift pin 2/3 — inner `.model` null-guard. Same foot-gun
+  // at the inner layer: `sessionError.model = null` is a real shape
+  // opencode emits for pre-bind failures (no model attached yet).
+  // Without the `candidate === null` disjunction, the next line's
+  // `(candidate as Record<string, unknown>).id` throws. A defensive-
+  // simplification refactor passes every M84 pin (which use either
+  // a missing `.model` key or a populated object) but crashes on
+  // pre-bind session.error events. Pin: `{model: null}` returns
+  // undefined, no throw.
+  const result = extractSessionErrorExplicitModel({
+    sessionID: "sess-1",
+    error: { name: "APIError" },
+    model: null,
+  });
+  assert.equal(result, undefined);
+});
+
+test("extractSessionErrorExplicitModel_whenInputModelCarriesExtraFields_returnsStrictTwoKeyTuple", () => {
+  // M112 drift pin 3/3 — strict-narrow contract: extra fields on
+  // `candidate.model` must be DROPPED, not forwarded. The current
+  // `return { id: ..., providerID: ... }` explicitly lists the
+  // two fields. A "simpler" refactor to `return candidateObj as ...`
+  // or `return { ...candidateObj }` would leak any extras the
+  // opencode event carries (version breadcrumbs, debug tags,
+  // telemetry markers) into the downstream classification path.
+  // This is the forward-compat INVERSE of M111's serializer
+  // surface: at narrowing gates, shape must be SHED (strict),
+  // not PRESERVED (wide). M84 pins use inputs with no extras so
+  // shape-leak is invisible. Pin: assert the result has exactly
+  // two keys — no leak.
+  const result = extractSessionErrorExplicitModel({
+    sessionID: "sess-1",
+    error: { name: "APIError" },
+    model: {
+      id: "claude-3.5-sonnet",
+      providerID: "openrouter",
+      internalDebugTag: "leak-canary",
+      telemetrySpanId: "trace-xyz",
+    },
+  });
+  assert.deepEqual(result, {
+    id: "claude-3.5-sonnet",
+    providerID: "openrouter",
+  });
+  // Explicit key-set assertion so a `{...candidateObj}` leak is
+  // caught even if deepEqual is ever weakened.
+  assert.deepEqual(Object.keys(result ?? {}).sort(), ["id", "providerID"]);
+});
+
 test("classifyPersistedHealthKey_whenKeyHasNoSlash_returnsProvider", () => {
   // M83 pin: raw provider IDs (no slash) must classify as "provider".
   // A sabotage that hardcodes `"route"` for every key fires this pin

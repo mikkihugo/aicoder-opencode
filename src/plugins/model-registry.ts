@@ -2257,6 +2257,64 @@ export function assembleHealthAwareSystemPrompts(
  *   or `undefined` when the field is missing or malformed. Callers
  *   should supply their own fallback (e.g. `?? mappedModel`) at the
  *   call site so the policy is visible.
+ *
+ * ## Drift surfaces (M112 PDD)
+ *
+ * The three pre-existing pins cover the happy path and the two
+ * innermost narrowing steps (`id` string, `providerID` string), but
+ * three orthogonal surfaces remain unpinned — each closed by an
+ * explicit guard that a "defensive simplification" refactor could
+ * silently drop:
+ *
+ * 1. **Outer-object null-guard.** The first gate is
+ *    `if (sessionError === null || typeof sessionError !== "object") return undefined;`.
+ *    It exists because `typeof null === "object"` in JavaScript, so
+ *    the `typeof` check alone admits `null` — and the very next line
+ *    reads `(sessionError as Record<string, unknown>).model`, which
+ *    on `null` throws `TypeError: Cannot read properties of null`.
+ *    A "simplification" that drops the explicit null disjunction as
+ *    "redundant with typeof" silently crashes the `session.error`
+ *    handler any time opencode emits a synthetic `session.error`
+ *    with `properties: null` — which happens in older opencode
+ *    versions when the error shape is not fully populated before
+ *    the handler fires. The pre-existing pins feed real objects and
+ *    never exercise the null branch. Pin: `null` input returns
+ *    `undefined`, not a throw.
+ *
+ * 2. **Inner `.model` null-guard.** The second gate is
+ *    `if (candidate === null || typeof candidate !== "object") return undefined;`.
+ *    Identical foot-gun at the inner layer: `sessionError.model = null`
+ *    is a real shape that opencode emits when the error originates
+ *    from a pre-bind failure (no model yet attached to the session).
+ *    The next line reads `(candidate as Record<string, unknown>).id`
+ *    which on `null` throws. A defensive-simplification refactor that
+ *    drops the null disjunction passes every pre-existing pin —
+ *    which all use either a missing `.model` key (covered by the
+ *    outer check) or a fully-populated `.model` object — but crashes
+ *    on pre-bind error events. Pin: `{model: null}` returns
+ *    `undefined`, not a throw.
+ *
+ * 3. **Return tuple is fresh and strict — extra fields on
+ *    `candidate.model` are DROPPED, not forwarded.** The return
+ *    statement explicitly lists the two fields:
+ *    `return { id: candidateObj.id, providerID: candidateObj.providerID };`.
+ *    A "simpler" refactor to `return candidateObj as { id: string; providerID: string };`
+ *    or `return { ...candidateObj } as ...` would leak any extra
+ *    fields the opencode event happens to carry under `.model`
+ *    (provider-version breadcrumbs, debug tags, telemetry markers)
+ *    into the downstream classification path. Callers pass the
+ *    result to `recordModelNotFoundRouteHealthByIdentifiers`, which
+ *    positionally consumes `providerID, modelID` as strings — so
+ *    today's call site tolerates extra fields. But the canonical
+ *    drift this pin catches is the forward-compat INVERSE of
+ *    M111's serializer surface: at a narrowing gate, extra fields
+ *    must be SHED (strict narrow), not PRESERVED (wide forward-compat).
+ *    A future downstream consumer that starts destructuring all
+ *    fields would silently pick up any upstream shape-leak. The
+ *    pre-existing pins use inputs with no extra fields so shape-leak
+ *    is invisible. Pin: inject an extra field on the input
+ *    `.model`, assert via `Object.keys(result)` that the result has
+ *    exactly `["id", "providerID"]` — no leaks.
  */
 export function extractSessionErrorExplicitModel(
   sessionError: unknown,
