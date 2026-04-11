@@ -5872,6 +5872,81 @@ const MEDIUM_COMPLEXITY_KEYWORD_STEMS = [
  *   A compiled `RegExp` with the leading boundary + case-insensitive
  *   flag; feed it `prompt.toLowerCase()` (or rely on the `i` flag for
  *   mixed-case input).
+ *
+ * ## Drift surfaces (M129 PDD)
+ *
+ * The three pre-existing pins (`_whenStemIsRefactor_matchesInflection
+ * Refactoring`, `_whenStemContainsDot_escapesDotAsLiteral`,
+ * `_whenStemIsLowerCaseButPromptIsUpperCase_matches`) each exercise the
+ * happy-path for one of the prose surfaces above. They collectively
+ * check that inflection-matching works, one metachar escapes correctly,
+ * and the case flag is set. They DO NOT catch three orthogonal
+ * regressions that sit on the REJECTION half of the contract — the
+ * boundary that prevents a false match, the structural join that
+ * preserves multi-stem alternation, and the metachar coverage beyond
+ * the single `.` character:
+ *
+ * 1. **Leading `\b` REJECTS mid-word matches.** The pattern opens with
+ *    `\b` so a stem like `"fix"` matches `"fixing this"` at the start
+ *    but NOT `"postfix issue"` mid-word. The classifier relies on this
+ *    to avoid false-positives where a prompt happens to contain a
+ *    complexity keyword as a suffix of an unrelated word — e.g.
+ *    `"postfix notation"` should not tier-match on `"fix"` and
+ *    mis-classify as `medium`. Pin 1 (`refactor`/`refactoring`) only
+ *    exercises the NO-trailing-boundary axis (the stem matches a word
+ *    with characters AFTER it); it passes identically whether `\b` is
+ *    present at the start or not, because the test input
+ *    `"refactoring the architecture"` starts at a word boundary
+ *    regardless. A refactor that drops the leading `\b` (the
+ *    "boundaries are symmetric, if trailing is absent leading is
+ *    redundant too" drift class) would silently widen every complexity
+ *    regex to substring matching — a prompt like `"just a postfix
+ *    note"` would now match `fix` and tier up to `medium` even though
+ *    the intent is trivial. New pin: stem `"fix"`, input
+ *    `"postfix note"`, asserts `.test() === false`.
+ *
+ * 2. **Multi-stem alternation preserved across `|` join.** The
+ *    builder's only non-trivial structural step is
+ *    `.map(escape).join("|")` — it threads every stem through the
+ *    escape step and joins them with the regex alternation operator.
+ *    The three pre-existing pins all pass a SINGLE stem, so the
+ *    join step is a no-op on every one of them and any drift that
+ *    collapses multi-stem inputs silently passes all three pins. A
+ *    refactor that swaps `.join("|")` → `.join("")` (concatenation
+ *    instead of alternation, plausible typo or "simplification" from
+ *    a developer who doesn't recognize the regex-alternation role)
+ *    would produce a regex `\b(?:alphabeta)` from `["alpha","beta"]`
+ *    — neither stem matches anything resembling itself. Every live
+ *    call site feeds multi-element stem lists
+ *    (`LARGE_COMPLEXITY_KEYWORD_STEMS`, `MEDIUM_COMPLEXITY_KEYWORD_STEMS`,
+ *    `SMALL_COMPLEXITY_KEYWORD_STEMS`), so the production classifier
+ *    would silently degrade to "first-stem-concatenated-with-everything"
+ *    and miss every legitimate keyword match, defaulting the whole
+ *    complexity classification path to `medium` on every prompt. New
+ *    pin: `stems = ["alpha", "beta"]`, assert both `"alpha-stage"`
+ *    and `"beta-stage"` match.
+ *
+ * 3. **Metachar escape covers `+`, not just `.`.** The escape regex
+ *    `/[.*+?^${}()|[\]\\]/g` covers eleven metacharacters. Pin 2 only
+ *    asserts the `.` character is escaped. Each other metachar has an
+ *    independent drift surface: a "cleanup" refactor that drops one
+ *    metachar from the character class would silently unescape that
+ *    char on every stem. `+` is the canonical example of a metachar
+ *    with SEMANTIC side-effects under drift — an unescaped `+` means
+ *    "one or more of the previous char", so a stem `"a+b"` would
+ *    become the regex `\b(?:a+b)` ("one or more `a` followed by `b`"),
+ *    which DOES NOT match the literal input `"a+b"` (because the `+`
+ *    literal is not matched by the pattern that now expects `b` right
+ *    after the `a`-run). A drift that drops `+` from the character
+ *    class therefore produces a function that silently refuses to
+ *    match ANY input containing the literal stem, on every call site
+ *    using a `+` in its stem list. No current stem uses `+`, but the
+ *    escape invariant is part of the contract and future stem authors
+ *    (think `"c++"`, `"go+generics"`) must be able to rely on it. New
+ *    pin: `stems = ["a+b"]`, input `"use a+b here"`, asserts
+ *    `.test() === true`. Under the sabotage the regex becomes
+ *    `\b(?:a+b)` which fails to match the literal `a+b` substring,
+ *    and the pin fires.
  */
 export function buildLeadingBoundaryRegex(stems: readonly string[]): RegExp {
   const alternation = stems.map((stem) => stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");

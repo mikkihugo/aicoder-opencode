@@ -7839,6 +7839,55 @@ test("buildLeadingBoundaryRegex_whenStemIsLowerCaseButPromptIsUpperCase_matches"
   assert.equal(regex.test("REFACTOR"), true);
 });
 
+// M129 pin A — leading `\b` word boundary REJECTS mid-word matches.
+// The pre-existing inflection pin only exercises the no-trailing-
+// boundary axis (stem matches a word with chars AFTER it); it passes
+// identically whether the leading `\b` is present or not, because
+// `"refactoring the architecture"` starts at a word boundary
+// regardless. Dropping the leading `\b` would silently widen every
+// complexity regex to substring matching — a prompt like
+// `"postfix note"` would tier-match on `"fix"` even though the intent
+// is trivial. Stem has no metachars and is all-lowercase so neither
+// the escape pin nor the case-fold pin can fire under a leading-\b
+// drift.
+test("buildLeadingBoundaryRegex_whenStemAppearsAsSuffixOfLargerWord_doesNotMatchMidWord", () => {
+  const regex = buildLeadingBoundaryRegex(["fix"]);
+
+  assert.equal(regex.test("postfix note"), false);
+});
+
+// M129 pin B — multi-stem alternation preserved through `.join("|")`.
+// Every pre-existing pin passes a single stem, so the join step is a
+// no-op on every one of them and any drift that collapses multi-stem
+// inputs (`.join("")`, taking only the first element, swapping the
+// delimiter) silently passes all three pins while the live call sites
+// — every complexity regex — feed multi-element stem lists. Two
+// lowercase no-metachar stems so neither pin A nor pin C nor the
+// pre-existing escape/case pins can fire under an alternation drift.
+test("buildLeadingBoundaryRegex_whenMultipleStems_bothStemsMatchableViaSingleRegex", () => {
+  const regex = buildLeadingBoundaryRegex(["alpha", "beta"]);
+
+  assert.equal(regex.test("alpha-stage"), true);
+  assert.equal(regex.test("beta-stage"), true);
+});
+
+// M129 pin C — metachar escape coverage extends beyond `.` to `+`.
+// The pre-existing dot-escape pin only asserts one character is
+// escaped. Each metachar in the `[.*+?^${}()|[\]\\]` character class
+// is an independent drift surface: a "cleanup" refactor that drops
+// `+` from the set would silently unescape every stem containing `+`.
+// `+` is the canonical semantic side-effect case — unescaped it
+// means "one or more of the previous char", so stem `"a+b"` becomes
+// `\b(?:a+b)` which refuses to match the literal `a+b` substring
+// because the pattern expects `b` immediately after the `a`-run. Uses
+// a single-stem input with a leading word boundary so pin A and pin B
+// cannot fire.
+test("buildLeadingBoundaryRegex_whenStemContainsPlusMetachar_matchesLiteralPlus", () => {
+  const regex = buildLeadingBoundaryRegex(["a+b"]);
+
+  assert.equal(regex.test("use a+b here"), true);
+});
+
 test("filterEnabledEntriesByOptionalRole_whenRoleIsCoding_excludesArchitectEntry", () => {
   const codingEntry = buildModelRegistryEntry("m-coding", ["coding"], "standard", [
     { provider: "opencode", model: "opencode/free-e", priority: 1 },
