@@ -2294,6 +2294,93 @@ export function extractAssistantMessageCompletedPayload(
   };
 }
 
+/**
+ * Build the `{routeKey, health}` pair for the four route-level health
+ * writers (`session.error` model_not_found, `assistant.message.completed`
+ * zero-token quota, `chat.params` immediate timeout, `chat.params`
+ * hang-timer timeout) so the key-composition, preserve-longer merge,
+ * and retryCount arithmetic all live behind a single pure helper.
+ *
+ * This is the route-level analog of `computeProviderHealthUpdate` —
+ * same M43-era preserve-longer invariant, same retryCount-always-
+ * increments rule, same fresh-object-per-return contract — with the
+ * additional responsibility of normalizing the route key through
+ * `composeRouteKey` so writers and readers cannot drift on already-
+ * composite model ids.
+ *
+ * Args:
+ *   providerID: The opencode runtime provider id.
+ *   modelID: The opencode runtime model id, which may or may not
+ *     already contain the provider prefix — `composeRouteKey` handles
+ *     both shapes idempotently.
+ *   state: The classified penalty state for the incoming error.
+ *   durationMs: How long (from `now`) the penalty should last.
+ *   existing: The current entry at the composed route key, used to
+ *     carry `retryCount` and to enforce the preserve-longer merge.
+ *   now: Current wall-clock timestamp in ms (injected for testability).
+ *
+ * Returns:
+ *   `{ routeKey, health }` — the caller writes `map.set(routeKey, health)`
+ *   and triggers persistence. The caller remains responsible for the
+ *   mutation so this helper stays pure.
+ *
+ * ## Drift surfaces (M107 PDD)
+ *
+ * The seven pre-existing pins cover the four-way routeKey composition
+ * cartesian (composite/unprefixed/openrouter/readback) plus three M43
+ * preserve-longer field-equality checks (existing-retryCount carry,
+ * preserve-longer-existing, accept-longer-incoming). They leave three
+ * orthogonal invariants unguarded — each is load-bearing and each has
+ * a plausible refactor that would silently regress it. These mirror
+ * the M106 surfaces on `computeProviderHealthUpdate` because the two
+ * functions are parallel twins across the dual-map architecture and
+ * the same drift classes apply symmetrically:
+ *
+ * 1. **Preserve branch returns a fresh `health` object, not `existing`
+ *    by reference.** The four writers store the return's `health`
+ *    field back into `modelRouteHealthMap` under `routeKey`. A
+ *    `health: existing` optimization would make `map.get(routeKey) ===
+ *    existing === result.health` — any later writer that bumps
+ *    `retryCount` through the fresh return handle would retroactively
+ *    mutate the caller's prior local reference to `existing`. The M43
+ *    field-equality pins fail coincidentally on the bare `health:
+ *    existing` form (because they expect `retryCount + 1`), but a
+ *    careful `health: { ...existing, retryCount: existing.retryCount
+ *    + 1 }` regression would pass every M43 pin while still leaking
+ *    shared nested references (e.g. if a future `ModelRouteHealth`
+ *    shape grew a nested object field). Only a strict `result.health
+ *    !== existing` identity pin catches the bare-reference form
+ *    directly.
+ *
+ * 2. **Strict `>` (not `>=`) — equal-until takes the NEW path.** The
+ *    condition `existing.until > newUntil` uses strict inequality so
+ *    that when an incoming penalty computes `now + durationMs ===
+ *    existing.until` (very reachable: two writers firing in the same
+ *    tick with the same backoff constant produce byte-identical
+ *    untils), the NEW `state` wins. This matters across route-level
+ *    classifiers: a route that was flagged `timeout` at T and
+ *    simultaneously produces a `model_not_found` classification at the
+ *    SAME T (e.g. a hang-timer and a session.error firing in the same
+ *    event-loop tick) must commit to the more structural classification
+ *    so `healthStateLabel` and the fallback-route resolver see reality,
+ *    not a stale label. None of the seven existing pins uses tie-case
+ *    untils — they all compute clearly-unequal values — so the strict/
+ *    non-strict boundary is currently an unpinned property of the
+ *    source.
+ *
+ * 3. **Input `existing` record is never mutated.** Both branches build
+ *    fresh object literals for the `health` field; neither path writes
+ *    through `existing`. If a future refactor chose `Object.assign(
+ *    existing, { state, until, retryCount })` in the new-path branch
+ *    to skip an allocation, the field-equality pins would all still
+ *    pass (Object.assign returns its first argument with the right
+ *    fields, and all seven M43 pins check the return value's fields
+ *    not the input's), but any caller that captured a pre-call
+ *    reference to `existing` for logging, metric emission, or
+ *    diff-against-previous would misattribute new observations to
+ *    prior turns. The only way to pin this is to snapshot a field of
+ *    `existing` before the call and assert it is unchanged after.
+ */
 export function buildRouteHealthEntry(
   providerID: string,
   modelID: string,

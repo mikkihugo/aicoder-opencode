@@ -4489,6 +4489,89 @@ test("buildRouteHealthEntry_whenNewUntilIsLongerThanExisting_adoptsNewStateAndUn
   assert.equal(health.retryCount, 2);
 });
 
+test("buildRouteHealthEntry_whenPreserveBranchTaken_returnsFreshHealthObjectNotExistingByReference", () => {
+  // M107 PDD surface 1: the preserve-longer branch must allocate a fresh
+  // `health` object. A `health: existing` optimization would share a handle
+  // between the caller's pre-call reference and the map's post-call entry,
+  // letting later writers retroactively mutate already-committed
+  // observations. M43 field-equality pins cannot detect bare-reference
+  // return forms that happen to match field values.
+  const now = Date.now();
+  const existing = {
+    state: "timeout" as const,
+    until: now + 2 * 60 * 60 * 1000, // 2h — strictly longer than the 1h incoming
+    retryCount: 1,
+  };
+
+  const { health } = buildRouteHealthEntry(
+    "iflowcn",
+    "qwen3-coder-plus",
+    "quota",
+    60 * 60 * 1000, // 1h — shorter, triggers preserve branch
+    existing,
+    now,
+  );
+
+  assert.ok(health !== existing, "preserve branch must return a fresh health object, not existing by reference");
+});
+
+test("buildRouteHealthEntry_whenExistingUntilEqualsNewUntil_takesNewPathAcceptingNewState", () => {
+  // M107 PDD surface 2: the condition is STRICT `existing.until > newUntil`,
+  // so equal-until means the incoming classification wins. Two route-level
+  // writers computing the same `now + 1h` boundary in the same tick (e.g.
+  // a hang-timer and a session.error firing in the same event-loop cycle
+  // against the same route) must commit to the more structural
+  // classification. A `>=` drift would preserve the stale label and make
+  // operator-visible state lag reality by up to a full lockout window.
+  const now = Date.now();
+  const sharedDuration = 60 * 60 * 1000;
+  const existing = {
+    state: "timeout" as const,
+    until: now + sharedDuration, // byte-identical to newUntil
+    retryCount: 2,
+  };
+
+  const { health } = buildRouteHealthEntry(
+    "iflowcn",
+    "qwen3-coder-plus",
+    "model_not_found",
+    sharedDuration,
+    existing,
+    now,
+  );
+
+  assert.equal(
+    health.state,
+    "model_not_found",
+    "equal-until must accept incoming state, not preserve existing",
+  );
+});
+
+test("buildRouteHealthEntry_whenNewPathTaken_doesNotMutateInputExistingRecord", () => {
+  // M107 PDD surface 3: neither branch may mutate `existing`. A refactor to
+  // `Object.assign(existing, {...})` in the new-path branch would pass
+  // every field-equality pin (Object.assign returns its first argument with
+  // the right fields) while silently corrupting any caller that held a
+  // pre-call handle to `existing` for logging, diffing, or metric emission.
+  const now = Date.now();
+  const existing = {
+    state: "quota" as const,
+    until: now + 60 * 60 * 1000,
+    retryCount: 3,
+  };
+
+  buildRouteHealthEntry(
+    "iflowcn",
+    "qwen3-coder-plus",
+    "no_credit",
+    2 * 60 * 60 * 1000, // 2h > 1h — takes new path
+    existing,
+    now,
+  );
+
+  assert.equal(existing.state, "quota", "new-path must not mutate the input existing record");
+});
+
 test("PROVIDER_PENALTY_CLASS_TO_BACKOFF_DURATION_MS_quotaKey_mapsTo1HourConstant", () => {
   // Pins the `quota` → `ROUTE_QUOTA_BACKOFF_DURATION_MS` (1h) assignment
   // in the Record. If a refactor reassigns `quota` to the 2h key_dead
