@@ -8566,6 +8566,73 @@ test("findFirstHealthyVisibleRoute_whenEveryCandidateIsUnhealthy_returnsNull", (
   assert.equal(result, null);
 });
 
+test("findFirstHealthyVisibleRoute_whenHiddenProviderPrecedesVisibleInSingleEntry_delegatesThroughFilterVisibleProviderRoutes", () => {
+  // M144 Pin A — drift surface 1: the outer loop MUST delegate to
+  // `findFirstHealthyRouteInEntry` so the visibility filter runs.
+  // Single entry with a hidden-provider route at priority 1 and a
+  // visible-opencode-free route at priority 2. Under empty health maps
+  // the delegation path returns the visible route; a naive inline
+  // `for (const route of entry.provider_order)` scan returns the hidden
+  // route instead. Strict provider assertion isolates the regression.
+  const entries = [
+    buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+      { provider: "cerebras", model: "cerebras/glm-5.1", priority: 1 },
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 2 },
+    ]),
+  ];
+  const result = findFirstHealthyVisibleRoute(entries, new Map(), new Map(), 0);
+  assert.ok(result);
+  assert.equal(result.provider, "opencode");
+});
+
+test("findFirstHealthyVisibleRoute_whenReturningHealthyRoute_stripsPriorityAndYieldsExactlyProviderAndModelKeys", () => {
+  // M144 Pin B — drift surface 2: the return value is exactly
+  // `{ provider, model }`, NOT the raw `ProviderRoute` object which
+  // carries `priority` (and may carry `status`). A shortcut-return of
+  // `firstHealthyRoute` satisfies TypeScript (ProviderRoute is
+  // structurally assignable to the narrower return type) but leaks
+  // `priority` at runtime, which downstream JSON serializers and
+  // `Object.keys`-based inspectors pick up as an extra field. Asserting
+  // the sorted key set is exactly `["model", "provider"]` isolates the
+  // leak.
+  const entries = [
+    buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+    ]),
+  ];
+  const result = findFirstHealthyVisibleRoute(entries, new Map(), new Map(), 0);
+  assert.ok(result);
+  assert.deepEqual(Object.keys(result).sort(), ["model", "provider"]);
+});
+
+test("findFirstHealthyVisibleRoute_whenThreeHealthyCandidates_returnsStrictArrayOrderFirstEntryRoute", () => {
+  // M144 Pin C — drift surface 3: outer `for…of` MUST preserve
+  // `candidateEntries` array order. Three healthy candidates with
+  // different providers; the helper must return entry[0]'s route. Any
+  // reordering (reverse, sort-by-id, sort-by-tier) silently flips the
+  // winner; the strict provider + model assertion on entry[0] catches
+  // all such permutations.
+  const entries = [
+    buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+    ]),
+    buildModelRegistryEntry("kimi-k2-thinking", ["architect"], "frontier", [
+      { provider: "iflowcn", model: "iflowcn/kimi-k2-thinking", priority: 1 },
+    ]),
+    buildModelRegistryEntry("minimax-m2.7", ["architect"], "frontier", [
+      {
+        provider: "openrouter",
+        model: "openrouter/minimax/minimax-m2:free",
+        priority: 1,
+      },
+    ]),
+  ];
+  const result = findFirstHealthyVisibleRoute(entries, new Map(), new Map(), 0);
+  assert.ok(result);
+  assert.equal(result.provider, "opencode");
+  assert.equal(result.model, "opencode/glm-5.1-free");
+});
+
 test("recommendTaskModelRoute_whenComplexityTierFullyDownButSiblingTierHealthy_degradesToSiblingTier", async () => {
   // M57 headline pin. Reachability: a large-complexity request arrives
   // while every strong/frontier provider is throttled (quota + key_dead

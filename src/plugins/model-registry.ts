@@ -7549,6 +7549,75 @@ export function findPreferredHealthyRoute(
  * Returns:
  *   The first `{ provider, model }` whose provider and route are both
  *   healthy, or `null` when no candidate has a live visible route.
+ *
+ * ## Drift surfaces (M144 PDD)
+ *
+ * The five pre-existing pins (empty-list / first-entry-healthy /
+ * first-entry-blocked-second-healthy / route-level-block-sibling /
+ * every-candidate-unhealthy) assert end-to-end dispatch shape but leave
+ * three structurally-independent body invariants unpinned. Each has a
+ * plausible mechanical refactor that would silently regress it AND each
+ * has a dedicated asymmetric pin so exactly one new pin fires when the
+ * corresponding contract is broken.
+ *
+ * 1. **Delegates to `findFirstHealthyRouteInEntry`, not an inlined
+ *    `filterVisibleProviderRoutes` + `isRouteCurrentlyHealthy` scan.**
+ *    The M72 cleanup deliberately hoisted the per-entry scan into its
+ *    canonical helper so the visibility filter and the ascending-priority
+ *    sort inside `filterVisibleProviderRoutes` apply here for free. A
+ *    future "just inline it, it's two lines" refactor that writes a
+ *    naive `for (const route of entry.provider_order)` loop silently
+ *    loses both properties — hidden paid routes (cerebras, xai,
+ *    deepseek, github-copilot, cloudflare-ai-gateway, togetherai,
+ *    minimax-cn*, non-`:free` openrouter) become dispatchable again,
+ *    and the priority-sort invariant on unsorted `provider_order`
+ *    arrays collapses. The pre-existing `whenFirstEntryHasHealthyRoute`
+ *    pin uses `ollama-cloud/glm-5.1` (an unhidden provider), so a naive
+ *    inline scan still returns the same thing and the pin passes
+ *    cleanly. Pin A constructs a single entry whose `provider_order[0]`
+ *    is a HIDDEN provider (`cerebras`) at priority 1 and whose
+ *    `provider_order[1]` is a visible `opencode/…-free` route at
+ *    priority 2, with empty health maps. The delegation path filters
+ *    cerebras out and returns opencode; a naive inline scan returns
+ *    cerebras. The assertion `result?.provider === "opencode"` fires
+ *    exactly on this regression.
+ *
+ * 2. **Return shape is exactly `{ provider, model }` — `priority` is
+ *    stripped.** The function's return type is `{ provider: string;
+ *    model: string } | null`, not `ProviderRoute | null`. The body
+ *    constructs a fresh object literal `{ provider: firstHealthyRoute.
+ *    provider, model: firstHealthyRoute.model }` specifically to drop
+ *    `priority` (and any other structural fields like `status`) before
+ *    handing the result to downstream consumers. A refactor that
+ *    shortcut-returns `firstHealthyRoute` directly — which TypeScript's
+ *    structural typing accepts because `ProviderRoute` is
+ *    assignable to the narrower return type — silently leaks
+ *    `priority` as an extra runtime property. Any consumer that
+ *    serializes the result to JSON (the agent-facing tool output path
+ *    does) or that uses `Object.keys` / structural cloning would then
+ *    see a `priority` field that callers cannot meaningfully interpret
+ *    out of context. Pin B asserts `Object.keys(result).sort()` deep
+ *    equals exactly `["model", "provider"]` so any raw-return sabotage
+ *    fires immediately.
+ *
+ * 3. **Outer `for…of` preserves `candidateEntries` array order
+ *    (first-match-wins).** The caller passes a pre-filtered and
+ *    pre-ordered array — `rolePreferredEntries` or the tier-widened
+ *    variant — whose order reflects the registry's authored sequence
+ *    (registry line order, then role filter, then tier filter). The
+ *    outer loop MUST consume that order so the first healthy entry
+ *    wins. A silent `.reverse()`, a `.sort()` on some incidental field,
+ *    or switching to a reverse iterator would change which entry's
+ *    route gets returned when multiple candidates are healthy. The
+ *    existing `whenFirstEntryHasHealthyRoute` pin uses only two
+ *    entries, so pin-level reversal tests are symmetric enough that a
+ *    more aggressive reordering (e.g. sorting by entry `id` or by
+ *    capability tier) might still happen to return the same entry by
+ *    luck. Pin C uses THREE healthy candidates where the tier-sort
+ *    order and the array-order genuinely diverge (all frontier, all
+ *    healthy) and asserts the strict array-order winner, so any order
+ *    perturbation beyond the tight symmetry assumed by the existing
+ *    pins is caught.
  */
 export function findFirstHealthyVisibleRoute(
   candidateEntries: ModelRegistryEntry[],
