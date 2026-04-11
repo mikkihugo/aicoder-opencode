@@ -33,6 +33,7 @@ import {
   PROVIDER_NO_CREDIT_DURATION_MS,
   PROVIDER_KEY_DEAD_DURATION_MS,
   shouldClassifyAsModelNotFound,
+  bindSessionHangState,
   clearSessionHangState,
   readAndClearSessionHangState,
   countHealthyVisibleRoutes,
@@ -682,6 +683,100 @@ test("clearSessionHangState_whenSessionTerminates_dropsFromAllThreeSessionMaps",
   assert.equal(sessionStartTimeMap.has("session-b"), true);
   assert.equal(sessionActiveProviderMap.has("session-b"), true);
   assert.equal(sessionActiveModelMap.has("session-b"), true);
+});
+
+test("bindSessionHangState_whenCalled_populatesAllThreeMapsAtomically", () => {
+  // M79 symmetry pin: the three-map write triplet must stay in sync.
+  // Dropping any one write silently desynchronises the hang detector —
+  // this pin catches a missing provider, model, OR start-time write
+  // by asserting all three maps contain the expected entry afterward.
+  const sessionStartTimeMap = new Map<string, number>();
+  const sessionActiveProviderMap = new Map<string, string>();
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >();
+
+  bindSessionHangState(
+    "s1",
+    "iflowcn",
+    { id: "qwen3-coder-plus", providerID: "iflowcn" },
+    5000,
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  assert.equal(sessionStartTimeMap.get("s1"), 5000);
+  assert.equal(sessionActiveProviderMap.get("s1"), "iflowcn");
+  assert.deepEqual(sessionActiveModelMap.get("s1"), {
+    id: "qwen3-coder-plus",
+    providerID: "iflowcn",
+  });
+});
+
+test("bindSessionHangState_whenReBoundForSameSession_overwritesEveryMap", () => {
+  // M79 second pin: re-binding the same session (e.g. a turn restart
+  // through chat.params) must overwrite every entry in all three maps,
+  // not skip fields that are already set. Catches a "write only if
+  // absent" drift where one of the three writes grows a `.has()` guard.
+  const sessionStartTimeMap = new Map<string, number>([["s1", 1000]]);
+  const sessionActiveProviderMap = new Map<string, string>([["s1", "openrouter"]]);
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >([["s1", { id: "old-model", providerID: "openrouter" }]]);
+
+  bindSessionHangState(
+    "s1",
+    "ollama-cloud",
+    { id: "glm-4.7", providerID: "ollama-cloud" },
+    9000,
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  assert.equal(sessionStartTimeMap.get("s1"), 9000);
+  assert.equal(sessionActiveProviderMap.get("s1"), "ollama-cloud");
+  assert.deepEqual(sessionActiveModelMap.get("s1"), {
+    id: "glm-4.7",
+    providerID: "ollama-cloud",
+  });
+});
+
+test("bindSessionHangState_whenCalledForSecondSession_leavesFirstSessionIntact", () => {
+  // M79 third pin: session isolation. Binding session B must not
+  // touch session A's entries in any of the three maps. Symmetric
+  // to the `clearSessionHangState_*` isolation pin so the write-side
+  // and read-side helpers both pin the same invariant.
+  const sessionStartTimeMap = new Map<string, number>([["s1", 1000]]);
+  const sessionActiveProviderMap = new Map<string, string>([["s1", "iflowcn"]]);
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >([["s1", { id: "qwen3-coder-plus", providerID: "iflowcn" }]]);
+
+  bindSessionHangState(
+    "s2",
+    "ollama-cloud",
+    { id: "glm-4.7", providerID: "ollama-cloud" },
+    2000,
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  // s1 fully intact.
+  assert.equal(sessionStartTimeMap.get("s1"), 1000);
+  assert.equal(sessionActiveProviderMap.get("s1"), "iflowcn");
+  assert.deepEqual(sessionActiveModelMap.get("s1"), {
+    id: "qwen3-coder-plus",
+    providerID: "iflowcn",
+  });
+  // s2 is fully bound.
+  assert.equal(sessionStartTimeMap.get("s2"), 2000);
+  assert.equal(sessionActiveProviderMap.get("s2"), "ollama-cloud");
 });
 
 test("readAndClearSessionHangState_whenFullyBound_returnsTupleAndClearsMaps", () => {

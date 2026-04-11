@@ -1737,6 +1737,56 @@ export function clearSessionHangState(
 }
 
 /**
+ * Populate all three per-session hang-detection maps for a starting turn.
+ *
+ * Write-side counterpart to `readAndClearSessionHangState` (M78) and
+ * `clearSessionHangState`: the three helpers form a complete triplet
+ * for every lifecycle operation on the session hang state, so no call
+ * site needs to know which three maps are involved. Prior to this
+ * helper the `chat.params` hook inlined three `Map.set` calls at its
+ * top — a future edit that added a fourth map (e.g. per-session tool
+ * budget, per-session fallback depth) or dropped one of the three
+ * would silently desynchronise the triplet. The hang detector
+ * short-circuits on missing `sessionStartTimeMap` entries, so dropping
+ * just that write would disarm the hang timer without any visible
+ * error. Dropping the provider or model write would leave the hang
+ * timer to fire with `undefined` bindings, which
+ * `finalizeHungSessionState` handles but which produces a silently
+ * unrecorded timeout penalty.
+ *
+ * Encoding the triplet inside a single helper makes "three maps move
+ * together" a property of the function body instead of a property
+ * every call site must preserve by hand. The `chat.params` hook is
+ * the only current writer, but any future caller (e.g. a session
+ * restart hook) can route through this helper and inherit the
+ * invariant for free.
+ *
+ * Args:
+ *   sessionID: The turn's session identifier.
+ *   providerID: The provider id from `input.provider.info.id`.
+ *   model: The `{id, providerID}` tuple from `input.model`.
+ *   now: Current epoch millis for the start-time map — injected for
+ *     deterministic testing instead of reading `Date.now()` inside
+ *     the helper.
+ *   sessionStartTimeMap / sessionActiveProviderMap / sessionActiveModelMap:
+ *     The three per-session hang-detection maps — all three mutated
+ *     in-place.
+ */
+export function bindSessionHangState(
+  sessionID: string,
+  providerID: string,
+  model: { id: string; providerID: string },
+  now: number,
+  sessionStartTimeMap: Map<string, number>,
+  sessionActiveProviderMap: Map<string, string>,
+  sessionActiveModelMap: Map<string, { id: string; providerID: string }>,
+): void {
+  sessionActiveProviderMap.set(sessionID, providerID);
+  sessionActiveModelMap.set(sessionID, model);
+  sessionStartTimeMap.set(sessionID, now);
+}
+
+/**
  * Snapshot the per-session provider/model tuple AND clear all three
  * hang-detection maps in a single atomic step.
  *
@@ -4053,12 +4103,23 @@ export const ModelRegistryPlugin: Plugin = async () => {
 
     async "chat.params"(input, output) {
       try {
-        sessionActiveProviderMap.set(input.sessionID, input.provider.info.id);
-        sessionActiveModelMap.set(input.sessionID, {
-          id: input.model.id,
-          providerID: input.model.providerID,
-        });
-        sessionStartTimeMap.set(input.sessionID, Date.now());
+        // M79: bindSessionHangState pins the three-map write triplet as
+        // the write-side sibling of readAndClearSessionHangState (M78).
+        // A future edit that drops any of the three writes would
+        // silently desynchronise the hang detector — dropping the
+        // start-time write would disarm it entirely (the finalizer
+        // short-circuits on missing start-time), dropping the model or
+        // provider write would leave the detector firing with undefined
+        // bindings and silently losing the timeout penalty.
+        bindSessionHangState(
+          input.sessionID,
+          input.provider.info.id,
+          { id: input.model.id, providerID: input.model.providerID },
+          Date.now(),
+          sessionStartTimeMap,
+          sessionActiveProviderMap,
+          sessionActiveModelMap,
+        );
 
         const modelRegistry = await loadModelRegistry(CONTROL_PLANE_ROOT_DIRECTORY);
         const modelRegistryEntry = findRegistryEntryByModel(modelRegistry.models, {
