@@ -254,17 +254,29 @@ function isFallbackBlocked(providerID: string, modelID: string): boolean {
   );
 }
 
-function findCuratedFallbackRoute(
+export function findCuratedFallbackRoute(
   modelRegistryEntry: ModelRegistryEntry,
   blockedProviderID: string,
   providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
   now: number,
 ): string {
-  const allowedRoute = modelRegistryEntry.provider_order.find(
-    (providerRoute) =>
-      providerRoute.provider !== blockedProviderID &&
-      !isFallbackBlocked(providerRoute.provider, providerRoute.model) &&
-      isProviderHealthy(providerHealthMap, providerRoute.provider, now),
+  // Only consider routes the rest of the plugin would actually reach.
+  // Hidden/paid providers (togetherai, xai, cerebras, cloudflare-ai-gateway,
+  // deepseek, github-copilot, minimax-cn*, non-:free openrouter routes like
+  // openrouter/xiaomi/mimo-v2-pro) are curated out at every decision path
+  // — returning them here would poison the agent-visible "Curated fallbacks"
+  // system-prompt section with routes the agent cannot use.
+  const visibleRoutes = filterVisibleProviderRoutes(modelRegistryEntry.provider_order);
+  const allowedRoute = visibleRoutes.find(
+    (providerRoute) => {
+      if (providerRoute.provider === blockedProviderID) return false;
+      if (isFallbackBlocked(providerRoute.provider, providerRoute.model)) return false;
+      if (!isProviderHealthy(providerHealthMap, providerRoute.provider, now)) return false;
+      const routeHealth = modelRouteHealthMap.get(providerRoute.model);
+      if (routeHealth && routeHealth.until > now) return false;
+      return true;
+    },
   );
 
   if (!allowedRoute) {
@@ -303,6 +315,7 @@ function healthStateLabel(state: ProviderHealthState): string {
 function buildProviderHealthSystemPrompt(
   modelRegistryEntries: ModelRegistryEntry[],
   providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
   now: number,
 ): string | null {
   const activePenalties = Array.from(providerHealthMap.entries()).filter(
@@ -324,7 +337,13 @@ function buildProviderHealthSystemPrompt(
     );
 
     const fallbackLines = affectedEntries.map((entry) => {
-      const fallback = findCuratedFallbackRoute(entry, providerID, providerHealthMap, now);
+      const fallback = findCuratedFallbackRoute(
+        entry,
+        providerID,
+        providerHealthMap,
+        modelRouteHealthMap,
+        now,
+      );
       return `- ${entry.id} → ${fallback}`;
     });
 
@@ -1332,6 +1351,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
         const providerHealthPrompt = buildProviderHealthSystemPrompt(
           modelRegistry.models,
           providerHealthMap,
+          modelRouteHealthMap,
           now,
         );
         if (providerHealthPrompt) {

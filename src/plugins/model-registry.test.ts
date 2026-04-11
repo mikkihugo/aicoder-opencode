@@ -6,6 +6,7 @@ import test from "node:test";
 
 import type { ModelRegistryEntry } from "../model-registry.js";
 import {
+  findCuratedFallbackRoute,
   inferTaskComplexity,
   recommendTaskModelRoute,
 } from "./model-registry.js";
@@ -414,4 +415,118 @@ test("recommendTaskModelRoute_whenBestEntryPrimaryRouteIsHiddenOrUnhealthy_falls
   );
 
   assert.equal(decision.selectedModelRoute, "opencode-go/qwen3-coder-plus");
+});
+
+test("findCuratedFallbackRoute_whenNextRouteIsHiddenPaidProvider_skipsToVisibleRoute", () => {
+  // Regression: buildProviderHealthSystemPrompt emits a "Curated fallbacks"
+  // block that tells the agent which route to use when provider X is
+  // backed-off. That block used to call findCuratedFallbackRoute with
+  // only provider-level health and NO visibility filter, so it would
+  // happily suggest `openrouter/xiaomi/mimo-v2-pro` (a paid, non-:free
+  // openrouter route that filterVisibleProviderRoutes hides everywhere
+  // else in the plugin). The agent would then try to use a route the
+  // rest of the curation layer actively blocks.
+  //
+  // This mirrors the real config/models.jsonc shape for the mimo-v2-pro
+  // entry at the time of writing: primary xiaomi-token-plan-ams, then
+  // minimax, then the paid openrouter route, then opencode-go visible
+  // fallback.
+  const entry: ModelRegistryEntry = {
+    id: "mimo-v2-pro",
+    enabled: true,
+    description: "mimo-v2-pro description",
+    capability_tier: "frontier",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: ["long_context"],
+    not_for: [],
+    default_roles: ["long_context_reader"],
+    provider_order: [
+      { provider: "xiaomi-token-plan-ams", model: "xiaomi-token-plan-ams/mimo-v2-pro", priority: 1 },
+      { provider: "minimax", model: "minimax/MiniMax-M2.7", priority: 2 },
+      { provider: "openrouter", model: "openrouter/xiaomi/mimo-v2-pro", priority: 3 },
+      { provider: "opencode-go", model: "opencode-go/mimo-v2-pro", priority: 4 },
+    ],
+    notes: [],
+  };
+
+  const now = Date.now();
+  const providerHealthMap = new Map([
+    [
+      "xiaomi-token-plan-ams",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+    [
+      "minimax",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  const fallback = findCuratedFallbackRoute(
+    entry,
+    "xiaomi-token-plan-ams",
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+
+  assert.equal(fallback, "opencode-go/mimo-v2-pro");
+  // Pin the negative: the paid openrouter route must NEVER be surfaced
+  // as a curated fallback — it's hidden everywhere else in the plugin.
+  assert.notEqual(fallback, "openrouter/xiaomi/mimo-v2-pro");
+});
+
+test("findCuratedFallbackRoute_whenRouteIsMarkedUnhealthyAtRouteLevel_skipsIt", () => {
+  // Regression: findCuratedFallbackRoute used to ignore modelRouteHealthMap
+  // entirely. A route penalized at the route level (e.g. model_not_found
+  // for a specific provider/model pair, while the provider as a whole is
+  // still healthy for other models) would still be emitted as the curated
+  // fallback — sending the agent back to a route we just proved dead.
+  const entry: ModelRegistryEntry = {
+    id: "example",
+    enabled: true,
+    description: "example",
+    capability_tier: "strong",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: [],
+    not_for: [],
+    default_roles: ["implementation_worker"],
+    provider_order: [
+      { provider: "iflowcn", model: "iflowcn/some-model", priority: 1 },
+      { provider: "opencode-go", model: "opencode-go/some-model-dead", priority: 2 },
+      { provider: "opencode-go", model: "opencode-go/some-model-live", priority: 3 },
+    ],
+    notes: [],
+  };
+
+  const now = Date.now();
+  const providerHealthMap = new Map([
+    [
+      "iflowcn",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  const modelRouteHealthMap = new Map([
+    [
+      "opencode-go/some-model-dead",
+      { state: "model_not_found" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  const fallback = findCuratedFallbackRoute(
+    entry,
+    "iflowcn",
+    providerHealthMap,
+    modelRouteHealthMap,
+    now,
+  );
+
+  assert.equal(fallback, "opencode-go/some-model-live");
 });
