@@ -2,7 +2,7 @@ import type { Event } from "@opencode-ai/sdk";
 import { type Plugin, tool } from "@opencode-ai/plugin";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename, unlink } from "node:fs/promises";
 
 import {
   buildModelRegistryPayload,
@@ -144,7 +144,23 @@ async function persistProviderHealth(
       }
     }
 
-    await writeFile(PROVIDER_HEALTH_STATE_FILE, JSON.stringify(obj, null, 2), "utf8");
+    // Atomic write: tmp file + rename prevents concurrent-writer corruption
+    // when multiple opencode services (aicoder-opencode, dr-repo, letta-workspace)
+    // share this state file. Without this, a shorter write layered over a longer
+    // prior write leaves stale tail bytes and produces invalid JSON on disk.
+    const temporaryFilePath = `${PROVIDER_HEALTH_STATE_FILE}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+    try {
+      await writeFile(temporaryFilePath, JSON.stringify(obj, null, 2), "utf8");
+      await rename(temporaryFilePath, PROVIDER_HEALTH_STATE_FILE);
+    } catch (renameError) {
+      // Best-effort cleanup of the tmp file on failure.
+      try {
+        await unlink(temporaryFilePath);
+      } catch {
+        // Ignore — tmp file may not exist.
+      }
+      throw renameError;
+    }
   } catch {
     // Non-fatal — in-memory state still works.
   }

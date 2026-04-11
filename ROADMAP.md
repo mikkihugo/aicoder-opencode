@@ -146,6 +146,16 @@ Completion Notes (2026-04-11):
 - Verify that overlay shims in `targets/*/overlay/.opencode/plugins/` are in sync with `src/plugins/`
 - Add a CI check or validation command
 
+### M11: Atomic write for `provider-health.json` `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `.opencode/state/plugin/provider-health.json` contained stale tail bytes past the valid JSON terminator (`{...retryCount": 1\n  }\n}yCount": 1\n  }\n}`). Classic concurrent-writer race: a shorter later write layered over a longer prior write leaked tail bytes — Node's `fs.writeFile` opens with `O_TRUNC` but multiple processes racing on the same path can still interleave.
+- **Root cause**: three services (`aicoder-opencode`, `dr-repo`, `letta-workspace`) share `~/code/aicoder-opencode/.opencode/state/plugin/provider-health.json` and persist concurrently via `persistProviderHealth()` in `src/plugins/model-registry.ts`, using plain `writeFile`.
+- **Fix**: `persistProviderHealth()` now writes to `<target>.<pid>.<rand>.tmp` and `rename()`s into place — atomic on the same filesystem, last-write-wins, no partial reads. Best-effort tmp cleanup on failure. Corrupted state file was also cleaned in-place (recovered one valid entry: `ollama-cloud/glm-4.7` quota backoff).
+- **Verification**: `npx tsc -p tsconfig.json --noEmit` clean, `node --import tsx --test 'src/**/*.test.ts'` 118/118 pass.
+- **No new test**: `persistProviderHealth()` is module-private and the state file path is hardcoded, so a direct concurrency test would require a refactor (DI on the path) that exceeds this slice. Race-reproduction tests are inherently flaky. Pattern is standard tmp+rename — relying on existing coverage for the health-recording paths that call through `persistProviderHealth()`.
+- **Files**: `src/plugins/model-registry.ts` (persist function + import), `.opencode/state/plugin/provider-health.json` (cleaned).
+
 ---
 
 ## Completed (archive)
