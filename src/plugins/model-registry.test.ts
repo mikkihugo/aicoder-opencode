@@ -54,6 +54,7 @@ import {
   computeProviderHealthUpdate,
   computeRegistryEntryHealthReport,
   expireHealthMaps,
+  filterEnabledEntriesByOptionalRole,
   filterProviderModelsByRouteHealth,
   findCuratedFallbackRoute,
   formatPenaltySectionPrefix,
@@ -5960,4 +5961,72 @@ test("renderAvailableModelsSystemPromptBody_whenMapIsEmpty_returnsNullNotEmptySt
   const rendered = renderAvailableModelsSystemPromptBody(new Map());
 
   assert.equal(rendered, null);
+});
+
+// M93 pin A — enabled-gate: a disabled entry with an otherwise-matching
+// role must never survive. Uses a concrete role (not null) so sabotages
+// 2 and 3 can't fire this pin — they only affect the role predicate.
+test("filterEnabledEntriesByOptionalRole_whenDisabledEntryShareRoleWithEnabled_dropsDisabled", () => {
+  const enabledCodingEntry = buildModelRegistryEntry("m-enabled", ["coding"], "standard", [
+    { provider: "opencode", model: "opencode/free-a", priority: 1 },
+  ]);
+  const disabledCodingEntry: ModelRegistryEntry = {
+    ...buildModelRegistryEntry("m-disabled", ["coding"], "standard", [
+      { provider: "opencode", model: "opencode/free-b", priority: 1 },
+    ]),
+    enabled: false,
+  };
+
+  const result = filterEnabledEntriesByOptionalRole(
+    [enabledCodingEntry, disabledCodingEntry],
+    "coding",
+  );
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.id, "m-enabled");
+});
+
+// M93 pin B — null-role passthrough: when `role === null`, every enabled
+// entry survives regardless of its own `default_roles`. Uses two enabled
+// entries with disjoint roles so dropping the `role &&` short-circuit
+// (which would turn this into `.includes(null)` false for both) empties
+// the result. Pin A uses a concrete role so it cannot fire here; pin C
+// also uses a concrete role.
+test("filterEnabledEntriesByOptionalRole_whenRoleIsNull_passesAllEnabledEntriesRegardlessOfRoles", () => {
+  const codingEntry = buildModelRegistryEntry("m-coding", ["coding"], "standard", [
+    { provider: "opencode", model: "opencode/free-c", priority: 1 },
+  ]);
+  const architectEntry = buildModelRegistryEntry("m-architect", ["architect"], "strong", [
+    { provider: "opencode", model: "opencode/free-d", priority: 1 },
+  ]);
+
+  const result = filterEnabledEntriesByOptionalRole(
+    [codingEntry, architectEntry],
+    null,
+  );
+
+  assert.equal(result.length, 2);
+});
+
+// M93 pin C — role-membership exactness: when a concrete role is passed,
+// only entries whose `default_roles` contains that exact string survive.
+// Uses two enabled entries with disjoint roles so dropping the
+// `.includes(role)` check (always-pass) would lift the architect entry
+// into the coding result set. Pin A also uses concrete role but its
+// assertion partitions on disabled-vs-enabled; pin B uses null role.
+test("filterEnabledEntriesByOptionalRole_whenRoleIsCoding_excludesArchitectEntry", () => {
+  const codingEntry = buildModelRegistryEntry("m-coding", ["coding"], "standard", [
+    { provider: "opencode", model: "opencode/free-e", priority: 1 },
+  ]);
+  const architectEntry = buildModelRegistryEntry("m-architect", ["architect"], "strong", [
+    { provider: "opencode", model: "opencode/free-f", priority: 1 },
+  ]);
+
+  const result = filterEnabledEntriesByOptionalRole(
+    [codingEntry, architectEntry],
+    "coding",
+  );
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.id, "m-coding");
 });

@@ -4277,6 +4277,67 @@ async function initializeProviderHealthState(
  *   A decision object when a healthy preferred route is found, or `null`
  *   when no preference matches any healthy route in the candidate set.
  */
+/**
+ * Filter registry entries down to those that are (a) enabled AND (b) match
+ * an optional role — the two-predicate intersection that three call sites
+ * in the routing path all need as their first-stage narrowing pass.
+ *
+ * This helper exists because three sites (`recommendTaskModelRoute`'s
+ * `roleMatchedEntries`, `recommendTaskModelRoute`'s `rolePreferredEntries`,
+ * and `selectBestModelForRoleAndTask`'s candidate filter) each inlined the
+ * same two-predicate open-coded pattern before layering on their own
+ * site-specific extra filters (capability tier for the first, nothing for
+ * the second, task/capability tier for the third). Three drift surfaces
+ * lived as conventions across those inlined copies rather than as
+ * single-site properties of one helper:
+ *
+ *  1. **Enabled-gate semantics.** Every routing decision must exclude
+ *     `entry.enabled === false` entries — a globally-disabled model must
+ *     never be handed to the router as a candidate, even if its role and
+ *     tier match. A refactor that drops the `!entry.enabled` short-circuit
+ *     in ONE site silently resurrects disabled models at that site while
+ *     the other sites still filter them out, producing an inconsistent
+ *     decision surface where a model is "available" to one path and
+ *     "unavailable" to another.
+ *  2. **Null-role passthrough.** When the caller passes `role === null`
+ *     (agent metadata declared no `routing_role`), the filter MUST allow
+ *     every role through — the short-circuit `if (role && ...)` is the
+ *     idiom every site used, but a refactor that flips it to
+ *     `if (!entry.default_roles.includes(role))` (dropping the null guard)
+ *     turns `Array.prototype.includes(null)` into a universal false and
+ *     silently empties the candidate set for every null-role caller. The
+ *     failure mode is "every null-role task throws 'no healthy route',"
+ *     which looks like an outage even though HEAD is healthy.
+ *  3. **Role-membership exactness.** When the caller passes a concrete
+ *     role, only entries whose `default_roles` array contains that exact
+ *     string survive. A refactor that weakens the check (substring match,
+ *     case-insensitive, `.some(r => r.startsWith(role))`) silently lets
+ *     tangentially-related entries into the candidate set — an entry
+ *     tagged `["architect_reviewer"]` would slip through a `role === "architect"`
+ *     filter under substring matching.
+ *
+ * The helper returns a shallow copy (via `.filter`) so callers can safely
+ * chain `.sort()` / `.filter()` without mutating the input array.
+ *
+ * Args:
+ *   modelRegistryEntries: All registry entries. Walked once, no mutation.
+ *   role: Canonical role name or `null`. When `null`, the role predicate
+ *     is skipped entirely (every enabled entry survives the role stage).
+ *
+ * Returns:
+ *   A new array of entries satisfying both predicates, in input order.
+ */
+export function filterEnabledEntriesByOptionalRole(
+  modelRegistryEntries: ModelRegistryEntry[],
+  role: string | null,
+): ModelRegistryEntry[] {
+  return modelRegistryEntries.filter((entry) => {
+    if (!entry.enabled) return false;
+    if (role && !entry.default_roles.includes(role)) return false;
+    return true;
+  });
+}
+
 export function findPreferredHealthyRoute(
   preferredModels: string[],
   candidateEntries: ModelRegistryEntry[],
@@ -4425,13 +4486,15 @@ async function recommendTaskModelRoute(
   };
   const allowedTiers = tierMap[complexity];
 
-  const roleMatchedEntries = modelRegistryEntries.filter((entry) => {
-    if (!entry.enabled) return false;
-    if (role && !entry.default_roles.includes(role)) return false;
-
-    // Apply capability tier filter based on complexity
-    return allowedTiers.includes(entry.capability_tier);
-  });
+  // M93: delegate the enabled + optional-role two-predicate pass to
+  // `filterEnabledEntriesByOptionalRole` so this site and
+  // `rolePreferredEntries` below share one source of truth for the first
+  // two stages; the capability-tier layer stays here because it's unique
+  // to this call site.
+  const roleMatchedEntries = filterEnabledEntriesByOptionalRole(
+    modelRegistryEntries,
+    role,
+  ).filter((entry) => allowedTiers.includes(entry.capability_tier));
 
   // When complexity allows multiple tiers, sort to prefer higher tiers first
   if (allowedTiers.length > 1) {
@@ -4450,11 +4513,13 @@ async function recommendTaskModelRoute(
   // MiniMax-M2.5 route instead of being silently dropped by the small-
   // complexity allowedTiers filter. See `findPreferredHealthyRoute`
   // docstring for the full reachability analysis.
-  const rolePreferredEntries = modelRegistryEntries.filter((entry) => {
-    if (!entry.enabled) return false;
-    if (role && !entry.default_roles.includes(role)) return false;
-    return true;
-  });
+  // M93: same two-predicate pass as `roleMatchedEntries` above but
+  // without the capability-tier layer — both sites share one source of
+  // truth via `filterEnabledEntriesByOptionalRole`.
+  const rolePreferredEntries = filterEnabledEntriesByOptionalRole(
+    modelRegistryEntries,
+    role,
+  );
 
   const preferredDecision = findPreferredHealthyRoute(
     preferredModels,
