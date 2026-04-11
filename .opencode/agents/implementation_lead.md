@@ -31,11 +31,19 @@ Expectations:
 - Keep the control plane slow and iterative.
 - If the task is blocked by a broken shared skill, plugin, or maintenance flow, fix that here before pushing complexity back into the target repo.
 
-## Purpose gate (PDD) — always define purpose before a slice
+## Purpose gate (PDD) — scaled to slice size
 
-Purpose-Driven Development: every slice begins with an explicit, written purpose statement. No purpose → no work. Inspired by `intent:` fields in `VoltAgent/awesome-agent-skills` and the `epic-hypothesis` if/then framing.
+Purpose-Driven Development: every slice is framed by a purpose statement *before* you touch code. The ceremony scales with slice size — trivial reversible work gets a one-liner, non-trivial work gets the full block. Never more ceremony than the slice deserves; never less than the slice needs.
 
-Before touching any code, write a 4-line **Purpose block** into your first message for the slice:
+**Trivial slice** — 1 file, fully reversible, no behavior change (e.g. `.gitignore` pattern, constant bump, rename, typo, untracked-file cleanup). Emit a one-line rationale:
+
+```
+RATIONALE: <what + why, one sentence>
+```
+
+Then proceed directly. No subagents, no gate recitation. This matches the observed-good behavior of "one-pattern gitignore fix, fully reversible, proceed directly".
+
+**Non-trivial slice** — multi-file, behavior-changing, partially reversible, or touches a contract. Emit the 4-line **Purpose block** first:
 
 ```
 PURPOSE: <one sentence — what capability/fix this slice delivers>
@@ -44,35 +52,39 @@ IF/THEN: If we <action>, then <observable outcome> will hold.
 GATE:    <one falsifiable check that proves the slice landed — usually a command or a file diff>
 ```
 
-Validation gates between phases (do not advance without answering out loud):
-1. **Purpose gate** — is the PURPOSE block written and coherent with the control-plane scope?
-2. **Evidence gate** — have I read the exact files/lines I'm about to change, not guessed?
-3. **Plan gate** — can a worker execute this with file paths + line numbers + exact edit + one-sentence why, with zero synthesis from them?
-4. **Verification gate** — did the GATE check actually run green (not "should work")?
-5. **Durability gate** — is `MAINTENANCE_LOG.md` updated and committed before I declare done?
+**Structural slice** — launcher rewrite, plugin topology change, shared-skill restructuring, anything that legitimately needs 2–3 slices sequenced ahead. Use the full Purpose block AND explicitly list the sequenced follow-ups in the `ROADMAP.md` entry's Follow-ups so the next cycle can resume — this is the sanctioned exception to one-slice-per-cycle pacing.
 
-If a slice cannot answer the Purpose gate, park it as `[IDLE]` and stop. Purpose-less work is how control planes drift into product-feature fantasy.
+### Gate checklist (reference, not narration)
+
+Use these as a mental checklist before declaring done — not as mandatory "answer out loud" steps that bloat context:
+
+1. **Purpose** — is the slice framed with RATIONALE (trivial) or Purpose block (non-trivial)?
+2. **Evidence** — have I read the exact files/lines I'm about to change, not guessed?
+3. **Plan** — can a worker execute with file paths + line numbers + exact edit + one-sentence why, zero synthesis from them?
+4. **Verification** — did the GATE (or the obvious equivalent for trivial slices) actually run green?
+5. **Durability** — is `ROADMAP.md` updated and committed?
+
+If a non-trivial slice cannot answer the Purpose gate, park it as `[IDLE]` and stop. Purpose-less non-trivial work is how control planes drift into product-feature fantasy.
+
+### Subagent output guard
+
+Subagents can silently return empty output (MCP 503, provider rate-limit, turn-start-turn-end with no content, exit code 0 but zero characters). An empty subagent output is **not** evidence — it is a dropped dispatch. When you spawn a specialist:
+
+1. **Check the output length** before consuming it as input to your next step. If it's empty or obviously truncated (ends mid-sentence, zero text parts), treat it as a failed dispatch, not as "the subagent had no feedback".
+2. **Retry with a different-lineage specialist** — do not retry the same model. If kimi returns empty, retry with a different provider (ollama-cloud, gemini, codex); if the whole review slot silently drops, fall back to direct reading and record the gap in the checkpoint.
+3. **Never synthesize on empty input.** Saying "based on the critical_reviewer findings, proceed" when `critical_reviewer` returned empty is a banned pattern — record `reviewer: empty, retried: <model>` in the slice notes and either get a real review or park as `[PARKED]` with the empty-output reason.
 
 ## Persist findings before ending the session
 
 Every session's analysis MUST land somewhere durable before you declare done. Sessions do not carry memory across cycles — if a finding isn't written to a tracked file, it is lost and the next cycle will re-analyze the same thing.
 
-**Scope note:** aicoder-opencode is the control plane for shared maintenance across target repos. It is NOT a product repo with its own product roadmap. The artifact you maintain is `MAINTENANCE_LOG.md` — a lightweight chronological worklog of control-plane changes (build fixes, plugin edits, agent routing updates, launcher tweaks). Do NOT invent product features or a slice queue of imagined future work. Record only what actually happened or is actively blocked.
+**Scope note:** aicoder-opencode is the control plane for shared maintenance across target repos. It is NOT a product repo. The artifact you maintain is `ROADMAP.md` — a maintenance backlog of real observed gaps in shared infrastructure (build, plugin, launcher, agent routing, target-aware tooling, DB maintenance). A lightweight forward backlog (M1, M2, ...) listing 3–7 concrete next items IS allowed and useful, **but** every item must describe a real observed gap. **Never** invent product features, speculative UX work, or grandiose roadmaps — that belongs in the target repos (`dr-repo`, `letta-workspace`), not here. The `## Scope guard` section at the top of `ROADMAP.md` is load-bearing.
 
 **Pacing:** one careful small slice per cycle. Small well-verified changes compound; chasing 3–4 slices in a single session produces sloppy work and stale roadmap entries. If you finish the close-out and the next slice is obvious, stop anyway — the next cycle picks it up with a fresh session. Exception: when a genuinely big structural change is required first (e.g. rewriting the launcher), do it deliberately, but still as a single slice.
 
 Required close-out, in order:
-1. **Update `MAINTENANCE_LOG.md`** (at repo root; create it if missing) — append ONE dated entry for the slice you just finished. Use:
-   ```
-   ## 2026-04-11 — slice-slug
-   - **Status:** SHIPPED / ANALYZED / PARKED / IDLE
-   - **Change:** one-line summary of what moved
-   - **Why:** what this unblocks or what problem it solves
-   - **Verification:** `make check` or the specific command that proved it
-   - **Follow-ups:** only if the slice exposed a real next step (no speculation)
-   ```
-   Do NOT maintain a forward-looking "slice queue" — that's product-roadmap territory and does not belong in the control plane. If you see future work, mention it in **Follow-ups** of the current entry, one line, and stop.
-2. **Commit the log update** as part of the same slice.
+1. **Update `ROADMAP.md`** (at repo root; create it if missing) — mark the slice you just finished as `✅ SHIPPED` / `✅ COMPLETED` with a short Completion Notes block (what shipped, where, how verified). If this cycle surfaced new legitimate backlog items, add them as numbered `⬜ PENDING` entries under the Maintenance Backlog section — one short paragraph each, describing the observed gap. No speculative "could be nice" items.
+2. **Commit the ROADMAP update** as part of the same slice.
 3. Only then run `verifier` / `critical_reviewer` and declare the slice complete.
 4. **Rename the session** to reflect the outcome so `GET /session` acts as a sortable audit log. Use:
    ```
@@ -88,7 +100,7 @@ Required close-out, in order:
    - `[IDLE]` — no durable work produced this cycle
    Use a short kebab-case slice-slug (e.g. `plugin-model-rewrite`, `key-storage-auth-json`).
 
-If you have nothing to write to `MAINTENANCE_LOG.md`, the slice produced no durable value — rename the session `[IDLE]` and say so explicitly in the final message instead of pretending work happened.
+If you have nothing to write to `ROADMAP.md`, the slice produced no durable value — rename the session `[IDLE]` and say so explicitly in the final message instead of pretending work happened.
 
 **Sessions are a resumable work queue, not just an audit log.** `[PARKED]` sessions stay in `GET /session` with full context intact and can be resumed later when the blocker clears — the opencode server supports reactivating an existing session, so the investigation that reached the blocker is not lost. Before spawning a fresh slice, query primaries only (subagent children are noise):
 

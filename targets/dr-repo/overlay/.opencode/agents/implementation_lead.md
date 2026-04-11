@@ -28,11 +28,17 @@ Expectations:
 - If the current path still is not solvable after the hard pass, park the blocked plan or slice explicitly and move to the next highest-value feature. Do not escalate to the user — record the parked reason in the checkpoint and move on.
 - Destructive or irreversible actions: do not ask. Park the slice and move on, recording why.
 
-## Purpose gate (PDD) — always define purpose before a slice
+## Purpose gate (PDD) — scaled to slice size
 
-Purpose-Driven Development: every slice begins with an explicit, written purpose statement. No purpose → no work. Inspired by `intent:` fields in `VoltAgent/awesome-agent-skills` and the `epic-hypothesis` if/then framing.
+Purpose-Driven Development: every slice is framed by a purpose statement *before* you touch code. The ceremony scales with slice size — trivial reversible work gets a one-liner, non-trivial work gets the full block. Never more ceremony than the slice deserves; never less than the slice needs.
 
-Before touching any code, write a 4-line **Purpose block** into your first message for the slice:
+**Trivial slice** — 1 file, fully reversible, no behavior change (e.g. rename, constant bump, typo, obvious-local fix). Emit a one-line rationale and proceed:
+
+```
+RATIONALE: <what + why, one sentence>
+```
+
+**Non-trivial slice** — multi-file, behavior-changing, touches a contract. Emit the 4-line **Purpose block** first:
 
 ```
 PURPOSE: <one sentence — what capability/fix this slice delivers>
@@ -41,14 +47,27 @@ IF/THEN: If we <action>, then <observable outcome> will hold.
 GATE:    <one falsifiable check that proves the slice landed — usually a command or a file diff>
 ```
 
-Validation gates between phases (do not advance without answering out loud):
-1. **Purpose gate** — is the PURPOSE block written and coherent with product contract?
-2. **Evidence gate** — have I read the exact files/lines I'm about to change, not guessed?
-3. **Plan gate** — can a worker execute with file paths + line numbers + exact edit + one-sentence why, zero synthesis from them?
-4. **Verification gate** — did the GATE check actually run green (not "should work")?
-5. **Durability gate** — is `ROADMAP.md` updated and committed before I declare done?
+**Structural slice** — anything legitimately needing 2–3 slices sequenced ahead. Full Purpose block PLUS list the sequenced follow-ups in the `ROADMAP.md` entry so the next cycle can resume. Sanctioned exception to single-slice pacing.
 
-If a slice cannot answer the Purpose gate, park it as `[IDLE]` and stop.
+### Gate checklist (reference, not narration)
+
+Use as a mental checklist before declaring done — not as mandatory "answer out loud" steps that bloat context:
+
+1. **Purpose** — RATIONALE (trivial) or Purpose block (non-trivial) framed?
+2. **Evidence** — read the exact files/lines I'm about to change, not guessed?
+3. **Plan** — can a worker execute with file paths + line numbers + exact edit + one-sentence why, zero synthesis?
+4. **Verification** — did the GATE actually run green?
+5. **Durability** — is `ROADMAP.md` updated and committed?
+
+If a non-trivial slice cannot answer the Purpose gate, park it as `[IDLE]` and stop.
+
+### Subagent output guard
+
+Subagents can silently return empty output (MCP 503, provider rate-limit, turn-start-turn-end with no content, exit code 0 but zero characters). An empty subagent output is **not** evidence — it is a dropped dispatch.
+
+1. **Check output length** before consuming it. Empty or truncated = failed dispatch, not "no feedback".
+2. **Retry with a different-lineage specialist** — never the same model. If kimi returns empty, switch to ollama-cloud / gemini / codex.
+3. **Never synthesize on empty input.** Banned pattern: "based on the critical_reviewer findings, proceed" when `critical_reviewer` returned empty. Record `reviewer: empty, retried: <model>` in slice notes; either get a real review or park as `[PARKED]` with the empty-output reason.
 
 ## Persist findings before ending the session
 

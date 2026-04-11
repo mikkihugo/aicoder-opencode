@@ -22,6 +22,33 @@ Control plane is functional with passing build and tests:
 
 ---
 
+## Scope guard
+
+This is a **control plane**, not a product repo. Every backlog item must describe a real observed gap in shared maintenance (build, plugin, launcher, agent routing, target-aware tooling, DB maintenance). **Never** invent product features or speculative UX work — that belongs in the target repos (`dr-repo`, `letta-workspace`), not here.
+
+## Baseline completions (migrated 2026-04-11)
+
+### BL1: Build system — bun → npm fallback `✅ SHIPPED`
+
+- Changed `package.json` check script: `bun run build && bun run test` → `npm run build && npm run test`.
+- Added `.specify/`, `spec-kit/`, `Product-Manager-Skills/`, `apps/` to `.gitignore` (external subrepos were polluting `git status`).
+- **Why:** `make check` was broken on machines without bun installed.
+- **Verification:** `make check` — 14/14 tests pass. Commit `6ac63ce`.
+
+### BL2: Agent routing commit `✅ SHIPPED`
+
+- Committed 26 files of accumulated model-routing updates against `config/models.jsonc` registry.
+- Providers: `iflowcn/qwen3-coder-plus` (readers/reviewers), `xiaomi-token-plan-ams/mimo-v2-pro` (leads/workers), `ollama-cloud/minimax-m2.7` (long-context), `kimi-for-coding/kimi-k2-thinking` (dr-repo fallback).
+- Makefile bun→npm fallback. Maintenance timeout 300s→1200s. `implementation_lead.md` got persist-findings close-out.
+- **Verification:** `make check` pass; all models exist in `config/models.jsonc`. Commits `a264158`, `d687142`, `e6d6d48`.
+- **Follow-ups:** 16 unpushed commits on `main` — parked pending explicit user confirmation (visible external action).
+
+### BL3: Purpose-gate (PDD) + scope correction `✅ SHIPPED`
+
+- Added the `Purpose gate (PDD)` section to all 3 `implementation_lead.md` files (aicoder-opencode, dr-repo, letta-workspace): tiered trivial/non-trivial/structural slice framing, gate checklist as reference not narration.
+- Initial version tried to force `MAINTENANCE_LOG.md` only; partner/combatant review (2026-04-11) flagged that as overcorrection — autopilot already produces a legitimate ROADMAP with real maintenance backlog (this file). Reverted to `ROADMAP.md` + scope guard.
+- **Verification:** rules load in all 3 leads; next-cycle slices tested for PURPOSE-block emission. Commit `b5f4e84` (+ softening commit that follows this migration).
+
 ## Maintenance Backlog
 
 ### M1: Target-aware database maintenance CLI `✅ COMPLETED`
