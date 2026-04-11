@@ -1038,6 +1038,69 @@ test("extractSessionErrorApiErrorContext_whenSessionIDIsMissing_returnsUndefined
   assert.equal(result, undefined);
 });
 
+test("extractSessionErrorApiErrorContext_whenSessionIDIsEmptyString_returnsUndefined", () => {
+  // M113 pin: an APIError envelope whose `sessionID` is present but an
+  // empty string must be rejected. The pre-existing
+  // `_whenSessionIDIsMissing` pin omits the field entirely and fails
+  // at the `typeof !== "string"` limb without ever reaching the
+  // `.length === 0` limb. A sabotage that drops the length clause
+  // — reading it as defensive overkill — would emit a context with
+  // `sessionID: ""`, which collapses every downstream per-session
+  // route-health `Map.set` into a single shared bucket.
+  const result = extractSessionErrorApiErrorContext({
+    sessionID: "",
+    error: {
+      name: "APIError",
+      data: { statusCode: 429, message: "rate limit" },
+    },
+  });
+  assert.equal(result, undefined);
+});
+
+test("extractSessionErrorApiErrorContext_whenStatusCodeIsNaN_defaultsToZero", () => {
+  // M113 pin: a raw statusCode of `NaN` must not leak through — the
+  // `Number.isFinite` guard must collapse it to the `0` default. A
+  // refactor that simplifies the guard to `typeof === "number" ? : 0`
+  // would let NaN through, which then cascades into the numeric
+  // dispatch table downstream where `NaN === 429` is false for every
+  // branch. The pre-existing pins all pass finite integers, so this
+  // invariant is otherwise unpinned.
+  const result = extractSessionErrorApiErrorContext({
+    sessionID: "sess-1",
+    error: {
+      name: "APIError",
+      data: { statusCode: Number.NaN, message: "rate limit" },
+    },
+  });
+  assert.deepEqual(result, {
+    sessionID: "sess-1",
+    statusCode: 0,
+    lowerMessage: "rate limit",
+  });
+});
+
+test("extractSessionErrorApiErrorContext_whenDataIsMissing_returnsZeroStatusAndEmptyMessage", () => {
+  // M113 pin: an APIError envelope without a `.data` property must
+  // not throw — the `dataObj` fallback must resolve to `{}` so
+  // statusCode defaults to `0` and lowerMessage defaults to `""`.
+  // A refactor that assumes `.data` is always present (e.g.
+  // `const dataObj = errorObj.data as Record<string, unknown>`)
+  // would crash on `dataObj.statusCode` when opencode emits an
+  // auth-failure or connection-error APIError with no `.data`
+  // envelope. Pre-existing pins all ship a populated `.data`.
+  const result = extractSessionErrorApiErrorContext({
+    sessionID: "sess-1",
+    error: {
+      name: "APIError",
+    },
+  });
+  assert.deepEqual(result, {
+    sessionID: "sess-1",
+    statusCode: 0,
+    lowerMessage: "",
+  });
+});
+
 test("extractSessionErrorExplicitModel_whenShapeIsValid_returnsNarrowedTuple", () => {
   // M84 pin: a well-formed `{model: {id, providerID}}` payload must
   // return the narrowed `{id, providerID}` tuple verbatim. A sabotage

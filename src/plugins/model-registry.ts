@@ -2410,6 +2410,61 @@ export function extractSessionErrorExplicitModel(
  *   `undefined` on any gate failure — the `session.error` handler
  *   must `return` immediately on undefined because every downstream
  *   classifier assumes the APIError shape.
+ *
+ * ## Drift surfaces (M113 PDD)
+ *
+ * The four drift surfaces enumerated above cover the original
+ * inline-narrowing regression this helper closed. Three additional
+ * narrower-internal surfaces — orthogonal to the pre-existing M88
+ * pins at `_whenShapeIsValid`, `_whenErrorNameIsWrong`, and
+ * `_whenSessionIDIsMissing` — remained unpinned because every M88
+ * pin ships a valid `data: {statusCode: <finite>, message: <string>}`
+ * payload and a non-empty `sessionID`. Those pins exercise the
+ * outer gate ladder (envelope object → error object → APIError name
+ * → sessionID typeof) but never cross the inner `dataObj` / numeric-
+ * default / length-clause boundaries. The three surfaces pinned below:
+ *
+ *   A. **Empty-string sessionID rejection**. The sessionID guard is
+ *      `typeof envelope.sessionID !== "string" || envelope.sessionID
+ *      .length === 0`. The pre-existing `_whenSessionIDIsMissing` pin
+ *      omits the field entirely, failing at the `typeof` limb and
+ *      never reaching the `.length === 0` limb. A refactor that drops
+ *      the length clause (reading it as defensive overkill since
+ *      opencode "never emits empty sessionIDs") would silently emit a
+ *      context object with `sessionID: ""` — every `modelRouteHealth
+ *      Map.set(sessionID, …)` downstream would clobber entries under
+ *      the empty-string key, collapsing per-session route health
+ *      into a single shared bucket. Non-local, observable only as
+ *      mysterious cross-session penalty bleed.
+ *   B. **Non-finite statusCode → 0 default**. The statusCode resolver
+ *      is `typeof statusCodeRaw === "number" && Number.isFinite(status
+ *      CodeRaw) ? statusCodeRaw : 0`. Existing pins all pass finite
+ *      integers (429, 404). A refactor that simplifies to `typeof
+ *      === "number" ? : 0` (dropping the `Number.isFinite` limb as
+ *      "redundant because JSON.parse cannot produce NaN/Infinity")
+ *      would let a host that stringifies statusCode from a failed
+ *      `parseInt` path inject `NaN`, which then cascades into
+ *      `classifyProviderApiError`'s numeric-dispatch table where
+ *      `NaN === 429` is false for every branch — misclassifying a
+ *      rate-limit as "unknown status" and skipping the quota-cooldown
+ *      penalty. The `isFinite` guard is load-bearing precisely
+ *      because the raw shape is `unknown`.
+ *   C. **Missing `.data` object → zero/empty defaults without throwing**.
+ *      The `dataObj` resolver is `data !== null && typeof data ===
+ *      "object" ? (data as Record<string, unknown>) : {}`. Existing
+ *      pins all pass `data: { statusCode, message }`. A refactor that
+ *      assumes `.data` is always present (e.g. `const dataObj =
+ *      errorObj.data as Record<string, unknown>`) would crash on
+ *      `dataObj.statusCode` when opencode ever emits an APIError
+ *      without a `.data` envelope (auth-failure, provider-config,
+ *      early-stage connection errors all produce `{name: "APIError"}`
+ *      with no `.data`). The `?? {}` fallback encodes "return a
+ *      zero-statusCode, empty-lowerMessage context so the keyword-
+ *      heuristic ladder in `classifyProviderApiError` can still run
+ *      on the envelope's other fields". A sabotage that requires
+ *      `.data` to be present fires a dedicated pin that passes
+ *      `error: {name: "APIError"}` alone and asserts
+ *      `{sessionID: …, statusCode: 0, lowerMessage: ""}`.
  */
 export function extractSessionErrorApiErrorContext(
   sessionError: unknown,
