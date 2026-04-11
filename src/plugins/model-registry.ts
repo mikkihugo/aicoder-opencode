@@ -145,6 +145,57 @@ function logRegistryLoadError(error: unknown): void {
 }
 
 /**
+ * Surface a hook-level exception before it is swallowed by a `catch`.
+ *
+ * Motivation — silent-swallow drift: the `chat.params` and
+ * `experimental.chat.system.transform` hooks wrap their bodies in
+ * `try/catch { return; }` so a throw inside the hook cannot crash the
+ * host opencode process. The swallow is the right policy (a plugin
+ * must not take down the editor session), but silencing the error
+ * entirely removes the ONLY operator signal that the hook stopped
+ * working. A real-world manifestation: if `loadModelRegistry` throws
+ * because `config/models.jsonc` has a syntax error introduced by a
+ * hand edit, both hooks silently return, the plugin stops setting
+ * temperatures / injecting system prompts / expiring health maps, and
+ * nothing is written to stderr. Operators notice days later when
+ * routing quality degrades or the health file grows unbounded. The
+ * `provider.models` hook already logs through `logRegistryLoadError`,
+ * but that helper's message is registry-load-specific and does not
+ * fit the general hook-failure shape.
+ *
+ * This helper is the SSoT for that class of log: a hook-qualified
+ * "[aicoder-opencode plugin] `<hookName>` hook failed — ignoring and
+ * continuing: `<error>`" line, written to the injected log function
+ * (defaults to `console.error`). The `logFn` injection is what makes
+ * the helper pinnable — tests capture the message and error so the
+ * helper's output shape is observable without spying on
+ * `console.error` globally.
+ *
+ * Args:
+ *   hookName: The opencode hook that threw — used verbatim in the
+ *     logged message so operators can grep for "chat.params hook
+ *     failed" without knowing the plugin's internals.
+ *   error: The caught value. Passed through to `logFn` as-is so
+ *     stack traces survive the swallow.
+ *   logFn: Injected sink. Defaults to a small wrapper over
+ *     `console.error` so production callers stay one-liners.
+ */
+export function logPluginHookFailure(
+  hookName: string,
+  error: unknown,
+  logFn: (message: string, error: unknown) => void = defaultHookFailureLogSink,
+): void {
+  logFn(
+    `[aicoder-opencode plugin] ${hookName} hook failed — ignoring and continuing:`,
+    error,
+  );
+}
+
+function defaultHookFailureLogSink(message: string, error: unknown): void {
+  console.error(message, error);
+}
+
+/**
  * Render a health-entry `until` timestamp for logs, system prompts, and tool
  * output without throwing on the `key_missing` sentinel.
  *
@@ -4192,7 +4243,13 @@ export const ModelRegistryPlugin: Plugin = async () => {
           // the timer is best-effort health telemetry, not critical work.
           hangTimer.unref?.();
         }
-      } catch {
+      } catch (error) {
+        // M80: silent-swallow drift — prior to this log call the hook
+        // swallowed every throw with `catch {}`, hiding registry load
+        // failures and hook-internal bugs from operators. The swallow
+        // is still required (a plugin cannot crash the host), but the
+        // failure is now surfaced through `logPluginHookFailure`.
+        logPluginHookFailure("chat.params", error);
         return;
       }
     },
@@ -4250,7 +4307,11 @@ export const ModelRegistryPlugin: Plugin = async () => {
         if (availableModelsPrompt) {
           output.system.push(availableModelsPrompt);
         }
-      } catch {
+      } catch (error) {
+        // M80: see `logPluginHookFailure`. The transform hook was the
+        // second silent-swallow site — registry parse errors, prompt
+        // builder throws, and expire-map bugs all disappeared here.
+        logPluginHookFailure("experimental.chat.system.transform", error);
         return;
       }
     },

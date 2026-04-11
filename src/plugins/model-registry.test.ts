@@ -35,6 +35,7 @@ import {
   shouldClassifyAsModelNotFound,
   bindSessionHangState,
   clearSessionHangState,
+  logPluginHookFailure,
   readAndClearSessionHangState,
   countHealthyVisibleRoutes,
   composeRouteKey,
@@ -683,6 +684,59 @@ test("clearSessionHangState_whenSessionTerminates_dropsFromAllThreeSessionMaps",
   assert.equal(sessionStartTimeMap.has("session-b"), true);
   assert.equal(sessionActiveProviderMap.has("session-b"), true);
   assert.equal(sessionActiveModelMap.has("session-b"), true);
+});
+
+test("logPluginHookFailure_whenCalled_forwardsMessageContainingHookName", () => {
+  // M80 pin: the logged message MUST include the hook name verbatim
+  // so operators can grep "chat.params hook failed" without knowing
+  // the plugin's message template. A sabotage that drops the
+  // `${hookName}` interpolation fires this pin alone.
+  const captured: { message: string; error: unknown }[] = [];
+  const logFn = (message: string, error: unknown) => {
+    captured.push({ message, error });
+  };
+
+  logPluginHookFailure("chat.params", new Error("boom"), logFn);
+
+  assert.equal(captured.length, 1);
+  const first = captured[0];
+  assert.ok(first);
+  assert.match(first.message, /chat\.params/);
+});
+
+test("logPluginHookFailure_whenCalled_forwardsErrorReferenceVerbatim", () => {
+  // M80 pin: the error must pass through unmodified so stack traces
+  // and custom properties survive the swallow. A sabotage that wraps
+  // the error (e.g. `String(error)` or `new Error(error.message)`)
+  // fires this pin alone — reference equality fails before message
+  // matching has a chance.
+  const captured: { message: string; error: unknown }[] = [];
+  const logFn = (message: string, error: unknown) => {
+    captured.push({ message, error });
+  };
+  const boom = new Error("boom");
+
+  logPluginHookFailure("experimental.chat.system.transform", boom, logFn);
+
+  assert.equal(captured.length, 1);
+  const first = captured[0];
+  assert.ok(first);
+  assert.strictEqual(first.error, boom);
+});
+
+test("logPluginHookFailure_whenCalled_invokesLogFnExactlyOnce", () => {
+  // M80 pin: exactly one log line per failure. A sabotage that
+  // double-logs (e.g. logs the hook name and the error on separate
+  // calls) fires this pin alone — the other two pins pass because
+  // the first call still has the right message and error shape.
+  let callCount = 0;
+  const logFn = (_message: string, _error: unknown) => {
+    callCount += 1;
+  };
+
+  logPluginHookFailure("chat.params", new Error("boom"), logFn);
+
+  assert.equal(callCount, 1);
 });
 
 test("bindSessionHangState_whenCalled_populatesAllThreeMapsAtomically", () => {
