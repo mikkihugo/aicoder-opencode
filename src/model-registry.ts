@@ -26,7 +26,6 @@ const CLOUDFLARE_AI_GATEWAY_PROVIDER_NAME = "cloudflare-ai-gateway";
 const TOGETHER_AI_PROVIDER_NAME = "togetherai";
 const CEREBRAS_PROVIDER_NAME = "cerebras";
 const XAI_PROVIDER_NAME = "xai";
-const XAI_ALLOWED_MODEL_PREFIX = "xai/grok-4.20";
 const DEEPSEEK_PROVIDER_NAME = "deepseek";
 const GITHUB_COPILOT_PROVIDER_NAME = "github-copilot";
 const MINIMAX_CN_PROVIDER_NAME = "minimax-cn";
@@ -365,7 +364,7 @@ export function filterVisibleProviderRoutes(providerRoutes: ProviderRoute[]): Pr
     }
 
     if (providerRoute.provider === XAI_PROVIDER_NAME) {
-      return providerRoute.model.startsWith(XAI_ALLOWED_MODEL_PREFIX);
+      return false;
     }
 
     if (providerRoute.provider === DEEPSEEK_PROVIDER_NAME) {

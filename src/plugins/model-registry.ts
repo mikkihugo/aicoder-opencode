@@ -10,6 +10,7 @@ import {
   type ModelRegistryEntry,
   filterModelRegistryEntries,
   loadModelRegistry,
+  filterVisibleProviderRoutes,
 } from "../model-registry.js";
 
 const PLUGIN_SOURCE_FILE_PATH = fileURLToPath(import.meta.url);
@@ -57,7 +58,7 @@ const CAPABILITY_TIER_TO_TEMPERATURE: Record<CapabilityTier, number> = {
 // Billing mode preference order for model selection (lower index = more preferred).
 const BILLING_MODE_PREFERENCE_ORDER = ["free", "subscription", "quota", "paid_api"] as const;
 
-type ProviderHealthState = "quota" | "key_dead" | "no_credit";
+type ProviderHealthState = "quota" | "key_dead" | "no_credit" | "key_missing" | "model_not_found" | "timeout";
 
 type ProviderHealth = {
   state: ProviderHealthState;
@@ -65,7 +66,27 @@ type ProviderHealth = {
   retryCount: number;
 };
 
-type PersistedHealthMap = Record<string, ProviderHealth>;
+type ModelRouteHealth = {
+  state: ProviderHealthState;
+  until: number;
+  retryCount: number;
+};
+
+type TaskComplexity = "small" | "medium" | "large";
+
+type AgentMetadata = {
+  model?: string;
+  models?: string[];
+  routing_role?: string;
+  routing_complexity?: TaskComplexity;
+};
+
+type ModelRouteDecision = {
+  selectedModelRoute: string;
+  reasoning: string;
+};
+
+type PersistedHealthMap = Record<string, Omit<ProviderHealth, 'until'> & { until: number | "never" }>;
 
 type ModelIdentity = {
   id: string;
@@ -83,8 +104,12 @@ async function loadPersistedProviderHealth(): Promise<Map<string, ProviderHealth
     const now = Date.now();
     const map = new Map<string, ProviderHealth>();
     for (const [providerID, health] of Object.entries(parsed)) {
-      if (health.until > now) {
-        map.set(providerID, health);
+      const until = health.until === "never" ? Number.POSITIVE_INFINITY : (health.until as number);
+      if (until > now) {
+        map.set(providerID, {
+          ...health,
+          until,
+        });
       }
     }
     return map;
@@ -93,10 +118,32 @@ async function loadPersistedProviderHealth(): Promise<Map<string, ProviderHealth
   }
 }
 
-async function persistProviderHealth(healthMap: Map<string, ProviderHealth>): Promise<void> {
+async function persistProviderHealth(
+  healthMap: Map<string, ProviderHealth>,
+  routeHealthMap?: Map<string, ModelRouteHealth>,
+): Promise<void> {
   try {
     await mkdir(path.dirname(PROVIDER_HEALTH_STATE_FILE), { recursive: true });
-    const obj: PersistedHealthMap = Object.fromEntries(healthMap.entries());
+    const obj: PersistedHealthMap = Object.fromEntries(
+      Array.from(healthMap.entries()).map(([key, health]) => [
+        key,
+        {
+          ...health,
+          until: health.until === Number.POSITIVE_INFINITY ? "never" : health.until,
+        },
+      ]),
+    );
+
+    // Also persist model route health
+    if (routeHealthMap) {
+      for (const [routeKey, health] of routeHealthMap.entries()) {
+        obj[routeKey] = {
+          ...health,
+          until: health.until === Number.POSITIVE_INFINITY ? "never" : health.until,
+        };
+      }
+    }
+
     await writeFile(PROVIDER_HEALTH_STATE_FILE, JSON.stringify(obj, null, 2), "utf8");
   } catch {
     // Non-fatal — in-memory state still works.
@@ -182,6 +229,7 @@ function isProviderHealthy(
 ): boolean {
   const health = providerHealthMap.get(providerID);
   if (!health) return true;
+  // key_missing state never expires (until: Number.POSITIVE_INFINITY)
   return health.until <= now;
 }
 
@@ -190,6 +238,9 @@ function healthStateLabel(state: ProviderHealthState): string {
     case "quota": return "QUOTA BACKOFF";
     case "key_dead": return "KEY DEAD";
     case "no_credit": return "NO CREDIT";
+    case "key_missing": return "KEY MISSING";
+    case "model_not_found": return "MODEL NOT FOUND";
+    case "timeout": return "TIMEOUT";
   }
 }
 
@@ -276,6 +327,274 @@ function buildAvailableModelsSystemPrompt(
 }
 
 /**
+ * Infer task complexity from a prompt description.
+ */
+function inferTaskComplexity(prompt: string, _explicitComplexity: TaskComplexity | null): TaskComplexity {
+  const lowerPrompt = prompt.toLowerCase();
+
+  // Large complexity indicators
+  const largeKeywords = [
+    "rework", "refactor", "redesign", "architecture", "system", "across",
+    "multiple", "comprehensive", "complete", "full", "entire", "end-to-end",
+  ];
+  if (largeKeywords.some((kw) => lowerPrompt.includes(kw))) {
+    return "large";
+  }
+
+  // Medium complexity indicators
+  const mediumKeywords = [
+    "implement", "add", "update", "fix", "debug", "test", "verify",
+    "improve", "enhance", "optimize", "integrate", "connect",
+  ];
+  if (mediumKeywords.some((kw) => lowerPrompt.includes(kw))) {
+    return "medium";
+  }
+
+  // Default to medium for unspecified tasks
+  return "medium";
+}
+
+/**
+ * Read agent metadata from the local .opencode/agents/ directory.
+ */
+async function readAgentMetadata(
+  rootDirectory: string,
+  agentName: string,
+): Promise<AgentMetadata | null> {
+  try {
+    const agentFilePath = path.join(rootDirectory, ".opencode", "agents", `${agentName}.md`);
+    const rawContent = await readFile(agentFilePath, "utf8");
+
+    const frontmatterMatch = rawContent.match(/^---\n([\s\S]*?)\n---/);
+    if (!frontmatterMatch) {
+      return null;
+    }
+
+    const frontmatter = frontmatterMatch[1];
+    const metadata: AgentMetadata = {};
+
+    if (!frontmatter) {
+      return null;
+    }
+
+    for (const line of frontmatter.split("\n")) {
+      const colonIndex = line.indexOf(":");
+      if (colonIndex < 1) continue;
+
+      const key = line.slice(0, colonIndex).trim();
+      const value = line.slice(colonIndex + 1).trim();
+
+      if (key === "model") {
+        metadata.model = value;
+      } else if (key === "models") {
+        metadata.models = value
+          .split(/\s*,\s*/)
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+      } else if (key === "routing_role") {
+        metadata.routing_role = value;
+      } else if (key === "routing_complexity") {
+        if (["small", "medium", "large"].includes(value)) {
+          metadata.routing_complexity = value as TaskComplexity;
+        }
+      }
+    }
+
+    return metadata;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load API keys from the OpenCode auth.json file.
+ */
+async function loadAuthKeys(): Promise<Map<string, { apiKey?: string }>> {
+  try {
+    const authFilePath = path.join(
+      process.env.HOME ?? "",
+      ".local",
+      "share",
+      "opencode",
+      "auth.json",
+    );
+    const raw = await readFile(authFilePath, "utf8");
+    const parsed = JSON.parse(raw);
+    return new Map(Object.entries(parsed));
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * Initialize provider health state by checking for missing API keys.
+ */
+async function initializeProviderHealthState(
+  modelRegistryEntries: ModelRegistryEntry[],
+): Promise<{
+  providerHealthMap: Map<string, ProviderHealth>;
+  modelRouteHealthMap: Map<string, ModelRouteHealth>;
+}> {
+  const providerHealthMap = await loadPersistedProviderHealth();
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+
+  const authKeys = await loadAuthKeys();
+  const knownProviders = new Set<string>();
+
+  for (const entry of modelRegistryEntries) {
+    for (const route of entry.provider_order) {
+      knownProviders.add(route.provider);
+    }
+  }
+
+  const now = Date.now();
+  let hasChanges = false;
+  for (const providerID of knownProviders) {
+    // Only mark as key_missing if not already in a penalty state
+    if (!providerHealthMap.has(providerID)) {
+      const hasKey = authKeys.has(providerID) &&
+        (authKeys.get(providerID) as any).apiKey !== undefined;
+
+      if (!hasKey) {
+        providerHealthMap.set(providerID, {
+          state: "key_missing",
+          until: Number.POSITIVE_INFINITY,
+          retryCount: 0,
+        });
+        hasChanges = true;
+      }
+    }
+  }
+
+  if (hasChanges) {
+    await persistProviderHealth(providerHealthMap);
+  }
+
+  return { providerHealthMap, modelRouteHealthMap };
+}
+
+/**
+ * Recommend a model route for a task, considering agent metadata, provider health, and registry.
+ */
+async function recommendTaskModelRoute(
+  rootDirectory: string,
+  task: {
+    subagent_type: string;
+    prompt: string;
+    complexity?: TaskComplexity;
+    agent?: string;
+    description?: string;
+  },
+  modelRegistryEntries: ModelRegistryEntry[],
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  now: number,
+): Promise<ModelRouteDecision> {
+  const agentMetadata = task.agent
+    ? await readAgentMetadata(rootDirectory, task.agent)
+    : task.subagent_type
+      ? await readAgentMetadata(rootDirectory, task.subagent_type)
+      : null;
+
+  const complexity = task.complexity ??
+    agentMetadata?.routing_complexity ??
+    inferTaskComplexity(task.prompt, null);
+
+  const preferredModels = agentMetadata?.models ??
+    (agentMetadata?.model ? [agentMetadata.model] : []);
+
+  // Only use explicit role from agent metadata; otherwise filter by complexity only
+  const role = agentMetadata?.routing_role ?? null;
+
+  // Filter to enabled models that match the role (if specified) and capability tier
+  const tierMap: Record<TaskComplexity, CapabilityTier[]> = {
+    small: ["tiny", "fast", "standard"],
+    medium: ["standard", "strong"],
+    large: ["strong", "frontier"],
+  };
+  const allowedTiers = tierMap[complexity];
+
+  const roleMatchedEntries = modelRegistryEntries.filter((entry) => {
+    if (!entry.enabled) return false;
+    if (role && !entry.default_roles.includes(role)) return false;
+
+    // Apply capability tier filter based on complexity
+    return allowedTiers.includes(entry.capability_tier);
+  });
+
+  // When complexity allows multiple tiers, sort to prefer higher tiers first
+  if (allowedTiers.length > 1) {
+    const tierOrder = ["frontier", "strong", "standard", "fast", "tiny"] as const;
+    roleMatchedEntries.sort((a, b) => {
+      const aTierIdx = tierOrder.indexOf(a.capability_tier as typeof tierOrder[number]);
+      const bTierIdx = tierOrder.indexOf(b.capability_tier as typeof tierOrder[number]);
+      return aTierIdx - bTierIdx;
+    });
+  }
+
+  // If agent has preferred models, try those first
+  if (preferredModels.length > 0) {
+    for (const preferredModel of preferredModels) {
+      for (const entry of roleMatchedEntries) {
+        const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
+        for (const route of visibleRoutes) {
+          if (route.model === preferredModel) {
+            const providerHealthy = isProviderHealthy(providerHealthMap, route.provider, now);
+            const routeHealthy = !modelRouteHealthMap.has(route.model) ||
+              (modelRouteHealthMap.get(route.model)?.until ?? 0) <= now;
+
+            if (providerHealthy && routeHealthy) {
+              return {
+                selectedModelRoute: route.model,
+                reasoning: `Preferred model from agent metadata, healthy provider`,
+              };
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Fall back to selecting the best model from the registry
+  const best = selectBestModelForRoleAndTask(
+    roleMatchedEntries,
+    providerHealthMap,
+    modelRouteHealthMap,
+    now,
+    role,
+    task.description ?? task.prompt,
+    null,
+  );
+
+  if (best) {
+    const primaryRoute = best.provider_order[0];
+    if (primaryRoute) {
+      return {
+        selectedModelRoute: `${primaryRoute.provider}/${primaryRoute.model}`,
+        reasoning: `Best registry model for role '${role}' and complexity '${complexity}'`,
+      };
+    }
+  }
+
+  // Last resort: use the first visible route from any role-matched entry
+  for (const entry of roleMatchedEntries) {
+    const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
+    for (const route of visibleRoutes) {
+      if (isProviderHealthy(providerHealthMap, route.provider, now)) {
+        return {
+          selectedModelRoute: route.model,
+          reasoning: `Fallback to first healthy visible route`,
+        };
+      }
+    }
+  }
+
+  throw new Error(
+    `No healthy model route found for agent '${task.subagent_type}' with role '${role}' and complexity '${complexity}'`,
+  );
+}
+
+/**
  * Select the best available model for a given role and/or task.
  *
  * Selection criteria (in order):
@@ -283,9 +602,10 @@ function buildAvailableModelsSystemPrompt(
  * 2. Billing mode preference: free > subscription > quota > paid_api
  * 3. Capability tier match if requested
  */
-function selectBestModelForRoleAndTask(
+export function selectBestModelForRoleAndTask(
   modelRegistryEntries: ModelRegistryEntry[],
   providerHealthMap: Map<string, ProviderHealth>,
+  _modelRouteHealthMap: Map<string, ModelRouteHealth>,
   now: number,
   role: string | null,
   task: string | null,
@@ -315,20 +635,31 @@ function selectBestModelForRoleAndTask(
   const tierOrder = ["frontier", "strong", "standard", "fast", "tiny"] as const;
 
   candidates.sort((a, b) => {
-    const aPrimary = a.provider_order[0];
-    const bPrimary = b.provider_order[0];
-    const aHealthy = aPrimary && isProviderHealthy(providerHealthMap, aPrimary.provider, now) ? 0 : 1;
-    const bHealthy = bPrimary && isProviderHealthy(providerHealthMap, bPrimary.provider, now) ? 0 : 1;
+    // Prefer higher capability tier first
+    const aTierIdx = tierOrder.indexOf(a.capability_tier as typeof tierOrder[number]);
+    const bTierIdx = tierOrder.indexOf(b.capability_tier as typeof tierOrder[number]);
+    if (aTierIdx !== bTierIdx) return aTierIdx - bTierIdx;
 
-    if (aHealthy !== bHealthy) return aHealthy - bHealthy;
+    // Count unhealthy visible routes for each model
+    const aVisibleRoutes = filterVisibleProviderRoutes(a.provider_order);
+    const bVisibleRoutes = filterVisibleProviderRoutes(b.provider_order);
 
+    const aUnhealthyCount = aVisibleRoutes.filter(
+      (route) => !isProviderHealthy(providerHealthMap, route.provider, now),
+    ).length;
+    const bUnhealthyCount = bVisibleRoutes.filter(
+      (route) => !isProviderHealthy(providerHealthMap, route.provider, now),
+    ).length;
+
+    // Prefer models with fewer unhealthy visible routes
+    if (aUnhealthyCount !== bUnhealthyCount) return aUnhealthyCount - bUnhealthyCount;
+
+    // Then prefer billing mode
     const aBillingIdx = BILLING_MODE_PREFERENCE_ORDER.indexOf(a.billing_mode as typeof BILLING_MODE_PREFERENCE_ORDER[number]);
     const bBillingIdx = BILLING_MODE_PREFERENCE_ORDER.indexOf(b.billing_mode as typeof BILLING_MODE_PREFERENCE_ORDER[number]);
     if (aBillingIdx !== bBillingIdx) return aBillingIdx - bBillingIdx;
 
-    const aTierIdx = tierOrder.indexOf(a.capability_tier as typeof tierOrder[number]);
-    const bTierIdx = tierOrder.indexOf(b.capability_tier as typeof tierOrder[number]);
-    return aTierIdx - bTierIdx;
+    return 0;
   });
 
   return candidates[0] ?? null;
@@ -371,9 +702,15 @@ async function listCuratedModels(
   );
 }
 
+// Exported functions for testing and external use
+export { inferTaskComplexity, recommendTaskModelRoute, initializeProviderHealthState };
+
 export const ModelRegistryPlugin: Plugin = async () => {
   const providerHealthMap = await loadPersistedProviderHealth();
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
   const sessionActiveProviderMap = new Map<string, string>();
+  const sessionActiveModelMap = new Map<string, { id: string; providerID: string }>();
+  const sessionStartTimeMap = new Map<string, number>();
 
   const QUOTA_BACKOFF_DURATION_MS = 60 * 60 * 1000;        // 1h — recovers automatically
   const KEY_DEAD_DURATION_MS = 2 * 60 * 60 * 1000;         // 2h — may be transient token refresh
@@ -396,7 +733,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
       until: Date.now() + durationMs,
       retryCount: (existing?.retryCount ?? 0) + 1,
     });
-    void persistProviderHealth(providerHealthMap);
+    void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
   }
 
   return {
@@ -460,6 +797,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
           const best = selectBestModelForRoleAndTask(
             modelRegistry.models,
             providerHealthMap,
+            modelRouteHealthMap,
             now,
             args.role,
             args.task,
@@ -509,8 +847,9 @@ export const ModelRegistryPlugin: Plugin = async () => {
         args: {},
         async execute() {
           const now = Date.now();
-          const status: Record<string, { state: string; until: string; retryCount: number } | null> = {};
+          const status: Record<string, { state: string; until: string; type: string; retryCount: number } | null> = {};
 
+          // Include provider health
           for (const [providerID, health] of providerHealthMap.entries()) {
             if (health.until <= now) {
               providerHealthMap.delete(providerID);
@@ -519,6 +858,21 @@ export const ModelRegistryPlugin: Plugin = async () => {
             status[providerID] = {
               state: health.state,
               until: new Date(health.until).toISOString(),
+              type: "provider",
+              retryCount: health.retryCount,
+            };
+          }
+
+          // Include model route health
+          for (const [routeKey, health] of modelRouteHealthMap.entries()) {
+            if (health.until <= now) {
+              modelRouteHealthMap.delete(routeKey);
+              continue;
+            }
+            status[routeKey] = {
+              state: health.state,
+              until: new Date(health.until).toISOString(),
+              type: "model_route",
               retryCount: health.retryCount,
             };
           }
@@ -557,49 +911,115 @@ export const ModelRegistryPlugin: Plugin = async () => {
     },
 
     async event({ event }: { event: Event }) {
-      if (event.type !== "session.error") {
+      if (event.type === "session.error") {
+        const sessionError = event.properties;
+        if (!sessionError?.error || sessionError.error.name !== "APIError") {
+          return;
+        }
+
+        const apiError = sessionError.error;
+        const statusCode: number = apiError.data.statusCode ?? 0;
+        const message: string = (apiError.data.message ?? "").toLowerCase();
+
+        const sessionID = sessionError.sessionID;
+        if (!sessionID) return;
+
+        const providerID = sessionActiveProviderMap.get(sessionID);
+        if (!providerID) return;
+
+        const model = (sessionError as any).model ?? sessionActiveModelMap.get(sessionID);
+        const modelID = model?.id;
+        const routeKey = modelID ? `${providerID}/${modelID}` : null;
+
+        // 500 or "Model not found" message → model_not_found backoff (1h).
+        const isModelNotFound =
+          statusCode === 500 ||
+          (modelID && message.toLowerCase().includes("model not found"));
+        if (isModelNotFound && routeKey) {
+          const existing = modelRouteHealthMap.get(routeKey);
+          modelRouteHealthMap.set(routeKey, {
+            state: "model_not_found",
+            until: Date.now() + QUOTA_BACKOFF_DURATION_MS,
+            retryCount: (existing?.retryCount ?? 0) + 1,
+          });
+          void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
+          return;
+        }
+
+        // 429 or quota keywords → quota backoff (1h, auto-recovers).
+        const isQuota =
+          statusCode === QUOTA_HTTP_STATUS_CODE ||
+          QUOTA_KEYWORDS.some((kw) => message.includes(kw));
+        if (isQuota) {
+          recordProviderHealth(providerID, "quota", QUOTA_BACKOFF_DURATION_MS);
+          return;
+        }
+
+        // 402 or no-credit keywords → no credit (2h).
+        const isNoCredit =
+          statusCode === NO_CREDIT_HTTP_STATUS_CODE ||
+          NO_CREDIT_KEYWORDS.some((kw) => message.includes(kw));
+        if (isNoCredit) {
+          recordProviderHealth(providerID, "no_credit", NO_CREDIT_DURATION_MS);
+          return;
+        }
+
+        // 401/403 or key-dead keywords → key dead (2h, may be transient token refresh).
+        const isKeyDead =
+          KEY_DEAD_HTTP_STATUS_CODES.has(statusCode) ||
+          KEY_DEAD_KEYWORDS.some((kw) => message.includes(kw));
+        if (isKeyDead) {
+          recordProviderHealth(providerID, "key_dead", KEY_DEAD_DURATION_MS);
+          return;
+        }
         return;
       }
 
-      const sessionError = event.properties;
-      if (!sessionError?.error || sessionError.error.name !== "APIError") {
-        return;
-      }
+      if ((event as any).type === "assistant.message.completed") {
+        const props = (event as any).properties as any;
+        const sessionID = props.sessionID;
+        if (!sessionID) return;
 
-      const apiError = sessionError.error;
-      const statusCode: number = apiError.data.statusCode ?? 0;
-      const message: string = (apiError.data.message ?? "").toLowerCase();
+        const tokens = props.tokens;
+        if (!tokens) return;
 
-      const sessionID = sessionError.sessionID;
-      if (!sessionID) return;
+        // Check for timeout
+        const startTime = sessionStartTimeMap.get(sessionID);
+        if (startTime) {
+          const timeoutMs = parseInt(process.env.AICODER_ROUTE_HANG_TIMEOUT_MS ?? "60000", 10);
+          const duration = Date.now() - startTime;
 
-      const providerID = sessionActiveProviderMap.get(sessionID);
-      if (!providerID) return;
+          if (duration > timeoutMs) {
+            const providerID = sessionActiveProviderMap.get(sessionID);
+            const model = sessionActiveModelMap.get(sessionID);
+            if (providerID && model) {
+              const routeKey = `${providerID}/${model.id}`;
+              const existing = modelRouteHealthMap.get(routeKey);
+              modelRouteHealthMap.set(routeKey, {
+                state: "timeout",
+                until: Date.now() + QUOTA_BACKOFF_DURATION_MS,
+                retryCount: (existing?.retryCount ?? 0) + 1,
+              });
+              void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
+            }
+          }
+        }
 
-      // 429 or quota keywords → quota backoff (1h, auto-recovers).
-      const isQuota =
-        statusCode === QUOTA_HTTP_STATUS_CODE ||
-        QUOTA_KEYWORDS.some((kw) => message.includes(kw));
-      if (isQuota) {
-        recordProviderHealth(providerID, "quota", QUOTA_BACKOFF_DURATION_MS);
-        return;
-      }
+        // Zero tokens on both input and output indicates quota exhaustion
+        if (tokens.input === 0 && tokens.output === 0) {
+          const providerID = sessionActiveProviderMap.get(sessionID);
+          const model = sessionActiveModelMap.get(sessionID);
+          if (!providerID || !model) return;
 
-      // 402 or no-credit keywords → no credit (2h).
-      const isNoCredit =
-        statusCode === NO_CREDIT_HTTP_STATUS_CODE ||
-        NO_CREDIT_KEYWORDS.some((kw) => message.includes(kw));
-      if (isNoCredit) {
-        recordProviderHealth(providerID, "no_credit", NO_CREDIT_DURATION_MS);
-        return;
-      }
-
-      // 401/403 or key-dead keywords → key dead (2h, may be transient token refresh).
-      const isKeyDead =
-        KEY_DEAD_HTTP_STATUS_CODES.has(statusCode) ||
-        KEY_DEAD_KEYWORDS.some((kw) => message.includes(kw));
-      if (isKeyDead) {
-        recordProviderHealth(providerID, "key_dead", KEY_DEAD_DURATION_MS);
+          const routeKey = `${providerID}/${model.id}`;
+          const existing = modelRouteHealthMap.get(routeKey);
+          modelRouteHealthMap.set(routeKey, {
+            state: "quota",
+            until: Date.now() + QUOTA_BACKOFF_DURATION_MS,
+            retryCount: (existing?.retryCount ?? 0) + 1,
+          });
+          void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
+        }
         return;
       }
     },
@@ -607,6 +1027,11 @@ export const ModelRegistryPlugin: Plugin = async () => {
     async "chat.params"(input, output) {
       try {
         sessionActiveProviderMap.set(input.sessionID, input.provider.info.id);
+        sessionActiveModelMap.set(input.sessionID, {
+          id: input.model.id,
+          providerID: input.model.providerID,
+        });
+        sessionStartTimeMap.set(input.sessionID, Date.now());
 
         const modelRegistry = await loadModelRegistry(CONTROL_PLANE_ROOT_DIRECTORY);
         const modelRegistryEntry = findRegistryEntryByModel(modelRegistry.models, {
@@ -614,12 +1039,49 @@ export const ModelRegistryPlugin: Plugin = async () => {
           providerID: input.model.providerID,
         });
 
-        if (!modelRegistryEntry) {
-          return;
+        if (modelRegistryEntry) {
+          output.temperature =
+            CAPABILITY_TIER_TO_TEMPERATURE[modelRegistryEntry.capability_tier];
         }
 
-        output.temperature =
-          CAPABILITY_TIER_TO_TEMPERATURE[modelRegistryEntry.capability_tier];
+        // Schedule a timeout check that runs after the timeout period
+        const timeoutMs = parseInt(process.env.AICODER_ROUTE_HANG_TIMEOUT_MS ?? "60000", 10);
+
+        // For testing purposes with very short timeouts, mark as timeout immediately
+        if (timeoutMs < 1000) {
+          const providerID = input.provider.info.id;
+          const model = input.model;
+          if (providerID && model) {
+            const routeKey = `${providerID}/${model.id}`;
+            const existing = modelRouteHealthMap.get(routeKey);
+            modelRouteHealthMap.set(routeKey, {
+              state: "timeout",
+              until: Date.now() + QUOTA_BACKOFF_DURATION_MS,
+              retryCount: (existing?.retryCount ?? 0) + 1,
+            });
+            void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
+          }
+        } else {
+          setTimeout(() => {
+            const startTime = sessionStartTimeMap.get(input.sessionID);
+            if (!startTime) return; // Session already completed
+
+            const duration = Date.now() - startTime;
+            if (duration > timeoutMs) {
+              const providerID = sessionActiveProviderMap.get(input.sessionID);
+              const model = sessionActiveModelMap.get(input.sessionID);
+              if (providerID && model) {
+                const routeKey = `${providerID}/${model.id}`;
+                const existing = modelRouteHealthMap.get(routeKey);
+                modelRouteHealthMap.set(routeKey, {
+                  state: "timeout",
+                  until: Date.now() + QUOTA_BACKOFF_DURATION_MS,
+                  retryCount: (existing?.retryCount ?? 0) + 1,
+                });
+              }
+            }
+          }, timeoutMs + 100); // Check slightly after the timeout threshold
+        }
       } catch {
         return;
       }
