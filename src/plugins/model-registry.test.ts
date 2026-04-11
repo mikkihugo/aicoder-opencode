@@ -7307,6 +7307,55 @@ test("parseHangTimeoutMs_whenFloatString_truncatesToInteger", () => {
   assert.equal(parseHangTimeoutMs("123456.789"), 123456);
 });
 
+// M132 pin A — `Infinity` is rejected via `!Number.isFinite`, not
+// `!isNaN`. `isNaN(Infinity) === false` (Infinity is a well-defined
+// number), so a "use isNaN for clarity" refactor silently accepts
+// Infinity, and every hang-timer downstream gets
+// `setTimeout(fn, Infinity)` — the timer never fires and the
+// route-health reaper goes dark. No existing pin feeds `"Infinity"`;
+// the non-numeric pin uses `"abc"` which produces a genuine NaN and
+// would still be rejected under either guard. Orthogonal to B (no
+// negative-zero boundary) and C (no parser choice).
+test("parseHangTimeoutMs_whenInfinityString_returnsDefault", () => {
+  assert.equal(parseHangTimeoutMs("Infinity"), DEFAULT_ROUTE_HANG_TIMEOUT_MS);
+});
+
+// M132 pin B — `< 0` is STRICT: `-0` passes the guard. IEEE-754
+// negative zero has `-0 === 0` and `-0 < 0 === false`, so
+// `Number("-0")` flows through the finite+non-negative check and
+// returns `Math.trunc(-0) === 0`. A "tighten to `<= 0`" refactor
+// would silently also reject the legitimate `"0"` test-mode
+// short-path. Uses `-0` specifically because this is the ONE
+// non-positive value the strict `<` guard lets through — no
+// existing pin exercises the boundary. Orthogonal to A (finite
+// input) and C (no parser choice).
+test("parseHangTimeoutMs_whenNegativeZero_returnsZeroForTestShortPath", () => {
+  // Use `===` comparison because `assert.equal` (strict in bun) uses
+  // `Object.is`, which distinguishes `-0` from `+0`; the semantic
+  // contract of the test-mode short-path only requires that the
+  // result compares equal to zero and is below the `HANG_TIMEOUT_
+  // IMMEDIATE_THRESHOLD_MS` boundary, not a specific sign of zero.
+  const result = parseHangTimeoutMs("-0");
+  const resultEqualsZero = result === 0;
+  const resultIsDefault = result === DEFAULT_ROUTE_HANG_TIMEOUT_MS;
+  assert.ok(resultEqualsZero, `expected 0-equal, got ${String(result)}`);
+  assert.ok(
+    !resultIsDefault,
+    "must not flip to default — test-mode short-path preserved",
+  );
+});
+
+// M132 pin C — parsing uses `Number()`, not `parseInt(_, 10)`: a
+// scientific-notation input like `"9e5"` must round-trip to
+// `900000`. `parseInt("9e5", 10) === 9` — a silent 5-order-of-
+// magnitude truncation — because `parseInt` stops at the first
+// non-digit. Pins current behavior to prevent regression to a
+// parseInt-based rewrite. Orthogonal to A (no infinity) and B (no
+// negative-zero boundary).
+test("parseHangTimeoutMs_whenScientificNotationString_returnsExpandedInteger", () => {
+  assert.equal(parseHangTimeoutMs("9e5"), 900000);
+});
+
 test("hasUsableCredential_whenApiKeyEntryIsNonEmpty_returnsTrue", () => {
   assert.equal(hasUsableCredential({ type: "api", key: "sk-abc" }), true);
 });

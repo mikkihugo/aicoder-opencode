@@ -2355,6 +2355,58 @@ export const DEFAULT_ROUTE_HANG_TIMEOUT_MS = 900000;
  * wants immediate-penalty test semantics can still pass `"0"` or `"500"`
  * and have them honored.
  *
+ * ## Drift surfaces (M132 PDD)
+ *
+ * The eight existing pins cover undefined, empty, valid-int, "0"
+ * short-path, non-numeric, trailing-garbage, negative, and float
+ * truncation. Three orthogonal invariants sit below that coverage,
+ * each with a plausible rewrite that silently breaks it:
+ *
+ *  A. **`Infinity` is rejected via `!Number.isFinite`, not
+ *     `!isNaN`.** `Number("Infinity")` returns the JS value
+ *     `Infinity`, which `isNaN` reports as `false` (it is a well-
+ *     defined number, just not a finite one). A "simpler rejection
+ *     check" refactor that swaps `Number.isFinite` for `isNaN` (a
+ *     drift class that has bitten this codebase before in the
+ *     `chat.params` path) silently accepts `"Infinity"`, which
+ *     `Math.trunc(Infinity)` returns as-is, and every hang-timer
+ *     call downstream gets `setTimeout(fn, Infinity)` — the timer
+ *     never fires, no hang penalty is ever recorded, and the whole
+ *     route-health reaper goes dark. No existing pin feeds
+ *     `"Infinity"`; the non-numeric pin uses `"abc"` which is a
+ *     genuine `NaN` and passes under both guards.
+ *
+ *  B. **`< 0` is STRICT, so `-0` passes the guard and returns
+ *     `0`.** IEEE-754 negative zero has `-0 === 0` (and `-0 < 0`
+ *     is `false`), so `Number("-0")` → `-0` → the negative guard
+ *     is skipped → `Math.trunc(-0)` → `-0` → returned. A "tighten
+ *     the guard to `<= 0` to also reject the useless zero case"
+ *     refactor would silently also reject the legitimate `"0"`
+ *     test-mode short-path — any test that sets
+ *     `AICODER_ROUTE_HANG_TIMEOUT_MS="0"` to force the immediate-
+ *     penalty branch would get `DEFAULT_ROUTE_HANG_TIMEOUT_MS`
+ *     instead and never take the short-path. The existing
+ *     `whenZeroString` pin fires additively on this sabotage, but
+ *     no existing pin discriminates the `-0` boundary specifically.
+ *
+ *  C. **Parsing uses `Number()`, not `parseInt(_, 10)`.** The
+ *     original bug was `parseInt`-based; the fix is deliberately
+ *     `Number()`-based so that scientific notation
+ *     (`"9e5"` → `900000`), leading-plus, and whitespace-padded
+ *     integers all round-trip cleanly. A "revert to parseInt for
+ *     clarity" refactor would silently truncate `"9e5"` to `9` on
+ *     every operator who uses scientific notation in their env
+ *     file. The existing trailing-garbage pin fires additively on
+ *     this sabotage (because `parseInt` accepts the leading digits
+ *     instead of rejecting the whole string), but no existing pin
+ *     asserts that scientific notation survives.
+ *
+ * Asymmetric sabotage model: pin A fires on `isFinite → isNaN`
+ * (S1), pin B fires on `< 0 → <= 0` (S2), pin C fires on
+ * `Number → parseInt` (S3). The three sabotages are orthogonal —
+ * none of them touches another new pin's surface, and each new pin
+ * is its partition's sole detector among the new pins.
+ *
  * Args:
  *   rawValue: The raw env-var string, or `undefined` when unset.
  *
