@@ -787,6 +787,81 @@ export function clearSessionHangState(
 }
 
 /**
+ * Thin orchestration wrapper around `evaluateSessionHangForTimeoutPenalty`
+ * that ALSO clears the per-session hang-detection maps when a penalty is
+ * recorded.
+ *
+ * Motivation: the `session.error` and `assistant.message.completed` event
+ * handlers both call `clearSessionHangState` before returning — those are
+ * the two "the session reached a terminal state" signals. But opencode
+ * sessions can die silently: a network drop mid-stream, a client `Ctrl-C`
+ * that tears down the connection without firing `session.error`, a parent
+ * process kill that interrupts the event pipeline. In those scenarios
+ * NEITHER terminal handler fires, so the session's entries in
+ * `sessionStartTimeMap`, `sessionActiveProviderMap`, and
+ * `sessionActiveModelMap` are leaked — a small per-session tuple (~150
+ * bytes) accumulating once per silent-death session for the whole lifetime
+ * of the plugin process.
+ *
+ * The `chat.params` hang-timer `setTimeout` is, in practice, the ONLY
+ * signal we get about such sessions: it fires `timeoutMs + 100` after
+ * start, and a non-null return from `evaluateSessionHangForTimeoutPenalty`
+ * proves the session was still in the maps and had exceeded its budget
+ * (i.e. it had genuinely hung or silently died — either way it's not
+ * coming back). That's the right moment to also evict the session state,
+ * which is exactly what this helper does.
+ *
+ * Kept as a separate wrapper (rather than baking the cleanup into
+ * `evaluateSessionHangForTimeoutPenalty`) so the underlying query stays
+ * pure and the M41 regression tests — which pin the helper's non-mutating
+ * contract — do not need to change.
+ *
+ * Args:
+ *   sessionID: The hung session's id.
+ *   sessionStartTimeMap / sessionActiveProviderMap / sessionActiveModelMap:
+ *     The three per-session hang-detection maps — mutated in-place when
+ *     a penalty is recorded.
+ *   modelRouteHealthMap: In-memory route health table. Read-only here:
+ *     this helper computes the penalty entry but the caller still owns
+ *     the `.set()` so the mutation stays visible at the call site.
+ *   timeoutMs / now: Forwarded unchanged to
+ *     `evaluateSessionHangForTimeoutPenalty`.
+ *
+ * Returns:
+ *   `{ routeKey, health }` when a timeout penalty was computed AND the
+ *   session maps were cleared, or `null` when no penalty applies (the
+ *   session already completed, duration is still within budget, or the
+ *   provider/model bindings were dropped). Maps stay untouched on null.
+ */
+export function finalizeHungSessionState(
+  sessionID: string,
+  sessionStartTimeMap: Map<string, number>,
+  sessionActiveProviderMap: Map<string, string>,
+  sessionActiveModelMap: Map<string, { id: string; providerID: string }>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  timeoutMs: number,
+  now: number,
+): { routeKey: string; health: ModelRouteHealth } | null {
+  const result = evaluateSessionHangForTimeoutPenalty(
+    sessionID,
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+    modelRouteHealthMap,
+    timeoutMs,
+    now,
+  );
+  if (result === null) return null;
+  clearSessionHangState(
+    sessionID,
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+  return result;
+}
+
+/**
  * Pure helper invoked by the `chat.params` hang-timer `setTimeout` closure.
  *
  * Previously the closure captured the full opencode `input` object — a
@@ -2092,7 +2167,13 @@ export const ModelRegistryPlugin: Plugin = async () => {
           const capturedSessionID = input.sessionID;
           const capturedTimeoutMs = timeoutMs;
           const hangTimer = setTimeout(() => {
-            const result = evaluateSessionHangForTimeoutPenalty(
+            // `finalizeHungSessionState` (not the bare `evaluate…` query)
+            // so the three per-session maps are also evicted when a
+            // penalty is recorded. Silent-death sessions (network drop,
+            // client kill, parent crash) never fire session.error or
+            // assistant.message.completed, so this hang-timer firing is
+            // the ONLY cleanup opportunity for their session tuples.
+            const result = finalizeHungSessionState(
               capturedSessionID,
               sessionStartTimeMap,
               sessionActiveProviderMap,

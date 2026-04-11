@@ -22,6 +22,7 @@ import {
   parsePersistedHealthEntry,
   recommendTaskModelRoute,
   evaluateSessionHangForTimeoutPenalty,
+  finalizeHungSessionState,
   selectBestModelForRoleAndTask,
   summarizeVisibleRouteHealth,
 } from "./model-registry.js";
@@ -1949,6 +1950,98 @@ test("evaluateSessionHangForTimeoutPenalty_whenSessionHung_returnsTimeoutEntry",
     result.health.until > now,
     "until lies in the future (now + ROUTE_QUOTA_BACKOFF_DURATION_MS)",
   );
+});
+
+test("finalizeHungSessionState_whenSessionHung_clearsAllThreeSessionMapsAndReturnsPenalty", () => {
+  // Headline regression: when the hang-timer `setTimeout` fires for a
+  // session that was silently killed (network drop, client Ctrl-C, parent
+  // crash that does not fire session.error), NEITHER terminal event
+  // handler runs, so the session's entries in sessionStartTimeMap /
+  // sessionActiveProviderMap / sessionActiveModelMap are the plugin's
+  // ONLY signal — and they must be evicted at the same moment the penalty
+  // is recorded, otherwise silent-death sessions leak one tuple per
+  // session for the whole lifetime of the plugin process.
+  const now = Date.now();
+  const startMap = new Map<string, number>([["s1", now - 1000]]);
+  const providerMap = new Map<string, string>([["s1", "iflowcn"]]);
+  const modelMap = new Map<string, { id: string; providerID: string }>([
+    ["s1", { id: "qwen3-coder-plus", providerID: "iflowcn" }],
+  ]);
+  const routeHealthMap = new Map<string, { state: "quota" | "key_dead" | "no_credit" | "key_missing" | "model_not_found" | "timeout"; until: number; retryCount: number }>();
+
+  const result = finalizeHungSessionState(
+    "s1",
+    startMap,
+    providerMap,
+    modelMap,
+    routeHealthMap,
+    20,
+    now,
+  );
+
+  assert.ok(result, "hung session must produce a penalty");
+  assert.equal(result.routeKey, "iflowcn/qwen3-coder-plus");
+  assert.equal(result.health.state, "timeout");
+  assert.equal(startMap.has("s1"), false, "sessionStartTimeMap must be evicted after penalty");
+  assert.equal(providerMap.has("s1"), false, "sessionActiveProviderMap must be evicted after penalty");
+  assert.equal(modelMap.has("s1"), false, "sessionActiveModelMap must be evicted after penalty");
+});
+
+test("finalizeHungSessionState_whenSessionAlreadyCompleted_leavesMapsIntactAndReturnsNull", () => {
+  // Session completion cleared the start-time entry before the hang timer
+  // fired. The helper must short-circuit to null AND must NOT touch any
+  // of the maps — a subsequent session sharing the same sessionID string
+  // (shouldn't happen, but defensive) must not be evicted by our late
+  // firing.
+  const now = Date.now();
+  const startMap = new Map<string, number>(); // empty — session completed
+  const providerMap = new Map<string, string>([["s2", "iflowcn"]]); // stale crumb
+  const modelMap = new Map<string, { id: string; providerID: string }>([
+    ["s2", { id: "qwen3-coder-plus", providerID: "iflowcn" }],
+  ]);
+  const routeHealthMap = new Map();
+
+  const result = finalizeHungSessionState(
+    "s2",
+    startMap,
+    providerMap,
+    modelMap,
+    routeHealthMap,
+    20,
+    now,
+  );
+
+  assert.equal(result, null);
+  assert.equal(providerMap.has("s2"), true, "maps must be untouched when no penalty is recorded");
+  assert.equal(modelMap.has("s2"), true, "maps must be untouched when no penalty is recorded");
+});
+
+test("finalizeHungSessionState_whenDurationStillWithinBudget_leavesMapsIntactAndReturnsNull", () => {
+  // Boundary case: hang timer fired early (or duration equals timeoutMs
+  // exactly — the helper uses `>`, not `>=`). Session is still running
+  // and must NOT be evicted.
+  const now = Date.now();
+  const startMap = new Map<string, number>([["s3", now - 10]]); // 10ms, budget 20ms
+  const providerMap = new Map<string, string>([["s3", "iflowcn"]]);
+  const modelMap = new Map<string, { id: string; providerID: string }>([
+    ["s3", { id: "qwen3-coder-plus", providerID: "iflowcn" }],
+  ]);
+  const routeHealthMap = new Map();
+
+  const result = finalizeHungSessionState(
+    "s3",
+    startMap,
+    providerMap,
+    modelMap,
+    routeHealthMap,
+    20,
+    now,
+  );
+
+  assert.equal(result, null);
+  assert.equal(startMap.has("s3"), true, "still-running session must not be evicted");
+  assert.equal(providerMap.has("s3"), true);
+  assert.equal(modelMap.has("s3"), true);
 });
 
 test("evaluateSessionHangForTimeoutPenalty_closureDoesNotRetainFullInput_regressionPin", () => {
