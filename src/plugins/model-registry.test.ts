@@ -54,6 +54,7 @@ import {
   filterProviderModelsByRouteHealth,
   findCuratedFallbackRoute,
   classifyPersistedHealthKey,
+  extractAssistantMessageCompletedPayload,
   extractSessionErrorExplicitModel,
   findRegistryEntryByModel,
   loadRegistryAndLookupEntryForInputModel,
@@ -735,6 +736,44 @@ test("serializeHealthEntryForPersistence_whenCalled_preservesStateAndRetryCount"
 
   assert.equal(serialized.state, "no_credit");
   assert.equal(serialized.retryCount, 7);
+});
+
+test("extractAssistantMessageCompletedPayload_whenShapeIsValid_returnsNarrowedTuple", () => {
+  // M85 pin: a well-formed `assistant.message.completed` event with
+  // `properties.sessionID` and `properties.tokens` must return the
+  // narrowed `{sessionID, tokens}` tuple. Any sabotage that short-
+  // circuits the helper to `return undefined` fires this pin alone —
+  // pins 2 and 3 already expect `undefined` for their broken inputs.
+  const tokens = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } };
+  const result = extractAssistantMessageCompletedPayload({
+    type: "assistant.message.completed",
+    properties: { sessionID: "sess-1", tokens },
+  });
+  assert.deepEqual(result, { sessionID: "sess-1", tokens });
+});
+
+test("extractAssistantMessageCompletedPayload_whenSessionIDIsMissing_returnsUndefined", () => {
+  // M85 pin: a payload with `tokens` but no `sessionID` must return
+  // `undefined`. A sabotage that drops the `sessionID` string check
+  // fires this pin alone — pin 1 still has a valid sessionID; pin 3
+  // is broken at the `tokens` step so the sessionID check is moot.
+  const result = extractAssistantMessageCompletedPayload({
+    type: "assistant.message.completed",
+    properties: { tokens: { input: 0, output: 0 } },
+  });
+  assert.equal(result, undefined);
+});
+
+test("extractAssistantMessageCompletedPayload_whenTokensIsMissing_returnsUndefined", () => {
+  // M85 pin: a payload with `sessionID` but no `tokens` must return
+  // `undefined`. A sabotage that drops the `tokens` object check
+  // fires this pin alone — pin 1 still has valid tokens; pin 2 is
+  // broken at the `sessionID` step so the tokens check is moot.
+  const result = extractAssistantMessageCompletedPayload({
+    type: "assistant.message.completed",
+    properties: { sessionID: "sess-1" },
+  });
+  assert.equal(result, undefined);
 });
 
 test("extractSessionErrorExplicitModel_whenShapeIsValid_returnsNarrowedTuple", () => {

@@ -1584,6 +1584,76 @@ export function extractSessionErrorExplicitModel(
   return { id: candidateObj.id, providerID: candidateObj.providerID };
 }
 
+/**
+ * Narrow the opencode `assistant.message.completed` event payload to the
+ * structurally-required `{ sessionID, tokens }` tuple or `undefined`.
+ *
+ * ## Drift shape
+ *
+ * Per-narrowing-step drift: the `event` hook previously opened the
+ * `assistant.message.completed` branch with `(event as any).type ===
+ * "..."` followed by `const props = (event as any).properties as any;`
+ * and raw field reads `const sessionID = props.sessionID; const tokens
+ * = props.tokens;`. Two independent `as any` casts stack on one call
+ * site — the same "TypeScript-silent, runtime-silent, log-silent"
+ * drift class M84 closed on the `session.error` handler. Two concrete
+ * drift surfaces: (1) the opencode host does not export a stable
+ * TypeScript shape for the `assistant.message.completed` event, so a
+ * future release that renames `sessionID` → `session_id`, wraps the
+ * payload in `properties.message.tokens`, or promotes `tokens` to a
+ * tagged union silently delivers a malformed object into the
+ * zero-token quota-exhaustion classifier with no thrown error; (2) a
+ * future refactor that spreads `{...props}` verbatim loses the
+ * implicit `!sessionID` / `!tokens` guards, pushing `undefined`
+ * through `readAndClearSessionHangState` (a session-id keyed map
+ * operation that would silently return undefined bindings and skip
+ * the whole classification pass). The three-pin split pins each
+ * narrowing step independently so a sabotage that drops a single
+ * check fires exactly one pin — the same per-narrowing-step partition
+ * M84 used on `extractSessionErrorExplicitModel`. The helper is kept
+ * minimal so the `?? {}` vs skip-pass policy stays at the call site.
+ *
+ * Args:
+ *   event: The opencode event value — type `unknown` because the host
+ *     does not currently export a stable TypeScript shape for
+ *     `assistant.message.completed`, and the whole point of this
+ *     helper is to narrow it defensively rather than trust a cast.
+ *
+ * Returns:
+ *   The structurally valid `{ sessionID, tokens }` tuple from the
+ *   event, or `undefined` when the type tag is wrong, the properties
+ *   object is missing, or either required field is malformed.
+ *   `tokens` is returned as `Record<string, unknown>` — the shape the
+ *   downstream `isZeroTokenQuotaSignal` expects.
+ */
+export function extractAssistantMessageCompletedPayload(
+  event: unknown,
+): { sessionID: string; tokens: Record<string, unknown> } | undefined {
+  if (event === null || typeof event !== "object") {
+    return undefined;
+  }
+  const eventObj = event as Record<string, unknown>;
+  if (eventObj.type !== "assistant.message.completed") {
+    return undefined;
+  }
+  const properties = eventObj.properties;
+  if (properties === null || typeof properties !== "object") {
+    return undefined;
+  }
+  const propertiesObj = properties as Record<string, unknown>;
+  if (typeof propertiesObj.sessionID !== "string" || propertiesObj.sessionID.length === 0) {
+    return undefined;
+  }
+  const tokens = propertiesObj.tokens;
+  if (tokens === null || typeof tokens !== "object") {
+    return undefined;
+  }
+  return {
+    sessionID: propertiesObj.sessionID,
+    tokens: tokens as Record<string, unknown>,
+  };
+}
+
 export function buildRouteHealthEntry(
   providerID: string,
   modelID: string,
@@ -4368,13 +4438,14 @@ export const ModelRegistryPlugin: Plugin = async () => {
         return;
       }
 
-      if ((event as any).type === "assistant.message.completed") {
-        const props = (event as any).properties as any;
-        const sessionID = props.sessionID;
-        if (!sessionID) return;
-
-        const tokens = props.tokens;
-        if (!tokens) return;
+      // M85: `extractAssistantMessageCompletedPayload` replaces the
+      // stacked `(event as any).type` / `(event as any).properties as
+      // any` casts with explicit runtime narrowing. See the helper
+      // docstring for the drift shape it closes — mirror-drift of
+      // M84's `extractSessionErrorExplicitModel` on `session.error`.
+      const completedPayload = extractAssistantMessageCompletedPayload(event);
+      if (completedPayload !== undefined) {
+        const { sessionID, tokens } = completedPayload;
 
         // Deliberate: do NOT classify based on wall-clock duration here.
         // A completed turn is by definition not hung — deep reasoning turns
@@ -4402,7 +4473,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
         // `cache.read`/`cache.write`), so a successful deep-reasoning turn
         // could be silently penalized as quota-exhausted the moment any
         // future opencode release started populating those fields.
-        if (isZeroTokenQuotaSignal(tokens as Record<string, unknown>)) {
+        if (isZeroTokenQuotaSignal(tokens)) {
           if (!providerID || !model) return;
 
           recordRouteHealthByIdentifiers(
