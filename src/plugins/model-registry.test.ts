@@ -2840,6 +2840,114 @@ test("recordModelNotFoundRouteHealthByIdentifiers_whenCalled_invokesPersistFnThr
   assert.equal(observedRouteMap, modelRouteHealthMap);
 });
 
+test("recordModelNotFoundRouteHealthByIdentifiers_whenCalled_persistFnObservesRouteEntryAlreadyWritten", () => {
+  // M114 pin: the durability-pair contract requires `map.set` to
+  // happen BEFORE `persistFn` is invoked — a refactor that fired
+  // persistFn first for "lower-latency flush" would let persistFn
+  // serialize a pre-write snapshot that omits the new penalty. Pin 3
+  // only counts invocations and captures references; a swapped
+  // ordering is visible only from inside the persistFn closure. This
+  // pin inspects `modelRouteHealthMap` at the moment persistFn fires
+  // and asserts the new entry is already present and matches.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  let entryVisibleInsidePersistFn: ModelRouteHealth | undefined;
+
+  recordModelNotFoundRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "iflowcn",
+    "phantom-model-v2",
+    100_000,
+    (_providerMap, routeMap) => {
+      entryVisibleInsidePersistFn = routeMap.get("iflowcn/phantom-model-v2");
+    },
+  );
+
+  assert.ok(
+    entryVisibleInsidePersistFn,
+    "persistFn must observe the new route entry already written",
+  );
+  assert.equal(entryVisibleInsidePersistFn!.state, "model_not_found");
+  assert.equal(
+    entryVisibleInsidePersistFn!.until,
+    100_000 + ROUTE_MODEL_NOT_FOUND_DURATION_MS,
+  );
+});
+
+test("recordModelNotFoundRouteHealthByIdentifiers_whenCalled_leavesProviderHealthMapUnmutated", () => {
+  // M114 pin: the model-not-found branch is deliberately route-level
+  // only — a structural "this model does not exist at this provider"
+  // must NOT also penalize the provider. A refactor that "defensively"
+  // mirrored the write into `providerHealthMap` would silently
+  // quarantine every healthy sibling route through the same provider
+  // whenever any one model returned a model_not_found error. M76
+  // pins never assert the post-call state of `providerHealthMap`.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+
+  recordModelNotFoundRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "openrouter",
+    "typo-model-v3",
+    0,
+    () => {},
+  );
+
+  assert.equal(
+    providerHealthMap.size,
+    0,
+    "providerHealthMap must remain empty — model_not_found is route-level only",
+  );
+  assert.equal(
+    modelRouteHealthMap.size,
+    1,
+    "exactly one route-level entry must be written",
+  );
+});
+
+test("recordModelNotFoundRouteHealthByIdentifiers_whenCalledTwiceWithUnprefixedModelID_carriesRetryCountAcrossLookup", () => {
+  // M114 pin: the pre-write lookup must thread the SAME
+  // `(providerID, modelID)` pair passed to the builder so a second
+  // call finds the first call's entry via the composite-key
+  // `composeRouteKey` round trip. M76 pin 2 pre-populates a map with
+  // an aggregator-composite key and exercises the merge, but it
+  // never tests write-then-lookup under an UNPREFIXED modelID where
+  // both paths must agree on `provider/model` composition. A
+  // refactor that broke the lookup threading (e.g. `map.get(modelID)`
+  // with the raw id) would pass pin 2 because pin 2's map already
+  // contains the composite key, but would fail here: the second call
+  // would miss its own prior write and reset retryCount to 1.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+
+  recordModelNotFoundRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "iflowcn",
+    "phantom-v9",
+    10_000,
+    () => {},
+  );
+  recordModelNotFoundRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "iflowcn",
+    "phantom-v9",
+    20_000,
+    () => {},
+  );
+
+  const entry = modelRouteHealthMap.get("iflowcn/phantom-v9");
+  assert.ok(entry, "entry must live under the composite route key");
+  assert.equal(
+    entry!.retryCount,
+    2,
+    "second call must find first call's entry via symmetric lookup and increment retryCount",
+  );
+});
+
 test("lookupRouteHealthByIdentifiers_whenEntryStoredUnderCompositeKey_returnsEntry", () => {
   // M67: the helper is the single source of truth for "find existing
   // route health for this (providerID, modelID) pair". It must compose

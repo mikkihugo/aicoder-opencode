@@ -1605,6 +1605,65 @@ export function recordRouteHealthByIdentifiers(
  *     without stubbing `Date.now`.
  *   persistFn: Injected persister (production passes
  *     `persistProviderHealth`; tests pass a spy).
+ *
+ * ## Drift surfaces (M114 PDD)
+ *
+ * Three M76 pins cover the wrapper's happy-path shape (6h
+ * model_not_found write under composite key), the preserve-longer
+ * merge inherited from `buildRouteHealthEntry` (pre-populated shorter
+ * quota entry dominated by incoming 6h model_not_found with
+ * retryCount carried), and the durability-pair invocation
+ * (persistFn called once with both maps by reference). Three
+ * wrapper-level invariants — orthogonal to those three pins and to
+ * the underlying `buildModelNotFoundRouteHealth` / `recordRoute
+ * HealthPenalty` pin sets — remain unpinned:
+ *
+ * 1. **Write-before-persist order: persistFn observes the NEW route
+ *    entry in `modelRouteHealthMap`**. The durability-pair contract
+ *    (see `recordRouteHealthPenalty` docstring) is `map.set` FIRST,
+ *    then invoke `persistFn`. A refactor that swapped the order to
+ *    "fire persistFn first for lower-latency flush" would let
+ *    persistFn serialize a pre-write snapshot that omits the new
+ *    penalty — after a plugin reload, the route would appear
+ *    healthy even though the in-memory map briefly recorded it as
+ *    penalized. M76 pin 3 only counts persistFn invocations and
+ *    captures the map references; it never inspects the map
+ *    contents INSIDE the persistFn callback, so a swapped order
+ *    passes all three M76 pins. The drift is observable only from
+ *    inside the persistFn closure.
+ * 2. **`providerHealthMap` is threaded through unmutated — no
+ *    provider-level side effect**. The model-not-found branch is
+ *    deliberately route-level only (structural "this model does not
+ *    exist at this provider" does NOT imply "provider is dead").
+ *    The wrapper accepts `providerHealthMap` purely to satisfy the
+ *    durability-pair signature of `recordRouteHealthPenalty` —
+ *    `persistFn` needs both maps to serialize atomically. A refactor
+ *    that "also bumped" the provider-level entry as a defensive
+ *    cleanup ("since the route is dead, let's also mark the provider
+ *    as degraded") would silently quarantine every other model
+ *    served by the same provider whenever any one model returned a
+ *    model_not_found — e.g. one typo'd modelID would take down every
+ *    healthy sibling route through `openrouter`. M76 pins do not
+ *    assert the post-call state of `providerHealthMap`; a side-effect
+ *    write into it would pass all three.
+ * 3. **Lookup threading: the pre-write lookup uses the SAME
+ *    `(providerID, modelID)` pair passed to the builder, so a second
+ *    call with the same unprefixed modelID finds the first call's
+ *    entry and carries retryCount through the M43 preserve-longer
+ *    merge**. M76 pin 2 pre-populates the map with a composite key
+ *    (`"openrouter/xiaomi/gone-tomorrow"`) and asserts the merge
+ *    carries `retryCount: 3 → 4`, but it never exercises the
+ *    write-then-lookup round trip with an unprefixed modelID (where
+ *    `composeRouteKey` must collapse both the write key and the
+ *    lookup key to the same composite form). A refactor that broke
+ *    the lookup's `(providerID, modelID)` threading — e.g. passing
+ *    the raw `modelID` into `modelRouteHealthMap.get(modelID)` —
+ *    would pass M76 pin 2 only because its pre-populated map key is
+ *    already composite; under an unprefixed modelID, the second call
+ *    would re-write `retryCount: 1` because the lookup missed its
+ *    own prior write. A dedicated pin that calls the wrapper twice
+ *    with an unprefixed modelID and asserts `retryCount: 2` on the
+ *    second call closes the surface.
  */
 export function recordModelNotFoundRouteHealthByIdentifiers(
   modelRouteHealthMap: Map<string, ModelRouteHealth>,
