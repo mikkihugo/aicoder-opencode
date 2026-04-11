@@ -18,6 +18,7 @@ import {
 import {
   backupOpencodeDatabase,
   checkpointOpencodeDatabase,
+  deriveTargetDatabasePath,
   parseOpencodeDatabaseMaintenanceMode,
   vacuumOpencodeDatabase,
 } from "./opencode-database-maintenance.js";
@@ -524,7 +525,7 @@ function printUsageAndExit(): never {
       "|list-models [--free] [--provider <provider>] [--enabled]",
       "|list-model-families [--free] [--provider <provider>]",
       "|select-models <role> [--free] [--provider <provider>]",
-      "|manage-models|opencode-database-maintenance <checkpoint|backup|vacuum>\n",
+      "|manage-models|opencode-database-maintenance [--target <name>] <checkpoint|backup|vacuum>\n",
     ].join(""),
   );
   process.exit(1);
@@ -725,16 +726,30 @@ async function main(): Promise<void> {
   }
 
   if (commandName === "opencode-database-maintenance") {
-    const maintenanceMode = parseOpencodeDatabaseMaintenanceMode(process.argv[3]);
+    let targetDatabasePath: string | undefined;
+    let modeArgumentIndex = 3;
+
+    if (process.argv[3] === "--target") {
+      const targetName = process.argv[4];
+      if (!targetName) {
+        printUsageAndExit();
+      }
+      const targetConfiguration = await loadTargetConfiguration(targetName);
+      targetDatabasePath = deriveTargetDatabasePath(targetConfiguration.root);
+      modeArgumentIndex = 5;
+    }
+
+    const maintenanceMode = parseOpencodeDatabaseMaintenanceMode(process.argv[modeArgumentIndex]);
     if (!maintenanceMode) {
       printUsageAndExit();
     }
 
+    const maintenanceOptions = targetDatabasePath ? { databasePath: targetDatabasePath } : {};
     const maintenanceResult = maintenanceMode === "checkpoint"
-      ? await checkpointOpencodeDatabase()
+      ? await checkpointOpencodeDatabase(maintenanceOptions)
       : maintenanceMode === "backup"
-        ? await backupOpencodeDatabase()
-        : await vacuumOpencodeDatabase();
+        ? await backupOpencodeDatabase(maintenanceOptions)
+        : await vacuumOpencodeDatabase(maintenanceOptions);
 
     process.stdout.write(`${JSON.stringify(maintenanceResult, null, 2)}\n`);
     return;

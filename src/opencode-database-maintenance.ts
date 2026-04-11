@@ -31,6 +31,9 @@ export const DEFAULT_BACKUP_RETENTION_COUNT = 7;
 export const SQLITE_BUSY_TIMEOUT_MILLISECONDS = 5000;
 export const BACKUP_FILE_PREFIX = "opencode-";
 export const BACKUP_FILE_EXTENSION = ".sqlite3";
+export const TARGET_OPENCODE_DATABASE_RELATIVE_PATH = path.join(
+  ".opencode", "xdg-data", "opencode", "opencode.db",
+);
 
 const HOURLY_CHECKPOINT_MODE = "checkpoint";
 const DAILY_BACKUP_MODE = "backup";
@@ -69,6 +72,19 @@ type BackupArtifact = {
   path: string;
   modifiedAtMilliseconds: number;
 };
+
+/**
+ * Derive the OpenCode database path for a target repository root.
+ *
+ * Args:
+ *   targetRoot: Absolute path to the target repository root.
+ *
+ * Returns:
+ *   Absolute path to the target's OpenCode database under its XDG data directory.
+ */
+export function deriveTargetDatabasePath(targetRoot: string): string {
+  return path.join(targetRoot, TARGET_OPENCODE_DATABASE_RELATIVE_PATH);
+}
 
 /**
  * Parse one CLI/database-maintenance mode.

@@ -13,9 +13,11 @@ import path from "node:path";
 import {
   BACKUP_FILE_EXTENSION,
   BACKUP_FILE_PREFIX,
+  TARGET_OPENCODE_DATABASE_RELATIVE_PATH,
   backupOpencodeDatabase,
   buildOpencodeDatabaseBackupPath,
   checkpointOpencodeDatabase,
+  deriveTargetDatabasePath,
   parseOpencodeDatabaseMaintenanceMode,
   pruneStaleOpencodeDatabaseBackups,
 } from "./opencode-database-maintenance.js";
@@ -88,6 +90,24 @@ test("parseOpencodeDatabaseMaintenanceMode_whenModeIsKnown_returnsMode", () => {
 
 test("parseOpencodeDatabaseMaintenanceMode_whenModeIsUnknown_returnsNull", () => {
   assert.equal(parseOpencodeDatabaseMaintenanceMode("reindex"), null);
+});
+
+test("deriveTargetDatabasePath_whenTargetRootProvided_joinsRootWithRelativePath", () => {
+  const databasePath = deriveTargetDatabasePath("/home/user/my-repo");
+
+  assert.equal(
+    databasePath,
+    path.join("/home/user/my-repo", TARGET_OPENCODE_DATABASE_RELATIVE_PATH),
+  );
+});
+
+test("deriveTargetDatabasePath_whenRootHasTrailingSlash_stillProducesCleanPath", () => {
+  const databasePath = deriveTargetDatabasePath("/home/user/my-repo/");
+
+  assert.equal(
+    databasePath,
+    path.join("/home/user/my-repo", TARGET_OPENCODE_DATABASE_RELATIVE_PATH),
+  );
 });
 
 test("buildOpencodeDatabaseBackupPath_whenTimestampProvided_returnsSortableBackupName", () => {
@@ -262,4 +282,24 @@ test("pruneStaleOpencodeDatabaseBackups_whenDirectoryHasExtraArtifacts_prunesOld
   );
 
   assert.deepEqual(prunedBackupPaths, [oldestBackupPath]);
+});
+
+test("deriveTargetDatabasePath_whenGivenRoot_returnsXdgDataPath", () => {
+  const targetRoot = "/home/user/repos/my-target";
+  const result = deriveTargetDatabasePath(targetRoot);
+
+  assert.equal(
+    result,
+    path.join(targetRoot, TARGET_OPENCODE_DATABASE_RELATIVE_PATH),
+  );
+  assert.ok(result.endsWith(path.join("opencode", "opencode.db")));
+});
+
+test("deriveTargetDatabasePath_whenRootIsAbsolute_preservesRoot", () => {
+  const result = deriveTargetDatabasePath("/opt/repos/dr-repo");
+
+  assert.equal(
+    result,
+    "/opt/repos/dr-repo/.opencode/xdg-data/opencode/opencode.db",
+  );
 });
