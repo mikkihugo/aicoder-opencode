@@ -16,6 +16,7 @@ import {
   filterProviderModelsByRouteHealth,
   findCuratedFallbackRoute,
   inferTaskComplexity,
+  parsePersistedHealthEntry,
   recommendTaskModelRoute,
   selectBestModelForRoleAndTask,
 } from "./model-registry.js";
@@ -1265,4 +1266,92 @@ test("computeProviderHealthUpdate_whenNoExistingEntry_createsFreshRecord", () =>
   assert.equal(next.state, "quota");
   assert.equal(next.until, newUntil);
   assert.equal(next.retryCount, 1);
+});
+
+test("parsePersistedHealthEntry_whenEntryIsWellFormed_returnsNormalizedRecord", () => {
+  const now = Date.now();
+  const entry = {
+    state: "no_credit",
+    until: now + 2 * 60 * 60 * 1000,
+    retryCount: 3,
+  };
+
+  const parsed = parsePersistedHealthEntry(entry, now);
+
+  assert.ok(parsed, "valid entry should parse");
+  assert.equal(parsed.state, "no_credit");
+  assert.equal(parsed.until, entry.until);
+  assert.equal(parsed.retryCount, 3);
+});
+
+test("parsePersistedHealthEntry_whenUntilIsNeverLiteral_normalizesToInfinity", () => {
+  const entry = { state: "key_missing", until: "never", retryCount: 0 };
+
+  const parsed = parsePersistedHealthEntry(entry, Date.now());
+
+  assert.ok(parsed);
+  assert.equal(parsed.until, Number.POSITIVE_INFINITY);
+  assert.equal(parsed.state, "key_missing");
+});
+
+test("parsePersistedHealthEntry_whenEntryIsNull_returnsNullWithoutThrowing", () => {
+  // Regression: a single null entry in the persisted JSON used to throw
+  // when the load loop reached `health.until`, the outer catch swallowed
+  // it, and EVERY valid sibling entry was lost on plugin restart.
+  const parsed = parsePersistedHealthEntry(null, Date.now());
+  assert.equal(parsed, null);
+});
+
+test("parsePersistedHealthEntry_whenStateIsUnknown_returnsNull", () => {
+  // Schema drift: an older plugin version wrote a state this version
+  // doesn't recognize. Reject the entry rather than silently loading it
+  // into the runtime union-typed map where it would violate invariants
+  // that readers rely on (e.g. `healthStateLabel` switch arms).
+  const entry = { state: "future_unknown_state", until: Date.now() + 1000, retryCount: 0 };
+
+  const parsed = parsePersistedHealthEntry(entry, Date.now());
+
+  assert.equal(parsed, null);
+});
+
+test("parsePersistedHealthEntry_whenUntilIsCorruptString_returnsNullInsteadOfZombie", () => {
+  // Regression: `health.until as number` cast silently passed strings
+  // through to `string <= now` comparison — where JS coerces. If the
+  // coercion produced NaN, the comparison was false and the entry
+  // survived forever as an un-expirable zombie. Reject instead.
+  const entry = { state: "quota", until: "oops-not-a-number", retryCount: 1 };
+
+  const parsed = parsePersistedHealthEntry(entry, Date.now());
+
+  assert.equal(parsed, null);
+});
+
+test("parsePersistedHealthEntry_whenUntilIsNaN_returnsNullInsteadOfZombie", () => {
+  // Regression: `NaN <= now` is always false, so a NaN `until` used to
+  // create a permanent zombie entry. Explicit Number.isFinite guard.
+  const entry = { state: "quota", until: Number.NaN, retryCount: 1 };
+
+  const parsed = parsePersistedHealthEntry(entry, Date.now());
+
+  assert.equal(parsed, null);
+});
+
+test("parsePersistedHealthEntry_whenUntilIsAlreadyInThePast_returnsNullAsExpired", () => {
+  const now = Date.now();
+  const entry = { state: "quota", until: now - 1000, retryCount: 1 };
+
+  const parsed = parsePersistedHealthEntry(entry, now);
+
+  assert.equal(parsed, null);
+});
+
+test("parsePersistedHealthEntry_whenRetryCountIsMissing_returnsNull", () => {
+  // Disk schema drift: old plugin version that didn't persist
+  // retryCount. Reject rather than synthesize a default — the test
+  // pins the intent that callers must not silently repair broken rows.
+  const entry = { state: "quota", until: Date.now() + 1000 } as unknown;
+
+  const parsed = parsePersistedHealthEntry(entry, Date.now());
+
+  assert.equal(parsed, null);
 });

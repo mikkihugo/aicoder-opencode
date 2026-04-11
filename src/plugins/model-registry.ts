@@ -60,6 +60,19 @@ const BILLING_MODE_PREFERENCE_ORDER = ["free", "subscription", "quota", "paid_ap
 
 type ProviderHealthState = "quota" | "key_dead" | "no_credit" | "key_missing" | "model_not_found" | "timeout";
 
+// Runtime guard for `ProviderHealthState`. Used by `parsePersistedHealthEntry`
+// to reject disk entries whose `state` field is corrupt, schema-drifted from
+// an older plugin version, or manually-edited to something unrecognized.
+// Keep in sync with the `ProviderHealthState` union above.
+const PROVIDER_HEALTH_STATES: ReadonlySet<string> = new Set<ProviderHealthState>([
+  "quota",
+  "key_dead",
+  "no_credit",
+  "key_missing",
+  "model_not_found",
+  "timeout",
+]);
+
 type ProviderHealth = {
   state: ProviderHealthState;
   until: number;
@@ -97,6 +110,62 @@ function logRegistryLoadError(error: unknown): void {
   console.error(MODEL_REGISTRY_LOAD_ERROR_MESSAGE, error);
 }
 
+/**
+ * Validate and normalize one raw entry from the persisted health JSON.
+ *
+ * Returns `null` when the entry is structurally corrupt (null, missing
+ * fields, unknown state, non-numeric retryCount, un-parseable until). The
+ * caller should skip nulls rather than abort the whole load — a single
+ * bad entry must not nuke valid sibling entries.
+ *
+ * Args:
+ *   rawEntry: The parsed-JSON value at one key in the persisted health map.
+ *     Type is `unknown` because the on-disk file can be schema-drifted from
+ *     older plugin versions, manually edited, or partially corrupted.
+ *   now: Current wall-clock ms — entries with `until <= now` return `null`
+ *     so the caller treats them as already-expired.
+ *
+ * Returns:
+ *   `{ state, until, retryCount }` with `until` normalized to `number`
+ *   (`"never"` → `Number.POSITIVE_INFINITY`), or `null` on any validation
+ *   failure or expiry.
+ */
+export function parsePersistedHealthEntry(
+  rawEntry: unknown,
+  now: number,
+): ProviderHealth | null {
+  if (rawEntry === null || typeof rawEntry !== "object") return null;
+  const entry = rawEntry as Record<string, unknown>;
+
+  const state = entry.state;
+  if (typeof state !== "string" || !PROVIDER_HEALTH_STATES.has(state)) return null;
+
+  const rawUntil = entry.until;
+  let until: number;
+  if (rawUntil === "never") {
+    until = Number.POSITIVE_INFINITY;
+  } else if (typeof rawUntil === "number" && Number.isFinite(rawUntil)) {
+    until = rawUntil;
+  } else {
+    // Corrupt: string that isn't "never", NaN, boolean, null, missing, etc.
+    // Reject rather than coerce — silent coercion used to produce NaN
+    // zombies (NaN <= now is always false) that never expired.
+    return null;
+  }
+  if (until <= now) return null;
+
+  const retryCount = entry.retryCount;
+  if (typeof retryCount !== "number" || !Number.isFinite(retryCount) || retryCount < 0) {
+    return null;
+  }
+
+  return {
+    state: state as ProviderHealthState,
+    until,
+    retryCount,
+  };
+}
+
 async function loadPersistedProviderHealth(): Promise<{
   providerHealthMap: Map<string, ProviderHealth>;
   modelRouteHealthMap: Map<string, ModelRouteHealth>;
@@ -105,11 +174,18 @@ async function loadPersistedProviderHealth(): Promise<{
   const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
   try {
     const raw = await readFile(PROVIDER_HEALTH_STATE_FILE, "utf8");
-    const parsed: PersistedHealthMap = JSON.parse(raw);
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object") {
+      return { providerHealthMap, modelRouteHealthMap };
+    }
     const now = Date.now();
-    for (const [key, health] of Object.entries(parsed)) {
-      const until = health.until === "never" ? Number.POSITIVE_INFINITY : (health.until as number);
-      if (until <= now) continue;
+    for (const [key, rawEntry] of Object.entries(parsed as Record<string, unknown>)) {
+      // Per-entry validation + isolation: one corrupt entry must NOT
+      // discard valid sibling entries. Previously a single null / missing
+      // field threw from inside this loop, the outer catch swallowed it,
+      // and every live backoff was silently lost on plugin restart.
+      const normalized = parsePersistedHealthEntry(rawEntry, now);
+      if (normalized === null) continue;
 
       // persistProviderHealth writes BOTH provider entries (`"iflowcn"`)
       // and route entries (`"iflowcn/qwen3-coder-plus"`) into one flat
@@ -119,13 +195,13 @@ async function loadPersistedProviderHealth(): Promise<{
       // provider map.
       const isRouteKey = key.includes("/");
       if (isRouteKey) {
-        modelRouteHealthMap.set(key, { ...health, until });
+        modelRouteHealthMap.set(key, normalized);
       } else {
-        providerHealthMap.set(key, { ...health, until });
+        providerHealthMap.set(key, normalized);
       }
     }
   } catch {
-    // Missing / unreadable file → start fresh.
+    // Missing / unreadable file / JSON.parse failure → start fresh.
   }
   return { providerHealthMap, modelRouteHealthMap };
 }
