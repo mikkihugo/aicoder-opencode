@@ -12,6 +12,7 @@ import {
   buildModelNotFoundRouteHealth,
   classifyProviderApiError,
   isFallbackBlocked,
+  hasUsableCredential,
   isZeroTokenQuotaSignal,
   parseAgentFrontmatter,
   parseHangTimeoutMs,
@@ -2983,4 +2984,79 @@ test("parseHangTimeoutMs_whenFloatString_truncatesToInteger", () => {
   // truncation keeps the return type a clean integer for the
   // `< 1000` comparison and any arithmetic downstream.
   assert.equal(parseHangTimeoutMs("123456.789"), 123456);
+});
+
+test("hasUsableCredential_whenApiKeyEntryIsNonEmpty_returnsTrue", () => {
+  assert.equal(hasUsableCredential({ type: "api", key: "sk-abc" }), true);
+});
+
+test("hasUsableCredential_whenApiKeyEntryIsEmpty_returnsFalse", () => {
+  assert.equal(hasUsableCredential({ type: "api", key: "" }), false);
+});
+
+test("hasUsableCredential_whenOauthEntryHasAccessTokenOnly_returnsTrue", () => {
+  assert.equal(
+    hasUsableCredential({ type: "oauth", access: "at-abc", refresh: "" }),
+    true,
+  );
+});
+
+test("hasUsableCredential_whenOauthEntryHasEmptyAccessButValidRefresh_returnsTrue", () => {
+  // Headline regression pin: this is the latent production shape. When
+  // opencode clears an expired access token, the on-disk entry lands as
+  // `{ type: "oauth", access: "", refresh: "<valid>" }` and opencode
+  // transparently refreshes on the next provider request. The pre-M55
+  // predicate only inspected `access`, so the plugin would flag the
+  // provider `key_missing` at init and cascade a 2h health penalty that
+  // suppressed every route under that provider — a plugin-level outage
+  // opencode itself would have resolved on the first request. The
+  // refresh token is an independent usability signal and must yield true.
+  assert.equal(
+    hasUsableCredential({ type: "oauth", access: "", refresh: "rt-valid" }),
+    true,
+  );
+});
+
+test("hasUsableCredential_whenOauthEntryHasBothTokensEmpty_returnsFalse", () => {
+  // Genuinely empty oauth entries (neither token set) must still flag
+  // as unusable — the refresh allowance only kicks in when refresh is
+  // itself a non-empty string.
+  assert.equal(
+    hasUsableCredential({ type: "oauth", access: "", refresh: "" }),
+    false,
+  );
+});
+
+test("hasUsableCredential_whenOauthEntryHasRefreshFieldMissing_fallsBackToAccessCheck", () => {
+  // Defensive pin: the refresh branch must not throw or return true on
+  // a missing field. When `refresh` is undefined, the coalesce-to-""
+  // guard inside the helper keeps the check equivalent to the pre-M55
+  // access-only behavior for that shape.
+  assert.equal(
+    hasUsableCredential({ type: "oauth", access: "at-abc" }),
+    true,
+  );
+  assert.equal(
+    hasUsableCredential({ type: "oauth", access: "" }),
+    false,
+  );
+});
+
+test("hasUsableCredential_whenEntryIsNonEmptyString_returnsTrue", () => {
+  // Legacy fixture shape: bare strings are accepted for back-compat.
+  assert.equal(hasUsableCredential("sk-legacy"), true);
+});
+
+test("hasUsableCredential_whenEntryIsEmptyString_returnsFalse", () => {
+  assert.equal(hasUsableCredential(""), false);
+});
+
+test("hasUsableCredential_whenEntryIsNullOrUndefined_returnsFalse", () => {
+  assert.equal(hasUsableCredential(null), false);
+  assert.equal(hasUsableCredential(undefined), false);
+});
+
+test("hasUsableCredential_whenLegacyApiKeyShape_returnsTrue", () => {
+  // Legacy `{ apiKey: "..." }` shape preserved for old fixtures.
+  assert.equal(hasUsableCredential({ apiKey: "sk-legacy" }), true);
 });

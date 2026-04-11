@@ -1850,10 +1850,34 @@ async function loadAuthKeys(): Promise<Map<string, { hasCredential: boolean }>> 
 
 /**
  * Check whether an auth.json entry has a usable credential.
+ *
  * Accepts the real opencode schemas, the legacy `{ apiKey }` shape (to keep
  * older fixtures working), and bare string values (used in some legacy tests).
+ *
+ * OAuth semantics: opencode persists oauth credentials as
+ * `{ type: "oauth", access: "...", refresh: "..." }`. When an access token
+ * expires or is explicitly cleared, opencode leaves `access` empty and
+ * uses the `refresh` token to mint a new access token on the next
+ * provider request — entirely transparent to the caller. From the
+ * plugin's perspective, the entry is still a USABLE credential: the
+ * provider WILL be callable the moment anything tries to use it. The
+ * pre-M55 predicate only inspected `access`, so a `{ access: "",
+ * refresh: "<valid>" }` entry would flag the provider as `key_missing`
+ * at plugin init, cascading into a 2h `key_missing` health penalty that
+ * suppressed the provider from every routing decision — a plugin-level
+ * outage that opencode itself would have resolved transparently on the
+ * first request. Honor the refresh token as an independent usability
+ * signal so the plugin's view of provider availability matches
+ * opencode's.
+ *
+ * Args:
+ *   entry: A parsed JSON value from auth.json.
+ *
+ * Returns:
+ *   true iff the entry carries at least one non-empty credential field
+ *   under any of the recognized schemas.
  */
-function hasUsableCredential(entry: unknown): boolean {
+export function hasUsableCredential(entry: unknown): boolean {
   if (typeof entry === "string") {
     return entry.length > 0;
   }
@@ -1866,7 +1890,9 @@ function hasUsableCredential(entry: unknown): boolean {
     return typeof record.key === "string" && record.key.length > 0;
   }
   if (entryType === "oauth") {
-    return typeof record.access === "string" && record.access.length > 0;
+    const accessToken = typeof record.access === "string" ? record.access : "";
+    const refreshToken = typeof record.refresh === "string" ? record.refresh : "";
+    return accessToken.length > 0 || refreshToken.length > 0;
   }
   // Legacy / fixture shape: { apiKey: "..." }
   if (typeof record.apiKey === "string" && record.apiKey.length > 0) {
