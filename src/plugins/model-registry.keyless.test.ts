@@ -93,6 +93,49 @@ async function waitForPersistedHealthState(
   return readFile(filePath, "utf8").catch(() => "");
 }
 
+test("initializeProviderHealthState_whenCredentialOnlyInEnvVar_doesNotFlagProvider", async () => {
+  // A user who only sets OPENROUTER_API_KEY (no auth.json entry) still has a
+  // working provider. Previously the plugin flagged them `key_missing`. This
+  // test locks in the env-var fallback behavior with both convention-based
+  // (openrouter → OPENROUTER_API_KEY) and override (kimi-for-coding → KIMI_API_KEY).
+  await withIsolatedHome(async (homeDirectory) => {
+    await writeAuthFile(homeDirectory, {});
+    const savedOpenrouter = process.env.OPENROUTER_API_KEY;
+    const savedKimi = process.env.KIMI_API_KEY;
+    process.env.OPENROUTER_API_KEY = "env-openrouter-key";
+    process.env.KIMI_API_KEY = "env-kimi-key";
+    try {
+      await withFreshHealthState(async () => {
+        const { initializeProviderHealthState } = await import("./model-registry.js");
+
+        const runtime = await initializeProviderHealthState([
+          buildModelRegistryEntry("openrouter-model", ["architect"], [
+            { provider: "openrouter", model: "openrouter/m", priority: 1 },
+          ]),
+          buildModelRegistryEntry("kimi-model", ["architect"], [
+            { provider: "kimi-for-coding", model: "kimi-for-coding/m", priority: 1 },
+          ]),
+          buildModelRegistryEntry("unconfigured-model", ["architect"], [
+            { provider: "nonexistent-provider", model: "nonexistent-provider/m", priority: 1 },
+          ]),
+        ]);
+
+        assert.equal(runtime.providerHealthMap.get("openrouter"), undefined);
+        assert.equal(runtime.providerHealthMap.get("kimi-for-coding"), undefined);
+        assert.equal(
+          runtime.providerHealthMap.get("nonexistent-provider")?.state,
+          "key_missing",
+        );
+      });
+    } finally {
+      if (savedOpenrouter === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = savedOpenrouter;
+      if (savedKimi === undefined) delete process.env.KIMI_API_KEY;
+      else process.env.KIMI_API_KEY = savedKimi;
+    }
+  });
+});
+
 test("initializeProviderHealthState_whenAuthJsonUsesRealOpencodeSchema_recognizesCredentials", async () => {
   // Real opencode auth.json entries are:
   //   { type: "api", key: "..." }          for API-key providers

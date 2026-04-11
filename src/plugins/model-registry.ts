@@ -426,6 +426,47 @@ async function readAgentMetadata(
  * Load API keys from the OpenCode auth.json file.
  */
 /**
+ * Opencode sources provider credentials from auth.json *and* from environment
+ * variables. When a user has only the env var set (e.g. `OPENROUTER_API_KEY`)
+ * the provider still works, so the plugin must not false-flag it as
+ * `key_missing`. Map the provider ID to the env var names opencode honours.
+ * Entries with no explicit override fall back to the convention
+ * `<PROVIDER>_API_KEY` (dashes → underscores, uppercased).
+ */
+const PROVIDER_ENV_VAR_OVERRIDES: Record<string, readonly string[]> = {
+  "kimi-for-coding": ["KIMI_API_KEY"],
+  minimax: ["MINIMAX_API_KEY"],
+  openrouter: ["OPENROUTER_API_KEY"],
+  deepseek: ["DEEPSEEK_API_KEY"],
+  google: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+  anthropic: ["ANTHROPIC_API_KEY"],
+  openai: ["OPENAI_API_KEY"],
+  xai: ["XAI_API_KEY"],
+  mistral: ["MISTRAL_API_KEY"],
+  cerebras: ["CEREBRAS_API_KEY"],
+  togetherai: ["TOGETHER_API_KEY", "TOGETHERAI_API_KEY"],
+};
+
+function providerEnvVarCandidates(providerID: string): readonly string[] {
+  const overrides = PROVIDER_ENV_VAR_OVERRIDES[providerID];
+  if (overrides) {
+    return overrides;
+  }
+  const conventional = `${providerID.replace(/-/g, "_").toUpperCase()}_API_KEY`;
+  return [conventional];
+}
+
+function providerHasEnvVarCredential(providerID: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  for (const name of providerEnvVarCandidates(providerID)) {
+    const value = env[name];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Read opencode's auth.json and report whether each provider has a usable
  * credential configured. The real opencode schema is:
  *   - { type: "api", key: "<string>" }              — API key entry
@@ -433,9 +474,12 @@ async function readAgentMetadata(
  *
  * An earlier version of this plugin assumed { apiKey: string }, which does
  * not match any real auth.json entry and caused every provider to be
- * incorrectly flagged as `key_missing`. This function is now schema-aware.
+ * incorrectly flagged as `key_missing`. This function is now schema-aware
+ * and also consults env var fallbacks so providers configured only through
+ * `OPENROUTER_API_KEY` / `MINIMAX_API_KEY` / etc. are not false-flagged.
  */
 async function loadAuthKeys(): Promise<Map<string, { hasCredential: boolean }>> {
+  const result = new Map<string, { hasCredential: boolean }>();
   try {
     const authFilePath = path.join(
       process.env.HOME ?? "",
@@ -446,14 +490,13 @@ async function loadAuthKeys(): Promise<Map<string, { hasCredential: boolean }>> 
     );
     const raw = await readFile(authFilePath, "utf8");
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const result = new Map<string, { hasCredential: boolean }>();
     for (const [providerID, value] of Object.entries(parsed)) {
       result.set(providerID, { hasCredential: hasUsableCredential(value) });
     }
-    return result;
   } catch {
-    return new Map();
+    // auth.json may not exist or be unreadable; env-var fallback still applies.
   }
+  return result;
 }
 
 /**
@@ -513,7 +556,9 @@ async function initializeProviderHealthState(
   for (const providerID of knownProviders) {
     // Only mark as key_missing if not already in a penalty state
     if (!providerHealthMap.has(providerID)) {
-      const hasKey = authKeys.get(providerID)?.hasCredential === true;
+      const hasKey =
+        authKeys.get(providerID)?.hasCredential === true ||
+        providerHasEnvVarCredential(providerID);
 
       if (!hasKey) {
         providerHealthMap.set(providerID, {

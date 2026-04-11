@@ -146,6 +146,19 @@ Completion Notes (2026-04-11):
 - Verify that overlay shims in `targets/*/overlay/.opencode/plugins/` are in sync with `src/plugins/`
 - Add a CI check or validation command
 
+### M13: Env-var credential fallback in `loadAuthKeys` `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Gap**: opencode sources provider credentials from `auth.json` **and** env vars (e.g. `OPENROUTER_API_KEY`, `MINIMAX_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`). A user with only the env var set had a working provider but the plugin flagged it `key_missing` and pruned the route.
+- **Fix**:
+  - Added `PROVIDER_ENV_VAR_OVERRIDES` for non-conventional names (`kimi-for-coding` → `KIMI_API_KEY`, `google` → `GEMINI_API_KEY`, etc.)
+  - `providerEnvVarCandidates(id)` falls back to the convention `<ID>_API_KEY` (dashes → underscores, upper-cased) when no override exists
+  - `providerHasEnvVarCredential(id)` checks `process.env` for any candidate
+  - `initializeProviderHealthState` now skips the `key_missing` flag when either auth.json **or** env var says the provider is configured
+- **Test**: `initializeProviderHealthState_whenCredentialOnlyInEnvVar_doesNotFlagProvider` covers convention-based (`openrouter`) + override (`kimi-for-coding`) + truly missing (`nonexistent-provider`).
+- **Verification**: typecheck clean, 120/120 tests pass (added 1). Dist rebuilt.
+- **Files**: `src/plugins/model-registry.ts`, `src/plugins/model-registry.keyless.test.ts`.
+
 ### M12: `loadAuthKeys` reads the real opencode auth.json schema `✅ COMPLETED`
 
 Completion Notes (2026-04-11):
