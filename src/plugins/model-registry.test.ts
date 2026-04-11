@@ -9,6 +9,7 @@ import {
   buildAvailableModelsSystemPrompt,
   buildProviderHealthSystemPrompt,
   clearSessionHangState,
+  computeRegistryEntryHealthReport,
   expireHealthMaps,
   findCuratedFallbackRoute,
   inferTaskComplexity,
@@ -790,4 +791,98 @@ test("buildAvailableModelsSystemPrompt_whenOnlyVisibleRouteIsUnhealthyAtRouteLev
   // The whole prompt collapses to null because no entries survive
   // the route-health filter and the roleToModels map is empty.
   assert.equal(prompt, null);
+});
+
+test("computeRegistryEntryHealthReport_whenPrimaryVisibleRouteIsRouteUnhealthy_reportsRouteScope", () => {
+  // Regression (M29): listCuratedModels previously read provider_order[0]
+  // raw and only checked provider health, so an entry whose primary
+  // visible route had model_not_found or a zero-token quota looked
+  // "healthy" to the agent and kept getting routed to. Fix: walk
+  // filterVisibleProviderRoutes + consult modelRouteHealthMap, emit a
+  // scope:"route" entry so the agent can distinguish.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = {
+    id: "dead-primary",
+    enabled: true,
+    description: "dead-primary",
+    capability_tier: "strong",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: [],
+    not_for: [],
+    default_roles: ["implementation_worker"],
+    provider_order: [
+      { provider: "iflowcn", model: "iflowcn/dead-primary", priority: 1 },
+    ],
+    notes: [],
+  };
+  const providerHealthMap = new Map();
+  const modelRouteHealthMap = new Map([
+    [
+      "iflowcn/dead-primary",
+      { state: "model_not_found" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  const report = computeRegistryEntryHealthReport(
+    entry,
+    providerHealthMap,
+    modelRouteHealthMap,
+    now,
+  );
+
+  assert.ok(report);
+  assert.equal(report.state, "model_not_found");
+  assert.equal(report.scope, "route");
+});
+
+test("computeRegistryEntryHealthReport_whenPrimaryRouteIsHiddenPaid_walksToVisibleSibling", () => {
+  // Regression (M29): previously provider_order[0] was used raw. If the
+  // primary was a hidden paid route (e.g. openrouter/xiaomi/mimo-v2-pro)
+  // and that route had a route-level penalty, the report lied about the
+  // visible fallback's health. Fix: filter to visible first, report on
+  // the first visible route's health.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = {
+    id: "mimo-v2-pro",
+    enabled: true,
+    description: "mimo-v2-pro",
+    capability_tier: "frontier",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: [],
+    not_for: [],
+    default_roles: ["architect"],
+    provider_order: [
+      { provider: "openrouter", model: "openrouter/xiaomi/mimo-v2-pro", priority: 1 },
+      { provider: "opencode-go", model: "opencode-go/mimo-v2-pro", priority: 2 },
+    ],
+    notes: [],
+  };
+  // Hidden paid primary's provider (openrouter) is marked dead at the
+  // provider level; visible fallback (opencode-go) is healthy. HEAD code
+  // read provider_order[0] raw, found openrouter unhealthy, and reported
+  // scope:"provider" as if the whole entry was dead.
+  const providerHealthMap = new Map([
+    [
+      "openrouter",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  const report = computeRegistryEntryHealthReport(
+    entry,
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+
+  // Visible primary (opencode-go/mimo-v2-pro) is healthy → null report.
+  assert.equal(report, null);
 });

@@ -354,6 +354,45 @@ export function findCuratedFallbackRoute(
   return allowedRoute.model;
 }
 
+/**
+ * Compute a health report for the first visible route of a registry entry.
+ *
+ * Used by `list_curated_models` tool output so the agent sees route-level
+ * penalties (model_not_found, zero-token quota) on its primary route, not
+ * just provider-level ones. Previously the tool read `provider_order[0]`
+ * raw and only checked provider health — a route with a dead model_id
+ * underneath a healthy provider reported as "healthy" and the agent kept
+ * routing there. Returns null when the primary visible route is fully
+ * healthy, or when no visible route exists at all.
+ */
+export function computeRegistryEntryHealthReport(
+  modelRegistryEntry: ModelRegistryEntry,
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  now: number,
+): { state: string; until: string; scope: "provider" | "route" } | null {
+  const visibleRoutes = filterVisibleProviderRoutes(modelRegistryEntry.provider_order);
+  const primaryRoute = visibleRoutes[0] ?? null;
+  if (!primaryRoute) return null;
+  const providerHealth = providerHealthMap.get(primaryRoute.provider);
+  if (providerHealth && providerHealth.until > now) {
+    return {
+      state: providerHealth.state,
+      until: new Date(providerHealth.until).toISOString(),
+      scope: "provider",
+    };
+  }
+  const routeHealth = modelRouteHealthMap.get(primaryRoute.model);
+  if (routeHealth && routeHealth.until > now) {
+    return {
+      state: routeHealth.state,
+      until: new Date(routeHealth.until).toISOString(),
+      scope: "route",
+    };
+  }
+  return null;
+}
+
 function isProviderHealthy(
   providerHealthMap: Map<string, ProviderHealth>,
   providerID: string,
@@ -1041,6 +1080,7 @@ async function listCuratedModels(
     provider: string | null;
   },
   providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
 ): Promise<string> {
   const now = Date.now();
   const modelRegistry = await loadModelRegistry(CONTROL_PLANE_ROOT_DIRECTORY);
@@ -1056,13 +1096,18 @@ async function listCuratedModels(
       count: filteredEntries.length,
       models: filteredEntries.map((entry) => {
         const payload = buildModelRegistryPayload(entry);
-        const primaryProvider = entry.provider_order[0]?.provider ?? null;
-        const health = primaryProvider ? providerHealthMap.get(primaryProvider) : undefined;
+        // Report health of the first VISIBLE route AND factor in route-level
+        // health — a route with model_not_found or route-level quota is
+        // dead even when its provider is overall healthy (see M29).
+        const healthReport = computeRegistryEntryHealthReport(
+          entry,
+          providerHealthMap,
+          modelRouteHealthMap,
+          now,
+        );
         return {
           ...payload,
-          providerHealth: health && health.until > now
-            ? { state: health.state, until: new Date(health.until).toISOString() }
-            : null,
+          providerHealth: healthReport,
         };
       }),
     },
@@ -1114,7 +1159,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
           provider: tool.schema.string().nullable().default(null),
         },
         async execute(args) {
-          return listCuratedModels(args, providerHealthMap);
+          return listCuratedModels(args, providerHealthMap, modelRouteHealthMap);
         },
       }),
 
@@ -1129,6 +1174,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
           return listCuratedModels(
             { freeOnly: args.freeOnly, role: args.role, provider: args.provider },
             providerHealthMap,
+            modelRouteHealthMap,
           );
         },
       }),
@@ -1156,11 +1202,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
           const modelRegistry = await loadModelRegistry(CONTROL_PLANE_ROOT_DIRECTORY);
 
           // Expire stale entries.
-          for (const [providerID, health] of providerHealthMap.entries()) {
-            if (health.until <= now) {
-              providerHealthMap.delete(providerID);
-            }
-          }
+          expireHealthMaps(providerHealthMap, modelRouteHealthMap, now);
 
           const best = selectBestModelForRoleAndTask(
             modelRegistry.models,
@@ -1185,10 +1227,15 @@ export const ModelRegistryPlugin: Plugin = async () => {
             }, null, 2);
           }
 
-          const primaryRoute = best.provider_order[0];
-          const healthy = primaryRoute
-            ? isProviderHealthy(providerHealthMap, primaryRoute.provider, now)
-            : false;
+          const visibleRoutes = filterVisibleProviderRoutes(best.provider_order);
+          const primaryRoute = visibleRoutes[0] ?? null;
+          const isRouteHealthy = (route: { provider: string; model: string }): boolean => {
+            if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
+            const routeHealth = modelRouteHealthMap.get(route.model);
+            if (routeHealth && routeHealth.until > now) return false;
+            return true;
+          };
+          const primaryHealthy = primaryRoute ? isRouteHealthy(primaryRoute) : false;
 
           return JSON.stringify({
             recommendation: {
@@ -1200,11 +1247,11 @@ export const ModelRegistryPlugin: Plugin = async () => {
               billingMode: best.billing_mode,
               roles: best.default_roles,
               bestFor: best.best_for,
-              primaryProviderHealthy: healthy,
+              primaryProviderHealthy: primaryHealthy,
             },
-            alternativeRoutes: best.provider_order.slice(1).map((route) => ({
+            alternativeRoutes: visibleRoutes.slice(1).map((route) => ({
               route: route.model,
-              healthy: isProviderHealthy(providerHealthMap, route.provider, now),
+              healthy: isRouteHealthy(route),
             })),
           }, null, 2);
         },
