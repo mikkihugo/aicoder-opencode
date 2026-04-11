@@ -34,6 +34,7 @@ import {
   PROVIDER_KEY_DEAD_DURATION_MS,
   shouldClassifyAsModelNotFound,
   clearSessionHangState,
+  readAndClearSessionHangState,
   countHealthyVisibleRoutes,
   composeRouteKey,
   findLiveProviderPenalty,
@@ -681,6 +682,87 @@ test("clearSessionHangState_whenSessionTerminates_dropsFromAllThreeSessionMaps",
   assert.equal(sessionStartTimeMap.has("session-b"), true);
   assert.equal(sessionActiveProviderMap.has("session-b"), true);
   assert.equal(sessionActiveModelMap.has("session-b"), true);
+});
+
+test("readAndClearSessionHangState_whenFullyBound_returnsTupleAndClearsMaps", () => {
+  // M78 pin: the helper MUST read providerID/model BEFORE clearing the
+  // maps. If a future edit swaps the order the returned tuple would be
+  // `{undefined, undefined}` and every classification branch in the two
+  // event hooks would silently early-return — no health penalty, no
+  // test failure, no runtime error. This pin fires on that regression.
+  const sessionStartTimeMap = new Map<string, number>([["s1", 1000]]);
+  const sessionActiveProviderMap = new Map<string, string>([["s1", "iflowcn"]]);
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >([["s1", { id: "qwen3-coder-plus", providerID: "iflowcn" }]]);
+
+  const result = readAndClearSessionHangState(
+    "s1",
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  assert.equal(result.providerID, "iflowcn");
+  assert.deepEqual(result.model, { id: "qwen3-coder-plus", providerID: "iflowcn" });
+  // Ordering invariant: maps cleared AFTER the read.
+  assert.equal(sessionStartTimeMap.has("s1"), false);
+  assert.equal(sessionActiveProviderMap.has("s1"), false);
+  assert.equal(sessionActiveModelMap.has("s1"), false);
+});
+
+test("readAndClearSessionHangState_whenModelMapMissing_returnsProviderButUndefinedModel", () => {
+  // M78 asymmetric split: session bound in the provider map but not yet
+  // in the model map (can happen if chat.params short-circuited after
+  // writing providerID but before writing the model tuple). The helper
+  // must still report the provider AND still clear every map.
+  const sessionStartTimeMap = new Map<string, number>([["s2", 2000]]);
+  const sessionActiveProviderMap = new Map<string, string>([["s2", "openrouter"]]);
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >();
+
+  const result = readAndClearSessionHangState(
+    "s2",
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  assert.equal(result.providerID, "openrouter");
+  assert.equal(result.model, undefined);
+  assert.equal(sessionStartTimeMap.has("s2"), false);
+  assert.equal(sessionActiveProviderMap.has("s2"), false);
+});
+
+test("readAndClearSessionHangState_whenUnknownSession_returnsUndefinedTupleWithoutThrowing", () => {
+  // M78 third pin: unknown session id (silent death, double-fire,
+  // or an event for a session that was never bound). The helper must
+  // be total — returning `{undefined, undefined}` is a valid signal
+  // that the caller should early-return with no penalty. Does not
+  // throw, does not leak per-call state.
+  const sessionStartTimeMap = new Map<string, number>([["other", 9999]]);
+  const sessionActiveProviderMap = new Map<string, string>([["other", "deepseek"]]);
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >([["other", { id: "ds-chat", providerID: "deepseek" }]]);
+
+  const result = readAndClearSessionHangState(
+    "ghost",
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  assert.equal(result.providerID, undefined);
+  assert.equal(result.model, undefined);
+  // Unrelated session untouched.
+  assert.equal(sessionStartTimeMap.has("other"), true);
+  assert.equal(sessionActiveProviderMap.has("other"), true);
+  assert.equal(sessionActiveModelMap.has("other"), true);
 });
 
 test("buildProviderHealthSystemPrompt_whenOnlyRoutePenaltiesExist_emitsRouteSection", () => {

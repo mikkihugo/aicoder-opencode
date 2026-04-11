@@ -1737,6 +1737,60 @@ export function clearSessionHangState(
 }
 
 /**
+ * Snapshot the per-session provider/model tuple AND clear all three
+ * hang-detection maps in a single atomic step.
+ *
+ * Motivation — ordering drift: the `session.error` and
+ * `assistant.message.completed` hooks both need to read the session's
+ * provider/model binding BEFORE clearing the maps, otherwise the reads
+ * come back `undefined` and the classification branch silently early-
+ * returns with no health penalty recorded. Prior to this helper both
+ * hooks inlined the same four-line `read → read → clear(4 args)` ritual,
+ * and a future edit that accidentally swapped the order at one site
+ * would produce no test failure and no runtime error — a quota-exhausted
+ * provider would simply stop being quarantined.
+ *
+ * Encoding the invariant inside a single helper makes "read before
+ * clear" a property of the function body instead of a property each
+ * call site must preserve by hand. The `session.error` site still
+ * overlays its own `(sessionError as any).model ?? mappedModel` fallback
+ * externally — the helper stays minimal and returns the mapped tuple
+ * verbatim so that asymmetric behaviour lives at the call site, not
+ * inside shared code.
+ *
+ * Args:
+ *   sessionID: The session identifier being finalised.
+ *   sessionStartTimeMap / sessionActiveProviderMap / sessionActiveModelMap:
+ *     The three per-session hang-detection maps — mutated in-place by
+ *     the embedded `clearSessionHangState` call.
+ *
+ * Returns:
+ *   `{ providerID, model }` read from the maps BEFORE they were cleared.
+ *   Either field may be `undefined` if the session was never fully
+ *   bound (e.g. the chat.params hook short-circuited before writing the
+ *   model map).
+ */
+export function readAndClearSessionHangState(
+  sessionID: string,
+  sessionStartTimeMap: Map<string, number>,
+  sessionActiveProviderMap: Map<string, string>,
+  sessionActiveModelMap: Map<string, { id: string; providerID: string }>,
+): {
+  providerID: string | undefined;
+  model: { id: string; providerID: string } | undefined;
+} {
+  const providerID = sessionActiveProviderMap.get(sessionID);
+  const model = sessionActiveModelMap.get(sessionID);
+  clearSessionHangState(
+    sessionID,
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+  return { providerID, model };
+}
+
+/**
  * Thin orchestration wrapper around `evaluateSessionHangForTimeoutPenalty`
  * that ALSO clears the per-session hang-detection maps when a penalty is
  * recorded.
@@ -3886,17 +3940,20 @@ export const ModelRegistryPlugin: Plugin = async () => {
         const sessionID = sessionError.sessionID;
         if (!sessionID) return;
 
-        // Read provider/model BEFORE clearing so we can still classify.
-        // The helper removes all three session map entries so long-running
-        // plugin processes don't accumulate stale session state forever.
-        const providerID = sessionActiveProviderMap.get(sessionID);
-        const model = (sessionError as any).model ?? sessionActiveModelMap.get(sessionID);
-        clearSessionHangState(
+        // M78: `readAndClearSessionHangState` encodes the read-before-clear
+        // ordering invariant — inlining the two `Map.get` calls and the
+        // `clearSessionHangState` call separately was a drift surface
+        // because swapping the order silently turned both reads into
+        // `undefined` and short-circuited every classification branch.
+        // session.error still overlays its own `sessionError.model`
+        // fallback externally so the helper stays minimal.
+        const { providerID, model: mappedModel } = readAndClearSessionHangState(
           sessionID,
           sessionStartTimeMap,
           sessionActiveProviderMap,
           sessionActiveModelMap,
         );
+        const model = (sessionError as any).model ?? mappedModel;
         if (!providerID) return;
         const modelID = model?.id;
 
@@ -3958,12 +4015,11 @@ export const ModelRegistryPlugin: Plugin = async () => {
         // "still running after N seconds" signal; once completion fires we
         // clear that session's start-time so the late-firing setTimeout
         // becomes a no-op.
-        // Read provider/model BEFORE clearing so the zero-token quota
-        // classification below still has context. Clearing removes all
-        // three session maps so they don't grow unbounded.
-        const providerID = sessionActiveProviderMap.get(sessionID);
-        const model = sessionActiveModelMap.get(sessionID);
-        clearSessionHangState(
+        // M78: see `readAndClearSessionHangState` — the helper pins the
+        // read-before-clear ordering so the zero-token quota branch below
+        // always sees the live provider/model tuple even after a future
+        // edit to the surrounding hook.
+        const { providerID, model } = readAndClearSessionHangState(
           sessionID,
           sessionStartTimeMap,
           sessionActiveProviderMap,
