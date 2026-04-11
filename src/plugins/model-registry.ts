@@ -3297,6 +3297,59 @@ export type ProviderApiErrorClass =
  *   any keyword identifies the error (e.g. a bare 500 with no body).
  *   Callers should skip applying any penalty on `"unclassified"` so
  *   transient upstream errors do not quarantine healthy providers.
+ *
+ * ## Drift surfaces (M127 PDD)
+ *
+ * Three orthogonal invariants beyond the 10 existing pins. Each drifts
+ * silently under a plausible refactor that leaves every other pin green:
+ *
+ *   1. **`NO_CREDIT_KEYWORDS` membership — `"payment"` specifically.**
+ *      The keyword set contains `"insufficient credits"`, `"no credit"`,
+ *      `"payment"`, `"billing"`. Existing pins exercise the first two but
+ *      NOT `"payment"` or `"billing"` on their own. A drive-by cleanup
+ *      ("the first two substrings are sufficient, the others are dead
+ *      weight") that deletes `"payment"` from the list silently reclassifies
+ *      every `"payment required"` upstream body as `"unclassified"` instead
+ *      of `"no_credit"`. Callers skip penalty application on unclassified,
+ *      so a genuinely out-of-credit provider keeps receiving live traffic
+ *      indefinitely — the exact pre-M45 failure mode, reached through a
+ *      different dictionary delete. Pin: `statusCode=0,
+ *      lowerMessage="payment required on this account"` → `"no_credit"`.
+ *
+ *   2. **`KEY_DEAD_HTTP_STATUS_CODES` membership — bare 403 alone.**
+ *      The status-code set is `{401, 403}`. The existing 403 pin is
+ *      `classifyProviderApiError(403, "quota exceeded for this api key")`,
+ *      which still classifies as `key_dead` even if 403 is removed from
+ *      the set — because `"quota"` in the message falls through to the
+ *      keyword cascade. So the 403-in-set membership is not actually
+ *      pinned by that test. A future "tighten to just 401, 403 is
+ *      ambiguous in practice" refactor would delete 403 from the set
+ *      without failing a single existing test, and every bare-403
+ *      "forbidden" response (cleaned proxy, CDN edge block, OAuth scope
+ *      mismatch) would silently slide into `"unclassified"` — the dead
+ *      key cycles through retries with no quarantine. Pin: `statusCode=403,
+ *      lowerMessage="service unavailable"` → `"key_dead"`.
+ *
+ *   3. **Case-sensitivity contract — `lowerMessage` parameter is trusted.**
+ *      The implementation uses `String.prototype.includes` which is
+ *      case-sensitive. The parameter name `lowerMessage` documents the
+ *      precondition: callers MUST lowercase at the call site. Every
+ *      existing pin passes already-lowercase input, so none catches a
+ *      "defensive" refactor that adds an internal `.toLowerCase()`.
+ *      That sounds harmless but breaks the *contract direction*: once
+ *      the helper lowercases internally, a new caller that forgot the
+ *      precondition still works, so the convention erodes, then a
+ *      future reader passes a locale-sensitive string (Turkish `İ`
+ *      → `i̇`) and the cascade misclassifies for the Turkish `"RATE
+ *      LIMIT"` input that now normalizes differently. More immediately
+ *      concerning: a caller that already pre-lowercases cannot be
+ *      trusted to ALSO pre-trim or pre-normalize whitespace, so the
+ *      helper implicitly accumulates responsibilities one defensive
+ *      branch at a time. The pin freezes the case-sensitive contract
+ *      so any internal `.toLowerCase()` addition fails a concrete
+ *      assertion. Pin: `statusCode=0, lowerMessage="RATE LIMIT EXCEEDED"`
+ *      → `"unclassified"` (uppercase input must not match the
+ *      lower-case keyword set).
  */
 export function classifyProviderApiError(
   statusCode: number,

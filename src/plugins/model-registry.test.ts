@@ -5982,6 +5982,40 @@ test("classifyProviderApiError_whenStatusIs500AndNoKeywords_returnsUnclassified"
   assert.equal(result, "unclassified");
 });
 
+test("classifyProviderApiError_whenStatusIsZeroAndPaymentKeywordAlone_returnsNoCredit", () => {
+  // M127 Surface 1: NO_CREDIT_KEYWORDS includes "payment" as a standalone
+  // membership. Existing pins only exercise "insufficient credits" and
+  // "no credit" — a drive-by refactor that trims the list ("the first
+  // two substrings are sufficient") would silently drop "payment" and
+  // reclassify every "payment required" upstream body as "unclassified",
+  // so a genuinely out-of-credit provider keeps receiving live traffic.
+  // Pins the specific dictionary membership, not just the branch.
+  const result = classifyProviderApiError(0, "payment required on this account");
+  assert.equal(result, "no_credit");
+});
+
+test("classifyProviderApiError_when403WithUnrelatedMessage_returnsKeyDeadFromStatusAlone", () => {
+  // M127 Surface 2: the existing 403 pin (403 + "quota exceeded") cannot
+  // actually detect a drop of 403 from KEY_DEAD_HTTP_STATUS_CODES, because
+  // "quota" still falls through to the keyword cascade and lands in
+  // key_dead anyway. This pin fires the status code path cleanly with a
+  // message that has zero matching keywords, so removing 403 from the
+  // set makes this one — and only this one — flip to "unclassified".
+  const result = classifyProviderApiError(403, "service unavailable");
+  assert.equal(result, "key_dead");
+});
+
+test("classifyProviderApiError_whenStatusIsZeroAndMessageIsUppercase_returnsUnclassified", () => {
+  // M127 Surface 3: the parameter name `lowerMessage` documents that
+  // the caller must lowercase. The body uses case-sensitive
+  // `String.prototype.includes`, so an uppercase "RATE LIMIT EXCEEDED"
+  // must NOT match the lowercase keyword set. Pins the case-sensitive
+  // contract: any "defensive" internal .toLowerCase() addition erodes
+  // the caller precondition and fails this assertion.
+  const result = classifyProviderApiError(0, "RATE LIMIT EXCEEDED");
+  assert.equal(result, "unclassified");
+});
+
 test("shouldClassifyAsModelNotFound_when404WithModelNotFoundMessage_returnsTrue", () => {
   // HTTP-canonical not-found from a direct provider. Route-level
   // model_not_found penalty is correct — the provider is fine, this
