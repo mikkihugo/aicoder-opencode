@@ -2592,6 +2592,120 @@ test("buildAvailableModelsSystemPrompt_whenOnlyVisibleRouteIsUnhealthyAtRouteLev
   assert.equal(prompt, null);
 });
 
+test("buildAvailableModelsSystemPrompt_whenNoPenaltiesAtAll_returnsNullViaGate", () => {
+  // M126 Pin A — Surface 1 (`hasAgentVisiblePenalty` fast-path null gate).
+  // Empty provider+route health maps with an enabled entry whose single
+  // route is healthy. The gate MUST short-circuit to null before the
+  // walk runs — otherwise the agent gets the "Alternative models by
+  // role" section injected on a clean boot with nothing wrong. If the
+  // gate is dropped, this walks the registry, finds one healthy entry,
+  // and renders non-null. Orthogonal to Pins B/C: route health is
+  // clean (so B's delegation path is a no-op) and only one entry
+  // exists (so C's cap is never touched).
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "m126-pin-a",
+    ["architect"],
+    "frontier",
+    [{ provider: "opencode", model: "opencode/m126-pin-a-free", priority: 1 }],
+  );
+  const prompt = buildAvailableModelsSystemPrompt(
+    [entry],
+    new Map(),
+    new Map(),
+    now,
+  );
+  assert.equal(
+    prompt,
+    null,
+    "gate must return null when there is no agent-visible penalty at all",
+  );
+});
+
+test("buildAvailableModelsSystemPrompt_whenSoleVisibleRouteIsRouteUnhealthyWithGateOpen_skipsEntryViaDelegation", () => {
+  // M126 Pin B — Surface 2 (`findFirstHealthyRouteInEntry` delegation).
+  // Single-route entry whose visible route has a route-level penalty
+  // (`model_not_found`). The delegation's visible-route walk must
+  // treat this entry as dead and `continue`. If the delegation is
+  // replaced with raw `entry.provider_order[0]`, the truthy object
+  // makes it past the `!firstHealthyVisibleRoute` continue, the entry
+  // gets listed, and we return non-null. Orthogonal to Pin A (gate is
+  // open via the same route penalty) and Pin C (cap never reached
+  // with a single entry).
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "m126-pin-b",
+    ["implementation_worker"],
+    "strong",
+    [{ provider: "iflowcn", model: "iflowcn/m126-pin-b", priority: 1 }],
+  );
+  const modelRouteHealthMap = new Map([
+    [
+      "iflowcn/m126-pin-b",
+      { state: "model_not_found" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  const prompt = buildAvailableModelsSystemPrompt(
+    [entry],
+    new Map(),
+    modelRouteHealthMap,
+    now,
+  );
+  assert.equal(
+    prompt,
+    null,
+    "delegation must skip an entry whose only visible route is route-level unhealthy",
+  );
+});
+
+test("buildAvailableModelsSystemPrompt_whenThreeEntriesShareOneRole_capsAtTwoViaLengthGuard", () => {
+  // M126 Pin C — Surface 3 (`existing.length < 2` per-role cap).
+  // Three entries all default-assigned to the same role with healthy
+  // visible routes, gate opened by an unrelated live provider quota.
+  // The rendered prompt must contain at most 2 models for the role and
+  // specifically must NOT contain the third entry's id. Orthogonal to
+  // Pin A (gate is open via the unrelated quota) and Pin B (every
+  // route is healthy so the delegation walk is a no-op).
+  const now = Date.now();
+  const entryOne: ModelRegistryEntry = buildModelRegistryEntry(
+    "m126-pin-c-first",
+    ["implementation_worker"],
+    "strong",
+    [{ provider: "opencode", model: "opencode/m126-pin-c-first-free", priority: 1 }],
+  );
+  const entryTwo: ModelRegistryEntry = buildModelRegistryEntry(
+    "m126-pin-c-second",
+    ["implementation_worker"],
+    "strong",
+    [{ provider: "opencode", model: "opencode/m126-pin-c-second-free", priority: 1 }],
+  );
+  const entryThird: ModelRegistryEntry = buildModelRegistryEntry(
+    "m126-pin-c-third",
+    ["implementation_worker"],
+    "strong",
+    [{ provider: "opencode", model: "opencode/m126-pin-c-third-free", priority: 1 }],
+  );
+  // Open the gate with a live quota on an UNRELATED provider so no
+  // route in the three fixture entries is affected.
+  const providerHealthMap = new Map([
+    [
+      "xiaomi-direct",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  const prompt = buildAvailableModelsSystemPrompt(
+    [entryOne, entryTwo, entryThird],
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+  assert.notEqual(prompt, null, "gate should be open with a live quota");
+  assert.ok(
+    !(prompt as string).includes("m126-pin-c-third"),
+    "per-role cap must exclude the third entry so the row renders exactly 2 models",
+  );
+});
+
 test("computeRegistryEntryHealthReport_whenPrimaryVisibleRouteIsRouteUnhealthy_reportsRouteScope", () => {
   // Regression (M29): listCuratedModels previously read provider_order[0]
   // raw and only checked provider health, so an entry whose primary

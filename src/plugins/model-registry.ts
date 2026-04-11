@@ -5569,6 +5569,75 @@ export function renderAvailableModelsSystemPromptBody(
 /**
  * Build a role+task filtered view of currently healthy models for the system prompt.
  * Only injected when at least one provider has a health penalty.
+ *
+ * ## Drift surfaces (M126 PDD)
+ *
+ * This assembler has three structurally independent drift surfaces. Each
+ * one is a historically regressed invariant — the guards below look like
+ * "obvious" one-liners, but every one of them was broken at least once
+ * in the plugin's lifetime. Per-surface regression pins partition these
+ * so a single-line drift fires exactly ONE new pin.
+ *
+ * ### Surface 1 — `hasAgentVisiblePenalty` fast-path null gate
+ *
+ * Pre-M58 the gate was `providerHealthMap.size === 0 && modelRouteHealthMap.size === 0`.
+ * M58 then changed `initializeProviderHealthState` to install a
+ * `key_missing` entry at boot for every uncredentialed curated provider
+ * (typically 15–25 on a default install), so `providerHealthMap.size` is
+ * effectively never zero and the pre-M58 gate became dead wiring. Every
+ * agent turn fell through to a full registry walk and injected an
+ * "Alternative models by role" section into the system prompt even when
+ * nothing was actually broken. Drift here re-leaks that section on every
+ * turn regardless of whether the agent has anything to route around.
+ * Pin A anchors "empty maps → early null": the gate must return before
+ * the walk when there is no penalty at all, not just when the maps are
+ * literally empty.
+ *
+ * ### Surface 2 — `findFirstHealthyRouteInEntry` delegation (not inlined)
+ *
+ * This was the 7th inline copy of the "walk visible routes and check
+ * provider-AND-route health" loop caught in the M65 dedupe sweep. Prior
+ * sites drifted to `entry.provider_order[0]` with provider-only checks,
+ * and that drift class (M23/M24) kept reappearing because the logic is
+ * short enough to look trivial when you're reading a diff. Dropping the
+ * delegation here resurrects the same shape: an entry whose priority-1
+ * route is a hidden paid sibling (e.g. togetherai/* or xai/grok-*) gets
+ * listed based on a route the rest of the plugin actively blocks, and
+ * an entry whose only visible route is route-level-unhealthy
+ * (`model_not_found`, route quota) gets listed as available despite
+ * being provably dead. Pin B anchors the "route-level unhealthy sole
+ * visible route" variant specifically, so the regression fires when the
+ * delegation is stripped even if provider-level health happens to align.
+ *
+ * ### Surface 3 — per-role `existing.length < 2` cap
+ *
+ * The cap bounds each role row to at most 2 alternatives. It exists
+ * because the point of this section is "here are a couple of other
+ * models you can try" — not a full dump of every entry default-assigned
+ * to the role. On a populated registry, popular roles (implementation,
+ * review, reader) can have 6–10 entries, and without the cap the
+ * section balloons into a screen of output on every turn the gate
+ * fires, pushing actual agent instructions off-screen in constrained
+ * terminals and inflating per-turn tokens. Drift here (cap dropped or
+ * the constant miscomputed) cannot be caught by Surface 1 or 2 pins
+ * because it only manifests when >2 entries share a role AND the gate
+ * is already open AND all routes are healthy. Pin C pins this:
+ * 3 entries sharing one role, gate opened by an unrelated live
+ * penalty, all routes healthy — the rendered output must show exactly
+ * 2 models for the role, and specifically must NOT contain the third
+ * entry's id.
+ *
+ * ### Why asymmetric
+ *
+ * Each surface is independently regression-prone and independently
+ * catastrophic: S1 leaks the whole block on every turn, S2 resurrects
+ * the M23/M24/M65 drift class and lists dead or hidden routes as
+ * available, S3 bloats the prompt. Pre-existing pins at
+ * `buildAvailableModelsSystemPrompt_whenOnlyKeyMissingPenaltiesExist_returnsNull`
+ * and `_whenOnlyVisibleRouteIsUnhealthyAtRouteLevel_skipsEntry` fire
+ * additively on S1/S2 but none of them exercise the cap at Surface 3,
+ * so a cap drift ships silently today. The new asymmetric trio below
+ * closes that gap and makes each surface separately observable.
  */
 export function buildAvailableModelsSystemPrompt(
   modelRegistryEntries: ModelRegistryEntry[],
