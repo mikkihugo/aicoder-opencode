@@ -35,7 +35,7 @@ Purpose-Driven Development: every slice is framed by a purpose statement *before
 RATIONALE: <what + why, one sentence>
 ```
 
-**Non-trivial slice** — multi-file, behavior-changing, touches a contract. Emit the 6-line **Purpose block** first — adding an explicit uncertainty slot:
+**Non-trivial slice** — ANY of the following: multi-file, behavior-changing (even one logic line), touches a contract (API/schema/config/protocol), affects auth/sessions/CSRF/commands/DB/replication/failover, required reading >3 files, or CONFIDENCE < 0.9 in the one-liner explanation. Emit the 6-line **Purpose block** first — adding an explicit uncertainty slot:
 
 ```
 OBSERVED:   <what the repo evidence actually shows — file:line citations>
@@ -55,6 +55,7 @@ GATE:       <the falsifier — the one command or diff that proves the slice lan
 Use as a mental checklist before declaring done — not as mandatory "answer out loud" steps that bloat context:
 
 1. **Purpose** — RATIONALE (trivial) or Purpose block (non-trivial) framed?
+2. **PAR Gate** — did I emit a PAR Gate declaration before any edit? Does the declaration match the actual slice complexity?
 2. **Evidence** — read the exact files/lines I'm about to change, not guessed?
 3. **Plan** — can a worker execute with file paths + line numbers + exact edit + one-sentence why, zero synthesis?
 4. **Verification** — did the GATE actually run green?
@@ -69,6 +70,57 @@ Subagents can silently return empty output (MCP 503, provider rate-limit, turn-s
 1. **Check output length** before consuming it. Empty or truncated = failed dispatch, not "no feedback".
 2. **Retry with a different-lineage specialist** — never the same model. If kimi returns empty, switch to ollama-cloud / gemini / codex.
 3. **Never synthesize on empty input.** Banned pattern: "based on the critical_reviewer findings, proceed" when `critical_reviewer` returned empty. Record `reviewer: empty, retried: <model>` in slice notes; either get a real review or park as `[PARKED]` with the empty-output reason.
+
+## Pre-Action Review Gate (PAR Gate)
+
+Before ANY action on a non-trivial slice, you MUST emit one of the following declarations. This is not optional commentary — it is a hard gate visible in session transcripts.
+
+### Declaration A: "Review Complete"
+Use when you have dispatched Partner + Combatant (or their specialist equivalents) and synthesized their outputs:
+
+```
+PAR GATE: REVIEW COMPLETE
+Partner: <agent_name> — <one-line what they strengthened>
+Combatant: <agent_name> — <one-line what they attacked>
+Synthesis: <Observed + Confidence + Falsifier summary>
+Proceeding: yes
+```
+
+### Declaration B: "Trivial Slice Exemption"
+Use ONLY for slices meeting ALL criteria:
+- Single file
+- Fully reversible (git revert is one command)
+- No behavior change (typo, rename, constant bump, comment, whitespace)
+- No contract touched (API, schema, config, protocol, trust boundary)
+
+```
+PAR GATE: TRIVIAL EXEMPTION
+Rationale: <one sentence why this meets all 4 criteria>
+Risk if wrong: <one sentence>
+Proceeding: yes
+```
+
+### Declaration C: "Review Skipped — Recording"
+Use when you are intentionally skipping review (emergency, provider down, etc.):
+
+```
+PAR GATE: REVIEW SKIPPED
+Reason: <specific justification>
+Recorded in: <checkpoint_file_path>
+Next action: <park|proceed with risk acknowledgment>
+```
+
+**Rule:** If you cannot emit Declaration A, B, or C with confidence, you are not ready to act. Dispatch `planning_analyst` + `critical_reviewer` first.
+
+### Partner/Combatant specialist mapping
+
+| Role | Primary Agent | Fallback Agent |
+|------|---------------|----------------|
+| Partner (supportive) | `planning_analyst` | `consumer_advocate`, `codebase_explorer` |
+| Combatant (adversarial) | `critical_reviewer` | `oracle`, `security_reviewer` |
+
+**Minimum viable pair:** one from Partner column + one from Combatant column.
+**Not acceptable:** `roadmap_keeper` as Partner (state-keeping ≠ direction-strengthening), `verifier` as Combatant (verification ≠ attack).
 
 ## Persist findings before ending the session
 

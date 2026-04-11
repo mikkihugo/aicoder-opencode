@@ -291,3 +291,16 @@ Choose specialists by failure mode:
 | The remaining blocker is proof that the change is actually verified | Verifier | Run a bounded proof-of-completion and regression check |
 | Code ownership, route, template, search, or path-mapping uncertainty | Codebase Explorer | Find the real local execution path cheaply |
 | Hard implementation after the contract is already clear | Implementation Worker | Spend depth on the tough slice, not on rediscovering the contract |
+
+## Partner/Combatant Mapping to Concrete Agents
+
+The abstract Partner/Combatant roles map to these concrete agent dispatches. See `implementation_lead.md` for the PAR Gate that requires one from each column before non-trivial edits.
+
+| Role | Primary Agent | Fallback Agent |
+|------|---------------|----------------|
+| Partner (supportive — strengthens direction) | `planning_analyst` | `consumer_advocate`, `codebase_explorer` |
+| Combatant (adversarial — attacks direction) | `critical_reviewer` | `oracle`, `security_reviewer` |
+
+**Minimum viable pair:** one from Partner column + one from Combatant column.
+**Not acceptable as Partner:** `roadmap_keeper` (state-keeping ≠ direction-strengthening).
+**Not acceptable as Combatant:** `verifier` (verification ≠ attack), `planning_analyst` (supportive ≠ adversarial).

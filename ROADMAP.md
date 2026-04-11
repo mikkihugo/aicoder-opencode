@@ -118,12 +118,17 @@ Completion Notes (2026-04-11):
 - **Closes letta LW1** (cross-reference in `/home/mhugo/code/letta-workspace/roadmap.md`).
 - Still ephemeral in letta: `.opencode/bin/`, `.opencode/commands/`, `.opencode/plugins/` — deferred to M10 for principled propagation rather than repeat manual copy.
 
-### M9: Enforce partner/combatant review discipline `⬜ PENDING`
+### M9: Enforce partner/combatant review discipline `✅ COMPLETED`
 
-- During the M1 slice, the aicoder autopilot dispatched exactly 1 subagent (`roadmap_keeper`) and then did all 38 bash + 12 read + 4 edit calls solo. The implementation_lead workflow prompt explicitly says "for every non-trivial slice, run a concrete partner/combatant pair in parallel before coding" — this step was silently skipped.
-- The PDD Purpose-gate softening does NOT enforce subagent dispatch; it only asks the lead to frame the slice. A lead that frames AND skips review still ships un-reviewed code.
-- Fix options: (a) add a hard rule that non-trivial slices MUST show a `task` tool call to a supportive + adversarial specialist before any `edit` tool call; (b) add a pre-commit hook that rejects autopilot commits lacking a review annotation in the checkpoint; (c) add a verifier-pass check at close-out that refuses to mark `[COMMIT]` without review evidence.
-- Evidence: `ses_284ca4aa4ffeIUhQjEjeomSPUB` on `:8080`, commit `c700ce8` shipped solo after only `roadmap_keeper`.
+Completion Notes (2026-04-11):
+- Added PAR Gate (Pre-Action Review Gate) to all 3 implementation_lead.md prompts (aicoder-opencode, dr-repo overlay, letta-workspace overlay)
+- Three auditable declarations: Review Complete (named agents + synthesis), Trivial Exemption (4 strict criteria), Review Skipped (explicit reason + recording)
+- Tightened non-trivial slice definition: ANY of multi-file, behavior-changing, contract-touching, trust-boundary, >3 files read, or CONFIDENCE < 0.9
+- Added Partner/Combatant specialist mapping table to all 3 leads + AGENT_ROLES.md
+- Updated gate checklist to include PAR Gate step
+- Design: prompt-layer enforcement (not plugin-layer) — oracle adversarial review rejected plugin-layer approach as "maximal overreach" that breaks trivial slices and creates doom-loops
+- Verified: type check clean, 118/118 tests pass, PAR GATE present in all 3 files
+- Files changed: `.opencode/agents/implementation_lead.md`, `targets/dr-repo/overlay/.opencode/agents/implementation_lead.md`, `targets/letta-workspace/overlay/.opencode/agents/implementation_lead.md`, `docs/AGENT_ROLES.md`
 
 ### M10: `aicoder-opencode install <target>` command — propagate agent rules + plugins to target overlays `⬜ PENDING`
 
