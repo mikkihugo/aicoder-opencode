@@ -2065,6 +2065,55 @@ export function findPreferredHealthyRoute(
 }
 
 /**
+ * Scan candidate entries for the first visible route whose provider AND
+ * composite route-health entry are both healthy.
+ *
+ * Pure helper extracted so the caller can make a tier-wide vs tier-agnostic
+ * decision on which candidate set to pass — previously the last-resort scan
+ * was an inline loop that only walked the complexity-tier-filtered
+ * `roleMatchedEntries`. When every entry within the requested tier had all
+ * routes unhealthy, `recommendTaskModelRoute` threw "No healthy model
+ * route found" even when a perfectly healthy route existed in a SIBLING
+ * tier matching the same role. A large-complexity request during a
+ * frontier+strong outage died entirely instead of gracefully degrading
+ * to a standard-tier route — the agent saw a hard failure when a working
+ * alternative was one tier removed. Accepting a lower-tier route on the
+ * last-resort path is strictly better than terminating the request.
+ *
+ * The helper returns the route itself (no reasoning) so the caller can
+ * attach a reasoning string that reflects whether the lookup was the
+ * tier-filtered first pass or the tier-agnostic second pass.
+ *
+ * Args:
+ *   candidateEntries: Already-filtered entries (e.g. enabled+role, or the
+ *     tier-widened variant for the last-resort pass). Walked in array order.
+ *   providerHealthMap: In-memory provider-level health table.
+ *   modelRouteHealthMap: In-memory composite-route health table.
+ *   now: Wall-clock timestamp in ms.
+ *
+ * Returns:
+ *   The first `{ provider, model }` whose provider and route are both
+ *   healthy, or `null` when no candidate has a live visible route.
+ */
+export function findFirstHealthyVisibleRoute(
+  candidateEntries: ModelRegistryEntry[],
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  now: number,
+): { provider: string; model: string } | null {
+  for (const entry of candidateEntries) {
+    const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
+    for (const route of visibleRoutes) {
+      if (!isProviderHealthy(providerHealthMap, route.provider, now)) continue;
+      const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
+      if (routeHealth && routeHealth.until > now) continue;
+      return { provider: route.provider, model: route.model };
+    }
+  }
+  return null;
+}
+
+/**
  * Recommend a model route for a task, considering agent metadata, provider health, and registry.
  */
 async function recommendTaskModelRoute(
@@ -2191,17 +2240,39 @@ async function recommendTaskModelRoute(
   // `model_not_found` / quota / hang `timeout` penalty and the caller would
   // get a route that's guaranteed to fail on inference. Same bug class as
   // M29/M31 at the terminal fallback path.
-  for (const entry of roleMatchedEntries) {
-    const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
-    for (const route of visibleRoutes) {
-      if (!isProviderHealthy(providerHealthMap, route.provider, now)) continue;
-      const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
-      if (routeHealth && routeHealth.until > now) continue;
-      return {
-        selectedModelRoute: route.model,
-        reasoning: `Fallback to first healthy visible route`,
-      };
-    }
+  //
+  // Two-pass structure: first scan stays inside the complexity-tier set so a
+  // large-complexity request continues to prefer strong/frontier routes
+  // whenever any are live. The second pass widens to `rolePreferredEntries`
+  // (role filter only, no tier filter) so a large-complexity request during
+  // a full frontier+strong outage degrades gracefully to a standard-tier
+  // route instead of throwing "No healthy model route found" — a strictly
+  // better outcome than terminating the request when a working alternative
+  // exists one tier removed. See `findFirstHealthyVisibleRoute` docstring.
+  const tierFilteredRoute = findFirstHealthyVisibleRoute(
+    roleMatchedEntries,
+    providerHealthMap,
+    modelRouteHealthMap,
+    now,
+  );
+  if (tierFilteredRoute) {
+    return {
+      selectedModelRoute: tierFilteredRoute.model,
+      reasoning: `Fallback to first healthy visible route within complexity tier`,
+    };
+  }
+
+  const tierAgnosticRoute = findFirstHealthyVisibleRoute(
+    rolePreferredEntries,
+    providerHealthMap,
+    modelRouteHealthMap,
+    now,
+  );
+  if (tierAgnosticRoute) {
+    return {
+      selectedModelRoute: tierAgnosticRoute.model,
+      reasoning: `Fallback to first healthy visible route outside complexity tier`,
+    };
   }
 
   throw new Error(

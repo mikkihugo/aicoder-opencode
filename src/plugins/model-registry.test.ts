@@ -12,6 +12,7 @@ import {
   buildModelNotFoundRouteHealth,
   classifyProviderApiError,
   isFallbackBlocked,
+  findFirstHealthyVisibleRoute,
   findPreferredHealthyRoute,
   hasUsableCredential,
   isZeroTokenQuotaSignal,
@@ -3250,4 +3251,171 @@ test("recommendTaskModelRoute_whenAgentModelPreferenceIsFrontierTierButPromptInf
 
   assert.equal(decision.selectedModelRoute, "minimax/MiniMax-M2.5");
   assert.match(decision.reasoning, /Preferred model from agent metadata/);
+});
+
+test("findFirstHealthyVisibleRoute_whenCandidateListEmpty_returnsNull", () => {
+  const result = findFirstHealthyVisibleRoute([], new Map(), new Map(), 0);
+  assert.equal(result, null);
+});
+
+test("findFirstHealthyVisibleRoute_whenFirstEntryHasHealthyRoute_returnsFirstMatch", () => {
+  const entries = [
+    buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5.1", priority: 1 },
+    ]),
+    buildModelRegistryEntry("minimax-m2.5", ["architect"], "frontier", [
+      { provider: "minimax", model: "minimax/MiniMax-M2.5", priority: 1 },
+    ]),
+  ];
+
+  const result = findFirstHealthyVisibleRoute(entries, new Map(), new Map(), 0);
+
+  assert.deepEqual(result, {
+    provider: "ollama-cloud",
+    model: "ollama-cloud/glm-5.1",
+  });
+});
+
+test("findFirstHealthyVisibleRoute_whenFirstEntryProviderUnhealthy_returnsNextHealthyEntry", () => {
+  const entries = [
+    buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5.1", priority: 1 },
+    ]),
+    buildModelRegistryEntry("minimax-m2.5", ["architect"], "frontier", [
+      { provider: "minimax", model: "minimax/MiniMax-M2.5", priority: 1 },
+    ]),
+  ];
+  const providerHealthMap = new Map([
+    ["ollama-cloud", { state: "quota" as const, until: 1_000_000, retryCount: 1 }],
+  ]);
+
+  const result = findFirstHealthyVisibleRoute(
+    entries,
+    providerHealthMap,
+    new Map(),
+    0,
+  );
+
+  assert.deepEqual(result, {
+    provider: "minimax",
+    model: "minimax/MiniMax-M2.5",
+  });
+});
+
+test("findFirstHealthyVisibleRoute_whenRouteLevelPenaltyBlocksPrimaryButSiblingHealthy_returnsSibling", () => {
+  const entries = [
+    buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5.1", priority: 1 },
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 2 },
+    ]),
+  ];
+  const modelRouteHealthMap = new Map([
+    [
+      "ollama-cloud/glm-5.1",
+      { state: "model_not_found" as const, until: 1_000_000, retryCount: 1 },
+    ],
+  ]);
+
+  const result = findFirstHealthyVisibleRoute(
+    entries,
+    new Map(),
+    modelRouteHealthMap,
+    0,
+  );
+
+  assert.deepEqual(result, {
+    provider: "opencode",
+    model: "opencode/glm-5.1-free",
+  });
+});
+
+test("findFirstHealthyVisibleRoute_whenEveryCandidateIsUnhealthy_returnsNull", () => {
+  const entries = [
+    buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5.1", priority: 1 },
+    ]),
+  ];
+  const providerHealthMap = new Map([
+    ["ollama-cloud", { state: "quota" as const, until: 1_000_000, retryCount: 1 }],
+  ]);
+
+  const result = findFirstHealthyVisibleRoute(
+    entries,
+    providerHealthMap,
+    new Map(),
+    0,
+  );
+
+  assert.equal(result, null);
+});
+
+test("recommendTaskModelRoute_whenComplexityTierFullyDownButSiblingTierHealthy_degradesToSiblingTier", async () => {
+  // M57 headline pin. Reachability: a large-complexity request arrives
+  // while every strong/frontier provider is throttled (quota + key_dead
+  // during a real multi-provider outage), but a standard-tier entry
+  // with the same role is perfectly healthy. Pre-M57 the last-resort
+  // fallback only scanned `roleMatchedEntries` — already narrowed by
+  // `allowedTiers = ["strong", "frontier"]` — so it saw nothing healthy
+  // and threw "No healthy model route found", killing the request even
+  // though a working alternative was one tier removed. Fix widens the
+  // last-resort scan to a tier-agnostic second pass over
+  // `rolePreferredEntries` via `findFirstHealthyVisibleRoute`.
+  const tempDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "aicoder-model-routing-m57-"),
+  );
+  await writeAgentMetadata(
+    tempDirectory,
+    "architect_agent",
+    [
+      "---",
+      "routing_role: architect",
+      "routing_complexity: large",
+      "---",
+      "",
+      "Architect agent.",
+      "",
+    ].join("\n"),
+  );
+
+  const modelRegistryEntries = [
+    // Frontier tier: within allowedTiers but route throttled.
+    buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5.1", priority: 1 },
+    ]),
+    // Strong tier: within allowedTiers but provider throttled.
+    buildModelRegistryEntry("qwen3-coder-plus", ["architect"], "strong", [
+      { provider: "iflowcn", model: "iflowcn/qwen3-coder-plus", priority: 1 },
+    ]),
+    // Standard tier: OUTSIDE allowedTiers for large complexity, fully
+    // healthy — the only route the caller can actually reach.
+    buildModelRegistryEntry("glm-4.7-standard", ["architect"], "standard", [
+      { provider: "opencode", model: "opencode/glm-4.7-free", priority: 1 },
+    ]),
+  ];
+
+  const providerHealthMap = new Map([
+    ["iflowcn", { state: "quota" as const, until: 1_000_000, retryCount: 1 }],
+  ]);
+  const modelRouteHealthMap = new Map([
+    [
+      "ollama-cloud/glm-5.1",
+      { state: "timeout" as const, until: 1_000_000, retryCount: 1 },
+    ],
+  ]);
+
+  const decision = await recommendTaskModelRoute(
+    tempDirectory,
+    {
+      subagent_type: "architect_agent",
+      prompt: "refactor the system architecture across modules",
+      agent: "architect_agent",
+    },
+    modelRegistryEntries,
+    providerHealthMap,
+    modelRouteHealthMap,
+    0,
+  );
+
+  assert.equal(decision.selectedModelRoute, "opencode/glm-4.7-free");
+  assert.match(decision.reasoning, /outside complexity tier/);
 });
