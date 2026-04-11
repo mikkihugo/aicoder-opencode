@@ -375,6 +375,70 @@ function defaultHookFailureLogSink(message: string, error: unknown): void {
  *
  * Returns:
  *   `"never"` when `until` is infinite, otherwise the ISO-8601 string.
+ *
+ * ## Drift surfaces (M116 PDD)
+ *
+ * The pre-M116 docstring names the Infinity → `"never"` round-trip contract
+ * but ships zero direct unit pins — `formatHealthExpiry` is only exercised
+ * indirectly by two callers inside `buildProviderHealthSummaryForTool` and
+ * `buildAgentVisibleBackoffStatus`, both of which assert larger compound
+ * payloads. That leaves three independent invariants unpinned:
+ *
+ * 1. **`!Number.isFinite` rejects NaN AND both infinities — not just
+ *    `=== Number.POSITIVE_INFINITY`.** The guard is a finite-check, not an
+ *    infinity-equality check, and the distinction matters because
+ *    `parsePersistedHealthEntry` hydrates `rawUntil === "never"` to
+ *    `Number.POSITIVE_INFINITY` but the same pipeline has nothing that
+ *    prevents an in-memory corruption (a stale arithmetic on `until`, a
+ *    `Math.min`/`Math.max` that received a non-number, a `Date.parse` that
+ *    returned `NaN`) from producing `NaN` in `until`. `new Date(NaN)
+ *    .toISOString()` throws `RangeError: Invalid time value` — the exact
+ *    crash this helper was extracted to prevent. A plausible refactor that
+ *    narrows the guard to `until === Number.POSITIVE_INFINITY` ("I only
+ *    want the key_missing sentinel") silently lets `NaN` fall into
+ *    `new Date(NaN).toISOString()` and re-introduces the M58 crash. The
+ *    pin asserts `formatHealthExpiry(Number.NaN)` returns a string
+ *    without throwing; sabotaging the guard fires only this pin because
+ *    the ISO-branch and sentinel-string pins both receive inputs that
+ *    take the finite branch under the sabotage.
+ *
+ * 2. **Finite-epoch formatting contract is ISO-8601 via `toISOString()`,
+ *    not `toUTCString()` / `toString()`.** The return value is embedded
+ *    in log lines, tool JSON payloads (`get_quota_backoff_status`), and
+ *    the `buildProviderHealthSummaryForTool` synopsis — all of which
+ *    are consumed by downstream parsers (dashboards, jq queries, agent
+ *    system prompts) that assume the RFC 3339 / ISO 8601 shape
+ *    `YYYY-MM-DDTHH:MM:SS.sssZ`. A refactor that switches to
+ *    `toUTCString()` (`"Thu, 01 Jan 1970 00:00:00 GMT"`) or a
+ *    locale-sensitive `toLocaleString()` looks cosmetically similar in
+ *    a single log line but silently breaks every downstream parse —
+ *    worse, it breaks asymmetrically because only finite-until entries
+ *    would drift, while `"never"` entries keep rendering unchanged. The
+ *    pin asserts the finite-epoch return matches an ISO-8601 regex;
+ *    sabotaging `.toISOString()` fires only this pin because the NaN
+ *    and Infinity pins both take the `"never"` branch and never reach
+ *    the Date formatter.
+ *
+ * 3. **`"never"` sentinel must round-trip through
+ *    `parsePersistedHealthEntry`.** The write side of the persistence
+ *    contract is `serializeHealthEntryForPersistence` / this helper
+ *    (for Infinity entries), and the read side is
+ *    `parsePersistedHealthEntry`'s `rawUntil === "never"` clause. The
+ *    exact string literal `"never"` is the ONLY value that crosses that
+ *    boundary — a drift to `"forever"`, `"infinity"`, `"∞"`, or an
+ *    empty string silently breaks `key_missing` persistence: the next
+ *    plugin restart reads the drifted sentinel, fails the `=== "never"`
+ *    check, falls into the `typeof rawUntil === "number"` branch which
+ *    also fails, and returns `null` → the entry is dropped, the
+ *    key_missing penalty evaporates, and the provider is treated as
+ *    healthy again even though the env var is still absent. The pin
+ *    writes `formatHealthExpiry(Number.POSITIVE_INFINITY)` into a
+ *    minimal persisted shape, round-trips it through
+ *    `parsePersistedHealthEntry`, and asserts `until ===
+ *    Number.POSITIVE_INFINITY`; sabotaging the literal fires only this
+ *    pin because the NaN pin asserts "doesn't throw" (a drifted
+ *    sentinel is still a non-throwing string) and the finite-epoch
+ *    pin never takes the sentinel branch.
  */
 export function formatHealthExpiry(until: number): string {
   if (!Number.isFinite(until)) {

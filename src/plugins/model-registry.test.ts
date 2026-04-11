@@ -62,6 +62,7 @@ import {
   filterEnabledEntriesByOptionalRole,
   filterProviderModelsByRouteHealth,
   findCuratedFallbackRoute,
+  formatHealthExpiry,
   formatPenaltySectionPrefix,
   HANG_TIMEOUT_IMMEDIATE_THRESHOLD_MS,
   assembleHealthAwareSystemPrompts,
@@ -4668,6 +4669,62 @@ test("computeProviderHealthUpdate_whenNewPathTaken_doesNotMutateInputExistingRec
   computeProviderHealthUpdate(existing, "no_credit", now + 2 * 60 * 60 * 1000);
 
   assert.equal(existing.state, "quota", "new-path must not mutate the input existing record");
+});
+
+test("formatHealthExpiry_whenUntilIsNaN_returnsWithoutThrowingRangeError", () => {
+  // M116 pin A: `!Number.isFinite(until)` must reject NaN as well as
+  // both infinities. A refactor narrowing the guard to
+  // `until === Number.POSITIVE_INFINITY` would let NaN fall through to
+  // `new Date(NaN).toISOString()`, which throws `RangeError: Invalid
+  // time value` — the exact M58 crash this helper was extracted to
+  // prevent. Asserting "does not throw on NaN" fires only on that
+  // narrowing because the ISO-branch and sentinel-string pins both
+  // receive inputs that take the finite branch under the sabotage.
+  let formatted: string | undefined;
+  assert.doesNotThrow(() => {
+    formatted = formatHealthExpiry(Number.NaN);
+  });
+  assert.equal(typeof formatted, "string");
+});
+
+test("formatHealthExpiry_whenUntilIsFiniteEpoch_returnsIso8601FormattedString", () => {
+  // M116 pin B: finite-epoch formatting contract is ISO-8601 via
+  // `toISOString()`. Downstream log parsers, `get_quota_backoff_status`
+  // JSON consumers, and `buildProviderHealthSummaryForTool` synopsis
+  // readers all assume RFC 3339 shape `YYYY-MM-DDTHH:MM:SS.sssZ`. A
+  // refactor to `toUTCString()` produces `"Thu, 01 Jan 1970 ..."` which
+  // looks cosmetically similar in one log line but silently breaks
+  // every downstream parser. The regex pins the exact ISO-8601 shape.
+  const fixedEpochMs = 1_700_000_000_000; // 2023-11-14T22:13:20.000Z
+  const formatted = formatHealthExpiry(fixedEpochMs);
+  assert.match(
+    formatted,
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    `expected ISO-8601 "YYYY-MM-DDTHH:MM:SS.sssZ" but got ${JSON.stringify(formatted)}`,
+  );
+});
+
+test("formatHealthExpiry_whenInfiniteUntil_roundTripsThroughParsePersistedHealthEntry", () => {
+  // M116 pin C: `formatHealthExpiry` and `parsePersistedHealthEntry`
+  // share the `"never"` sentinel as the ONLY string value that crosses
+  // the persistence boundary for Infinity `until`. A drift of the
+  // literal on either side (write-side to `"forever"`, `"infinity"`,
+  // `"∞"`, or the empty string) silently breaks `key_missing`
+  // persistence: the next plugin restart fails the `rawUntil ===
+  // "never"` check, falls into `typeof rawUntil === "number"` (also
+  // false), and `parsePersistedHealthEntry` returns `null` → the entry
+  // is dropped and a missing-credential provider is treated as healthy.
+  // The round-trip through the live parser pins the exact string.
+  const formatted = formatHealthExpiry(Number.POSITIVE_INFINITY);
+  const persisted = {
+    state: "key_missing",
+    until: formatted,
+    retryCount: 0,
+  };
+  const parsed = parsePersistedHealthEntry(persisted, Date.now());
+  assert.ok(parsed, "Infinity sentinel must round-trip through parsePersistedHealthEntry");
+  assert.equal(parsed.until, Number.POSITIVE_INFINITY);
+  assert.equal(parsed.state, "key_missing");
 });
 
 test("parsePersistedHealthEntry_whenEntryIsWellFormed_returnsNormalizedRecord", () => {
