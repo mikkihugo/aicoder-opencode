@@ -288,6 +288,36 @@ export function expireHealthMaps(
   }
 }
 
+/**
+ * Remove a session's entries from all three per-session hang-detection maps.
+ *
+ * Called from every terminal-event handler (`session.error`,
+ * `assistant.message.completed`) so session state does not accumulate
+ * for the full lifetime of the plugin process.
+ *
+ * Args:
+ *   sessionID: The session identifier to purge.
+ *   sessionStartTimeMap: Turn-start timestamp map (mutated).
+ *   sessionActiveProviderMap: Provider-id-per-session map (mutated).
+ *   sessionActiveModelMap: Active model-per-session map (mutated).
+ *
+ * Note:
+ *   Clearing the start-time entry is the critical step — the hang-detector
+ *   `setTimeout` scheduled in `chat.params` short-circuits when the entry
+ *   is absent, so the late-firing timer is harmless even after the
+ *   other two maps are cleared.
+ */
+export function clearSessionHangState(
+  sessionID: string,
+  sessionStartTimeMap: Map<string, number>,
+  sessionActiveProviderMap: Map<string, string>,
+  sessionActiveModelMap: Map<string, { id: string; providerID: string }>,
+): void {
+  sessionStartTimeMap.delete(sessionID);
+  sessionActiveProviderMap.delete(sessionID);
+  sessionActiveModelMap.delete(sessionID);
+}
+
 export function findCuratedFallbackRoute(
   modelRegistryEntry: ModelRegistryEntry,
   blockedProviderID: string,
@@ -1194,14 +1224,18 @@ export const ModelRegistryPlugin: Plugin = async () => {
         const sessionID = sessionError.sessionID;
         if (!sessionID) return;
 
-        // Turn is done (errored); clear its hang-detector start time so any
-        // pending setTimeout from chat.params no-ops on fire.
-        sessionStartTimeMap.delete(sessionID);
-
+        // Read provider/model BEFORE clearing so we can still classify.
+        // The helper removes all three session map entries so long-running
+        // plugin processes don't accumulate stale session state forever.
         const providerID = sessionActiveProviderMap.get(sessionID);
-        if (!providerID) return;
-
         const model = (sessionError as any).model ?? sessionActiveModelMap.get(sessionID);
+        clearSessionHangState(
+          sessionID,
+          sessionStartTimeMap,
+          sessionActiveProviderMap,
+          sessionActiveModelMap,
+        );
+        if (!providerID) return;
         const modelID = model?.id;
         const routeKey = modelID ? `${providerID}/${modelID}` : null;
 
@@ -1268,12 +1302,20 @@ export const ModelRegistryPlugin: Plugin = async () => {
         // "still running after N seconds" signal; once completion fires we
         // clear that session's start-time so the late-firing setTimeout
         // becomes a no-op.
-        sessionStartTimeMap.delete(sessionID);
+        // Read provider/model BEFORE clearing so the zero-token quota
+        // classification below still has context. Clearing removes all
+        // three session maps so they don't grow unbounded.
+        const providerID = sessionActiveProviderMap.get(sessionID);
+        const model = sessionActiveModelMap.get(sessionID);
+        clearSessionHangState(
+          sessionID,
+          sessionStartTimeMap,
+          sessionActiveProviderMap,
+          sessionActiveModelMap,
+        );
 
         // Zero tokens on both input and output indicates quota exhaustion
         if (tokens.input === 0 && tokens.output === 0) {
-          const providerID = sessionActiveProviderMap.get(sessionID);
-          const model = sessionActiveModelMap.get(sessionID);
           if (!providerID || !model) return;
 
           const routeKey = `${providerID}/${model.id}`;

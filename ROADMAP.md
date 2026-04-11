@@ -172,6 +172,16 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M26: session terminal handlers only cleared `sessionStartTimeMap` — `sessionActiveProviderMap` and `sessionActiveModelMap` leaked one entry per session forever `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `chat.params` populates three per-session maps — `sessionStartTimeMap`, `sessionActiveProviderMap`, `sessionActiveModelMap` — that the hang-detector `setTimeout` and the `session.error` / `assistant.message.completed` handlers read to classify route failures. Both terminal handlers only called `sessionStartTimeMap.delete(sessionID)` — leaving the other two maps growing unbounded for the full lifetime of the plugin process. Every session in a long-running autopilot loop (days of uptime, hundreds of sessions) leaked two Map entries.
+- **Correctness impact**: zero. The hang-detector short-circuits on `sessionStartTimeMap.get(sessionID)` being falsy, so stale provider/model entries don't cause misclassification — they just sit in memory forever. But it's a real unbounded growth bug, and on dr-repo autopilot the plugin is expected to run for weeks.
+- **Fix**: extracted `clearSessionHangState(sessionID, startMap, providerMap, modelMap)` helper and called it from both terminal handlers. Both handlers now read `providerID` and `model` BEFORE clearing, so the downstream classification (`model_not_found`, quota, no-credit, key-dead for session.error; zero-token quota for completed) still has the context it needs.
+- **Why a unit-test-only regression**: the session maps are created inside the `ModelRegistryPlugin` factory closure and are not directly observable from outside the plugin object. I did NOT add a test-only inspector tool (test-only APIs rot quickly) — instead I extracted `clearSessionHangState` as an exported pure function and unit-tested it directly on seeded maps, pinning the contract that all three maps lose the target session while sibling sessions are untouched. The behavioral side (that the handlers now call it) is covered transitively by the existing event-hook tests (session_error_model_not_found, session_error_bare_500, assistant_message_completed_with_zero_tokens, assistant_message_completed_after_long_duration) all still passing after the refactor — they exercise the production code path including the new clearing logic and verify the classification stays correct.
+- **Verification**: 133/133 tests pass (132 + 1 new), `tsc -p tsconfig.json` clean.
+- **Files**: `src/plugins/model-registry.ts`, `src/plugins/model-registry.test.ts`.
+
 ### M25: `experimental.chat.system.transform` only expired providerHealthMap — modelRouteHealthMap grew unbounded and leaked to persisted disk state `✅ COMPLETED`
 
 Completion Notes (2026-04-11):

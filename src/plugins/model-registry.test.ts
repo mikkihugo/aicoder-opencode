@@ -6,6 +6,7 @@ import test from "node:test";
 
 import type { ModelRegistryEntry } from "../model-registry.js";
 import {
+  clearSessionHangState,
   expireHealthMaps,
   findCuratedFallbackRoute,
   inferTaskComplexity,
@@ -591,4 +592,46 @@ test("expireHealthMaps_whenKeyMissingEntryIsInfinite_neverExpires", () => {
   expireHealthMaps(providerHealthMap, new Map(), Date.now() + 365 * 24 * 60 * 60 * 1000);
 
   assert.equal(providerHealthMap.has("openrouter"), true);
+});
+
+test("clearSessionHangState_whenSessionTerminates_dropsFromAllThreeSessionMaps", () => {
+  // Regression: the session.error and assistant.message.completed
+  // handlers used to only `sessionStartTimeMap.delete(sessionID)`.
+  // `sessionActiveProviderMap` and `sessionActiveModelMap` were
+  // populated on every `chat.params` call but NEVER cleared, leaking
+  // one entry per session for the full lifetime of the plugin process.
+  // Not a correctness bug (the hang-detector short-circuits on missing
+  // start time) but a real unbounded memory growth bug in long-running
+  // autopilot processes.
+  const sessionStartTimeMap = new Map<string, number>([
+    ["session-a", 1000],
+    ["session-b", 2000],
+  ]);
+  const sessionActiveProviderMap = new Map<string, string>([
+    ["session-a", "ollama-cloud"],
+    ["session-b", "iflowcn"],
+  ]);
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >([
+    ["session-a", { id: "glm-4.7", providerID: "ollama-cloud" }],
+    ["session-b", { id: "qwen3-coder-plus", providerID: "iflowcn" }],
+  ]);
+
+  clearSessionHangState(
+    "session-a",
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  // session-a is fully gone from all three maps.
+  assert.equal(sessionStartTimeMap.has("session-a"), false);
+  assert.equal(sessionActiveProviderMap.has("session-a"), false);
+  assert.equal(sessionActiveModelMap.has("session-a"), false);
+  // session-b is untouched.
+  assert.equal(sessionStartTimeMap.has("session-b"), true);
+  assert.equal(sessionActiveProviderMap.has("session-b"), true);
+  assert.equal(sessionActiveModelMap.has("session-b"), true);
 });
