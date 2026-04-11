@@ -7038,6 +7038,39 @@ test("stripYamlScalarQuotes_whenEmptyOrTooShort_returnsValueUnchanged", () => {
   assert.equal(stripYamlScalarQuotes('"'), '"');
 });
 
+// M131 pin A — single-layer strip, not recursive: a doubly-quoted
+// input like `""foo""` must yield exactly `"foo"` (inner quote pair
+// preserved as literal content). A "recurse while quotes match"
+// refactor would descend into `"foo"` → `foo`, silently eating the
+// author-intended inner quotes. Orthogonal to B (length 8, `< 2` vs
+// `<= 2` boundary irrelevant) and to C (no backticks).
+test("stripYamlScalarQuotes_whenDoublyQuotedDouble_stripsExactlyOneLayer", () => {
+  assert.equal(stripYamlScalarQuotes('""foo""'), '"foo"');
+});
+
+// M131 pin B — length-2 matched pair strips to the empty string: the
+// `length < 2` strict guard lets `""` fall through to the slice
+// branch and return `""` (empty string). A `<=` boundary loosening
+// would leave `""` as a literal 2-char string. Orthogonal to A
+// (length 2, not doubly quoted) and to C (no backticks). Also
+// orthogonal to the existing length-edge pin, which only tests
+// length 0 and length 1.
+test("stripYamlScalarQuotes_whenMatchedPairHasEmptyInterior_returnsEmptyString", () => {
+  assert.equal(stripYamlScalarQuotes('""'), "");
+  assert.equal(stripYamlScalarQuotes("''"), "");
+});
+
+// M131 pin C — backtick is NOT a recognized quote character: the
+// recognized set is exactly `{"`, `'"}`, not backtick. A
+// `` `foo` `` input must pass through unchanged. A "also support
+// Markdown backtick quoting" widening refactor would strip backticks
+// and corrupt any agent scalar that contains a literal backticked
+// value. Orthogonal to A (no double-quotes) and to B (length 5, not
+// a length-2 matched pair).
+test("stripYamlScalarQuotes_whenBacktickQuoted_leavesValueUnchanged", () => {
+  assert.equal(stripYamlScalarQuotes("`foo`"), "`foo`");
+});
+
 test("parseAgentFrontmatter_whenUnquotedModel_returnsRawValue", () => {
   const metadata = parseAgentFrontmatter([
     "name: codebase_explorer",

@@ -6068,6 +6068,59 @@ function inferTaskComplexity(prompt: string, _explicitComplexity: TaskComplexity
  * scalar case has no inner-quote semantics to defend and a stricter rule
  * catches accidental copy-paste errors upstream.
  *
+ * ## Drift surfaces (M131 PDD)
+ *
+ * The five existing pins cover unquoted passthrough, double-quoted
+ * strip, single-quoted strip, the three asymmetric variants, and the
+ * length-<-2 edge cases — good breadth on the happy paths and the
+ * explicit rejection branches, but three orthogonal invariants sit
+ * below that coverage and each has a plausible refactor that breaks
+ * it:
+ *
+ *  A. **Single-layer strip, not recursive.** The function strips
+ *     EXACTLY ONE matching pair of leading+trailing quotes and stops.
+ *     An input like `""foo""` (double-double-quoted, legitimate when
+ *     an agent author encodes a quoted value inside a quoted scalar
+ *     for escaping) must yield `"foo"` — the inner pair is preserved
+ *     as literal content. A "helpful" refactor that recurses while
+ *     quotes still match would descend into `"foo"` → `foo`, silently
+ *     eating the author-intended inner quotes. None of the existing
+ *     pins exercises a doubly-quoted input; they all use single-layer
+ *     values, so a recursive rewrite ships green.
+ *
+ *  B. **Length-2 matched pair strips to the empty string.** The
+ *     guard is `length < 2` (strict), so a length-2 input like `""`
+ *     or `''` — a matched pair with an empty interior — falls
+ *     through to the slice branch and returns `""`. A "simplify the
+ *     boundary" refactor to `length <= 2 return rawValue` leaves `""`
+ *     and `''` unchanged, and every frontmatter scalar that was
+ *     authored as an explicitly-empty quoted value ships as a
+ *     literal two-character string (`'""'`) instead of the empty
+ *     string the YAML spec requires. Existing pin E only tests
+ *     length 0 and length 1 (empty and a single `"`), both of which
+ *     remain unchanged under the `<=` variant, so the regression is
+ *     invisible to it.
+ *
+ *  C. **Only `"` and `'` are recognized quote characters — backtick
+ *     is not.** YAML does not assign any quoting semantics to `` ` ``,
+ *     so `` `foo` `` is a literal 5-character string and must pass
+ *     through unchanged. A "let's also support Markdown-style
+ *     backtick quoting" refactor that widens the recognized set to
+ *     `['"', "'", '`']` would silently strip the backticks off any
+ *     agent scalar that contains a backticked literal (e.g. a model
+ *     id quoted in a rationale comment that got copy-pasted into a
+ *     scalar), corrupting the value. No existing pin feeds a
+ *     backticked input — they all use either unquoted, `"`-quoted,
+ *     or `'`-quoted values.
+ *
+ * Asymmetric sabotage model: pin A fires on any recursion (S1), pin
+ * B fires on any `< → <=` length-guard loosening (S2), pin C fires
+ * on any quote-char-set widening to include backtick (S3). The three
+ * sabotages are orthogonal — none of them touches the other two's
+ * invariant surfaces, and none touches the five existing pins'
+ * single-layer / asymmetric / length-0-or-1 surfaces — so each new
+ * pin fires alone in its partition.
+ *
  * Args:
  *   rawValue: The already-trimmed scalar from one frontmatter line.
  *
