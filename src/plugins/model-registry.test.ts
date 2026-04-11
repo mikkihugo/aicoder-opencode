@@ -6271,6 +6271,76 @@ test("parseAgentFrontmatter_whenRoutingComplexityIsInvalid_leavesFieldUnset", ()
   assert.equal(metadata.routing_complexity, undefined);
 });
 
+test("parseAgentFrontmatter_whenModelsBlockListFollowedByScalarKey_preservesTerminatorLineForNextIteration", () => {
+  // M117 pin A: the block-list peek loop must NOT consume the
+  // terminator line (the first non-list line that ends the block). The
+  // peek shape is `if (!blockMatch) break;` BEFORE `lineIndex += 1;`,
+  // which leaves the terminator line in place for the outer while to
+  // re-read and dispatch normally. A refactor that moves `lineIndex +=
+  // 1` before the break silently eats the terminator — so `routing_role
+  // :` after a `models:` block disappears entirely. This is the
+  // common case (most agent files declare `models:` immediately before
+  // `routing_role:` / `routing_complexity:`), so the drift would drop
+  // role/complexity hints across the whole agent catalog.
+  const metadata = parseAgentFrontmatter([
+    "name: terminator_survives_agent",
+    "models:",
+    "  - ollama-cloud/glm-5",
+    "  - ollama-cloud/kimi-k2-thinking",
+    "routing_role: architect",
+  ].join("\n"));
+
+  assert.equal(metadata.routing_role, "architect");
+});
+
+test("parseAgentFrontmatter_whenSiblingKeySharesModelPrefix_doesNotClobberStrictModelScalar", () => {
+  // M117 pin B: key matching must be strict `===` equality, not
+  // `.startsWith`. A sibling key like `model_preference:` must land in
+  // none of the branches and be silently ignored — it must NOT clobber
+  // the real `model:` scalar. The order of lines is deliberate:
+  // `model:` comes FIRST and `model_preference:` comes SECOND, so a
+  // refactor to `key.startsWith("model")` would have both lines land
+  // in the `model` branch and the LATER assignment (`"bar"`) would win.
+  // Under strict equality, the real `model:` scalar is the only line
+  // that matches and its value survives.
+  const metadata = parseAgentFrontmatter([
+    "name: sibling_key_agent",
+    "model: openrouter/stepfun/step-3.5-flash:free",
+    "model_preference: bar",
+  ].join("\n"));
+
+  assert.equal(metadata.model, "openrouter/stepfun/step-3.5-flash:free");
+});
+
+test("parseAgentFrontmatter_whenDashIsAtColumnZero_rejectsAsNonNestedListItem", () => {
+  // M117 pin C: the block-list regex `/^\s+-\s+(.*)$/` requires leading
+  // whitespace — `\s+`, not `\s*`. A column-0 dash is not a nested list
+  // item; YAML only permits block-list items when they are indented
+  // inside their parent key. A "simplification" dropping the `+` to
+  // `\s*` would accept column-0 dashes as valid items and silently
+  // pull in dangling sequence nodes from comments or broken lists.
+  // The assertion is formulated as "the forbidden item must NOT appear
+  // in metadata.models" so it stays orthogonal to sabotages that make
+  // `metadata.models` undefined for unrelated reasons.
+  const metadata = parseAgentFrontmatter([
+    "name: column_zero_dash_agent",
+    "models:",
+    "- forbidden-column-zero-item",
+  ].join("\n"));
+
+  const containsForbidden =
+    Array.isArray(metadata.models)
+    && metadata.models.includes("- forbidden-column-zero-item");
+  const containsForbiddenStripped =
+    Array.isArray(metadata.models)
+    && metadata.models.includes("forbidden-column-zero-item");
+  assert.equal(
+    containsForbidden || containsForbiddenStripped,
+    false,
+    "column-0 dashes must not be collected as block-list items",
+  );
+});
+
 test("parseHangTimeoutMs_whenUndefined_returnsDefault", () => {
   assert.equal(parseHangTimeoutMs(undefined), DEFAULT_ROUTE_HANG_TIMEOUT_MS);
 });

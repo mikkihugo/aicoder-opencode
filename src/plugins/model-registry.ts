@@ -5249,6 +5249,65 @@ export function stripYamlScalarQuotes(rawValue: string): string {
  *   object with no populated fields (rather than `null`) when every line
  *   is ignored — the `readAgentMetadata` caller is responsible for
  *   deciding whether an empty metadata object is useful.
+ *
+ * ## Drift surfaces (M117 PDD)
+ *
+ * Pre-M117 the seven existing pins cover quote stripping across model /
+ * models / routing_role / routing_complexity scalar paths (M53), the
+ * block-list and inline flow-style item variants, and the invalid-
+ * complexity rejection — good breadth, but three line-discipline and
+ * key-matching invariants have zero direct coverage and each has a
+ * plausible regression:
+ *
+ * 1. **Block-list peek loop preserves the terminator line for the next
+ *    outer-loop iteration.** The current shape is `if (!blockMatch)
+ *    break;` BEFORE `lineIndex += 1;`, so the line that ends the block
+ *    list (typically the next `key:` pair) is re-read by the outer
+ *    `while (lineIndex < ...)` and processed normally. A refactor that
+ *    "cleans up" the increment by moving `lineIndex += 1` to the top of
+ *    the peek loop (or any position before the break) silently consumes
+ *    the terminator: after parsing `models:\n  - a\n  - b\nrouting_role:
+ *    X`, the `routing_role: X` line is eaten by the peek-increment and
+ *    the outer loop resumes at the line AFTER it, so `metadata
+ *    .routing_role` is silently dropped. Every agent file that declares
+ *    a `models:` block immediately followed by `routing_role:` /
+ *    `routing_complexity:` — which is most of them — would lose its
+ *    explicit role/complexity hints on the next plugin load, and
+ *    `recommendTaskModelRoute` would fall back to inference. No existing
+ *    pin exercises the block-list → scalar-key sequence because the M53
+ *    block-list pin ends the frontmatter with the last list item.
+ *
+ * 2. **Key matching is strict `===` equality, not `.startsWith`.** The
+ *    `if (key === "model")` / `"models"` / `"routing_role"` /
+ *    `"routing_complexity"` chain uses exact comparison, so a sibling
+ *    key like `model_preference`, `model_override`, or `models_hint`
+ *    lands in none of the branches and is silently ignored. A plausible
+ *    "let future variants flow through" refactor to `key.startsWith(
+ *    "model")` would have `model_preference: bar` match the `model`
+ *    branch first and clobber the real `model: openrouter/foo` value —
+ *    whichever assignment comes later wins. Worse, `models:` (plural)
+ *    would also match the `model` branch via the prefix test, so
+ *    existing agents' `models:` block lists would silently populate
+ *    `metadata.model` with an empty string instead of `metadata.models`
+ *    with the block items, breaking every multi-model preference file.
+ *    No existing pin exercises a sibling key that SHARES the `model`
+ *    prefix.
+ *
+ * 3. **Block-list regex requires leading whitespace (`\s+`, not
+ *    `\s*`).** YAML permits block lists only when the items are
+ *    indented inside their parent key. Column-0 `- a` at the same
+ *    indentation as `models:` is not a nested list item — it is a
+ *    standalone sequence node that cannot be attached to the preceding
+ *    mapping. The regex `/^\s+-\s+(.*)$/` enforces this: column-0
+ *    dashes do not match, the peek loop breaks, and `metadata.models`
+ *    stays empty. A "simplification" to `/^\s*-\s+(.*)$/` (one
+ *    character dropped) accepts column-0 dashes as list items, which
+ *    silently pulls in whatever sequence nodes happen to follow the
+ *    `models:` line in the same frontmatter — and since frontmatter is
+ *    usually hand-authored, a dangling dash-prefixed line from a
+ *    comment or a broken list would populate `metadata.models` with
+ *    garbage. No existing pin exercises a column-0 dash as a negative
+ *    case.
  */
 export function parseAgentFrontmatter(frontmatterText: string): AgentMetadata {
   const metadata: AgentMetadata = {};
