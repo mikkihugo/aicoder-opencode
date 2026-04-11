@@ -53,9 +53,11 @@ import {
   expireHealthMaps,
   filterProviderModelsByRouteHealth,
   findCuratedFallbackRoute,
+  HANG_TIMEOUT_IMMEDIATE_THRESHOLD_MS,
   classifyPersistedHealthKey,
   extractAssistantMessageCompletedPayload,
   extractSessionErrorExplicitModel,
+  shouldRecordImmediateTimeoutPenalty,
   findRegistryEntryByModel,
   loadRegistryAndLookupEntryForInputModel,
   inferTaskComplexity,
@@ -736,6 +738,52 @@ test("serializeHealthEntryForPersistence_whenCalled_preservesStateAndRetryCount"
 
   assert.equal(serialized.state, "no_credit");
   assert.equal(serialized.retryCount, 7);
+});
+
+test("shouldRecordImmediateTimeoutPenalty_whenAllConditionsHold_returnsTrue", () => {
+  // M86 pin: below-threshold timeout + provider + model → take the
+  // synchronous immediate-penalty branch. A sabotage that hardcodes
+  // the timeout comparison (e.g. `return 2000 < THRESHOLD && ...`)
+  // fires this pin alone — pins 2 and 3 already expect false.
+  assert.equal(
+    shouldRecordImmediateTimeoutPenalty(
+      HANG_TIMEOUT_IMMEDIATE_THRESHOLD_MS - 500,
+      true,
+      true,
+    ),
+    true,
+  );
+});
+
+test("shouldRecordImmediateTimeoutPenalty_whenProviderIDIsMissing_returnsFalse", () => {
+  // M86 pin: below-threshold timeout but missing providerID must
+  // return false. A sabotage that drops the `&& hasProviderID`
+  // conjunct fires this pin alone — pin 1 still has a providerID
+  // and pin 3 is broken on the model axis, so both continue to
+  // behave correctly under this sabotage.
+  assert.equal(
+    shouldRecordImmediateTimeoutPenalty(
+      HANG_TIMEOUT_IMMEDIATE_THRESHOLD_MS - 500,
+      false,
+      true,
+    ),
+    false,
+  );
+});
+
+test("shouldRecordImmediateTimeoutPenalty_whenModelIsMissing_returnsFalse", () => {
+  // M86 pin: below-threshold timeout but missing model must return
+  // false. A sabotage that drops the `&& hasModel` conjunct fires
+  // this pin alone — pin 1 still has a model and pin 2 is broken
+  // on the providerID axis.
+  assert.equal(
+    shouldRecordImmediateTimeoutPenalty(
+      HANG_TIMEOUT_IMMEDIATE_THRESHOLD_MS - 500,
+      true,
+      false,
+    ),
+    false,
+  );
 });
 
 test("extractAssistantMessageCompletedPayload_whenShapeIsValid_returnsNarrowedTuple", () => {

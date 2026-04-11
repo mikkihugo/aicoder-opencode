@@ -1497,6 +1497,88 @@ export function parseHangTimeoutMs(rawValue: string | undefined): number {
 }
 
 /**
+ * Threshold (milliseconds) below which `chat.params` records a "timeout"
+ * route-health penalty **synchronously** at hook entry instead of
+ * arming the usual `setTimeout`-based hang detector.
+ *
+ * The `< THRESHOLD` (strict) branch is a test-mode short-path referenced
+ * by `parseHangTimeoutMs`'s docstring: a caller who wants immediate-
+ * penalty semantics (e.g. a regression test that cannot afford to wait
+ * 15 minutes for the default hang timer to fire) sets
+ * `AICODER_ROUTE_HANG_TIMEOUT_MS="0"` or `"500"` and the hook takes the
+ * synchronous branch. Production operation always sets
+ * `DEFAULT_ROUTE_HANG_TIMEOUT_MS` (900000), which is comfortably above
+ * this threshold.
+ *
+ * Previously the `chat.params` hook carried the literal `1000` inline
+ * with a one-line `// For testing purposes with very short timeouts`
+ * comment and no named constant — a drift surface on three axes:
+ *   1. The literal has no documented semantics at the call site, so a
+ *      future developer could tune it (`< 100`? `< 500`?) without
+ *      understanding that `parseHangTimeoutMs`'s docstring references
+ *      this exact boundary as the "test-mode short-path".
+ *   2. The `<` boundary is implicit; flipping to `<=` or `>` changes
+ *      the semantics silently.
+ *   3. The branch gate re-reads `input.provider.info.id` and `input.model`
+ *      directly and repeats the null-guard inline, so a refactor could
+ *      drop either half of the `&& hasProviderID && hasModel` policy
+ *      and record a penalty against an undefined identifier tuple.
+ *
+ * Naming the threshold and pairing it with
+ * `shouldRecordImmediateTimeoutPenalty` makes all three invariants
+ * single-site properties instead of convention-by-comment.
+ */
+export const HANG_TIMEOUT_IMMEDIATE_THRESHOLD_MS = 1000;
+
+/**
+ * Decide whether the `chat.params` hook should record an immediate
+ * "timeout" route-health penalty instead of arming the hang timer.
+ *
+ * The three-way AND encodes the full gate: (a) the parsed timeout
+ * budget is under the test-mode short-path threshold
+ * (`HANG_TIMEOUT_IMMEDIATE_THRESHOLD_MS`, strict `<`), (b) the input
+ * session carries a non-empty provider identifier, and (c) the input
+ * session carries a non-null model tuple. Dropping any of the three
+ * conditions silently changes who gets penalized:
+ *
+ *   - Drop the threshold check → every session records an immediate
+ *     timeout penalty on entry, blacking out every route in the
+ *     registry within seconds of the plugin loading.
+ *   - Drop the providerID check → a session that never bound its
+ *     provider records a timeout penalty keyed on `undefined`, which
+ *     `recordRouteHealthByIdentifiers` either crashes on or silently
+ *     writes to the wrong map slot.
+ *   - Drop the model check → same failure mode, one layer deeper
+ *     (the `modelRouteHealthMap` composite key becomes
+ *     `"provider/undefined"`).
+ *
+ * The helper is a pure boolean predicate so the test pins can sabotage
+ * each AND-term independently and fire exactly one pin per sabotage.
+ *
+ * Args:
+ *   rawTimeoutMs: The output of `parseHangTimeoutMs(process.env.*)` —
+ *     non-negative integer milliseconds.
+ *   hasProviderID: `true` when `input.provider.info.id` is non-empty.
+ *   hasModel: `true` when `input.model` is a non-null object.
+ *
+ * Returns:
+ *   `true` iff all three conditions hold and the caller should take
+ *   the synchronous immediate-penalty branch; `false` means arm the
+ *   `setTimeout`-based hang detector instead.
+ */
+export function shouldRecordImmediateTimeoutPenalty(
+  rawTimeoutMs: number,
+  hasProviderID: boolean,
+  hasModel: boolean,
+): boolean {
+  return (
+    rawTimeoutMs < HANG_TIMEOUT_IMMEDIATE_THRESHOLD_MS
+    && hasProviderID
+    && hasModel
+  );
+}
+
+/**
  * Runtime-validate and extract an explicit `{ id, providerID }` model
  * tuple from a `session.error` event payload.
  *
@@ -4531,22 +4613,32 @@ export const ModelRegistryPlugin: Plugin = async () => {
         // trailing-garbage edge cases the helper defends against.
         const timeoutMs = parseHangTimeoutMs(process.env.AICODER_ROUTE_HANG_TIMEOUT_MS);
 
-        // For testing purposes with very short timeouts, mark as timeout immediately
-        if (timeoutMs < 1000) {
-          const providerID = input.provider.info.id;
-          const model = input.model;
-          if (providerID && model) {
-            recordRouteHealthByIdentifiers(
-              modelRouteHealthMap,
-              providerHealthMap,
-              providerID,
-              model.id,
-              "timeout",
-              QUOTA_BACKOFF_DURATION_MS,
-              Date.now(),
-              persistProviderHealth,
-            );
-          }
+        // M86: `shouldRecordImmediateTimeoutPenalty` + `HANG_TIMEOUT_IMMEDIATE_THRESHOLD_MS`
+        // replace the inline `timeoutMs < 1000` literal and the nested
+        // `if (providerID && model)` guard. See the helper docstring
+        // for the three drift surfaces it closes (magic literal,
+        // implicit `<` boundary, and triple-nested gate). The
+        // identifier narrowing still lives at the call site so the
+        // `recordRouteHealthByIdentifiers` arguments stay visible.
+        const immediateProviderID = input.provider.info.id;
+        const immediateModel = input.model;
+        if (
+          shouldRecordImmediateTimeoutPenalty(
+            timeoutMs,
+            Boolean(immediateProviderID),
+            Boolean(immediateModel),
+          )
+        ) {
+          recordRouteHealthByIdentifiers(
+            modelRouteHealthMap,
+            providerHealthMap,
+            immediateProviderID,
+            immediateModel.id,
+            "timeout",
+            QUOTA_BACKOFF_DURATION_MS,
+            Date.now(),
+            persistProviderHealth,
+          );
         } else {
           // Capture only primitive `sessionID` plus the outer Map refs so
           // the closure does NOT retain a reference to the full `input`
