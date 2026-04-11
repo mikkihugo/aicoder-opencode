@@ -658,7 +658,17 @@ export type ProviderApiErrorClass =
  *   1. Recognized HTTP status code (authoritative). 429 → quota;
  *      402 → no_credit; 401/403 → key_dead.
  *   2. Only when statusCode is 0 or unrecognized, fall back to message
- *      keywords in the same quota → no_credit → key_dead order.
+ *      keywords in **longer-penalty-first** order: no_credit (2h) →
+ *      key_dead (2h) → quota (1h). This mirrors the status-code fix at
+ *      the keyword path: a message like `"rate limit exceeded: insufficient
+ *      credits"` must NOT short-circuit to quota just because "rate limit"
+ *      was checked first — the same false-quota-cycle bug the status-code
+ *      path fixed is fully reachable at statusCode=0 (proxy strips the
+ *      402, provider returns a structured 500 body, or an upstream network
+ *      error surfaces with statusCode=0 and the provider's own JSON
+ *      message). Symmetrically, a message containing an auth signal
+ *      ("unauthorized", "authentication") alongside "rate limit" must
+ *      classify as key_dead so a dead key isn't retried every hour.
  *
  * The helper is pure so it is unit-testable in isolation without any
  * live health maps or opencode runtime event payloads.
@@ -686,11 +696,14 @@ export function classifyProviderApiError(
   if (KEY_DEAD_HTTP_STATUS_CODES.has(statusCode)) return "key_dead";
 
   // Keyword fallback — only reached when no recognized status was present.
-  // Order here is priority, not short-circuit-precedence, because the
-  // keyword sets are disjoint by design.
-  if (QUOTA_KEYWORDS.some((kw) => lowerMessage.includes(kw))) return "quota";
+  // Longer-penalty-first priority: a message that contains BOTH a quota
+  // word and a more-specific financial/auth word must land in the
+  // specific bucket, not the generic-quota one. Keyword sets are not
+  // disjoint in practice — providers routinely wrap their real failure
+  // in a "rate limit exceeded" wrapper.
   if (NO_CREDIT_KEYWORDS.some((kw) => lowerMessage.includes(kw))) return "no_credit";
   if (KEY_DEAD_KEYWORDS.some((kw) => lowerMessage.includes(kw))) return "key_dead";
+  if (QUOTA_KEYWORDS.some((kw) => lowerMessage.includes(kw))) return "quota";
 
   return "unclassified";
 }

@@ -1574,9 +1574,39 @@ test("classifyProviderApiError_when429WithNoCreditKeyword_returnsQuota", () => {
 
 test("classifyProviderApiError_whenStatusIsZeroAndQuotaKeyword_returnsQuotaFromFallback", () => {
   // Keyword fallback path: status 0 (e.g. proxy stripped it) falls
-  // through to keyword checks in priority order. quota > no_credit > key_dead.
+  // through to keyword checks in longer-penalty-first order:
+  // no_credit > key_dead > quota. Plain quota-only messages still land
+  // in the quota bucket because no earlier bucket's keywords match.
   const result = classifyProviderApiError(0, "provider reported quota exhaustion");
   assert.equal(result, "quota");
+});
+
+test("classifyProviderApiError_whenStatusIsZeroAndMessageHasBothRateLimitAndInsufficientCredits_returnsNoCreditNotQuota", () => {
+  // Headline regression (M45): a proxy strips the authoritative 402
+  // status, or the provider returns a structured 500 body carrying its
+  // real failure in the message. The message reads
+  // "rate limit exceeded: insufficient credits" — under the old
+  // quota-first keyword order this short-circuited to "quota" (1h),
+  // the plugin retried the out-of-credit provider an hour later, hit
+  // the same error, cycle repeated indefinitely. Correct class is
+  // "no_credit" (2h). Same failure mode that M35 fixed at the HTTP
+  // status-code priority path, ported to the keyword fallback.
+  const result = classifyProviderApiError(
+    0,
+    "rate limit exceeded: insufficient credits on this account",
+  );
+  assert.equal(result, "no_credit");
+});
+
+test("classifyProviderApiError_whenStatusIsZeroAndMessageHasBothRateLimitAndUnauthorized_returnsKeyDeadNotQuota", () => {
+  // Symmetric: dead-key message wrapped in a "rate limit" narrative
+  // must classify as key_dead at statusCode=0, not quota. Prevents the
+  // "dead key retried every hour" cycle when the status is absent.
+  const result = classifyProviderApiError(
+    0,
+    "rate limit on unauthorized requests: token invalid",
+  );
+  assert.equal(result, "key_dead");
 });
 
 test("classifyProviderApiError_whenStatusIsZeroAndNoCreditKeyword_returnsNoCredit", () => {
