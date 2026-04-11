@@ -8,6 +8,7 @@ import type { ModelRegistryEntry } from "../model-registry.js";
 import {
   buildAvailableModelsSystemPrompt,
   buildProviderHealthSystemPrompt,
+  buildRouteHealthEntry,
   clearSessionHangState,
   composeRouteKey,
   computeProviderHealthUpdate,
@@ -1354,4 +1355,115 @@ test("parsePersistedHealthEntry_whenRetryCountIsMissing_returnsNull", () => {
   const parsed = parsePersistedHealthEntry(entry, Date.now());
 
   assert.equal(parsed, null);
+});
+
+test("buildRouteHealthEntry_whenModelIDIsAlreadyComposite_doesNotDoublePrefix", () => {
+  // Regression: the four modelRouteHealthMap writers used a naive
+  // `${providerID}/${model.id}` template. When opencode delivers a model id
+  // that's already composite (e.g. `"ollama-cloud/glm-5"`), the naive write
+  // produced `"ollama-cloud/ollama-cloud/glm-5"` — a dead key no reader
+  // using composeRouteKey could ever look up. Route penalties for all
+  // composite-id providers were effectively invisible to the router.
+  const now = Date.now();
+  const { routeKey, health } = buildRouteHealthEntry(
+    "ollama-cloud",
+    "ollama-cloud/glm-5",
+    "quota",
+    60 * 60 * 1000,
+    undefined,
+    now,
+  );
+
+  assert.equal(routeKey, "ollama-cloud/glm-5", "do not double-prefix composite ids");
+  assert.equal(health.state, "quota");
+  assert.equal(health.until, now + 60 * 60 * 1000);
+  assert.equal(health.retryCount, 1);
+});
+
+test("buildRouteHealthEntry_whenModelIDIsUnprefixedPlainId_addsProviderPrefix", () => {
+  // The other half of the symmetry: plain-id providers like longcat
+  // (where model.id arrives unprefixed, e.g. "LongCat-Flash-Chat") still
+  // need the provider prefix attached. This mirrors the read-side contract.
+  const now = Date.now();
+  const { routeKey } = buildRouteHealthEntry(
+    "longcat",
+    "LongCat-Flash-Chat",
+    "timeout",
+    60 * 60 * 1000,
+    undefined,
+    now,
+  );
+
+  assert.equal(routeKey, "longcat/LongCat-Flash-Chat");
+});
+
+test("buildRouteHealthEntry_whenOpenrouterDeliversAlreadyComposite_preservesSingleSlash", () => {
+  // openrouter's model ids arrive as `"openrouter/xiaomi/mimo-v2-pro"` —
+  // the provider prefix plus a vendor-qualified sub-id. The helper must
+  // not re-prefix or the readers would look up the wrong key.
+  const { routeKey } = buildRouteHealthEntry(
+    "openrouter",
+    "openrouter/xiaomi/mimo-v2-pro",
+    "model_not_found",
+    60 * 60 * 1000,
+    undefined,
+    Date.now(),
+  );
+
+  assert.equal(routeKey, "openrouter/xiaomi/mimo-v2-pro");
+});
+
+test("buildRouteHealthEntry_whenReadBackViaComposeRouteKey_hitsSameKey", () => {
+  // The symmetry test: a write via buildRouteHealthEntry must be findable
+  // by a read via composeRouteKey for BOTH plain and composite model ids.
+  // This is the integration-level invariant the four write sites broke.
+  const now = Date.now();
+
+  const composite = buildRouteHealthEntry(
+    "ollama-cloud",
+    "ollama-cloud/glm-5",
+    "quota",
+    60 * 60 * 1000,
+    undefined,
+    now,
+  );
+  const compositeReadKey = composeRouteKey({
+    provider: "ollama-cloud",
+    model: "ollama-cloud/glm-5",
+  });
+  assert.equal(composite.routeKey, compositeReadKey);
+
+  const plain = buildRouteHealthEntry(
+    "longcat",
+    "LongCat-Flash-Chat",
+    "timeout",
+    60 * 60 * 1000,
+    undefined,
+    now,
+  );
+  const plainReadKey = composeRouteKey({
+    provider: "longcat",
+    model: "LongCat-Flash-Chat",
+  });
+  assert.equal(plain.routeKey, plainReadKey);
+});
+
+test("buildRouteHealthEntry_whenExistingEntryHasRetryCount_incrementsIt", () => {
+  const now = Date.now();
+  const existing = {
+    state: "quota" as const,
+    until: now + 30 * 60 * 1000,
+    retryCount: 4,
+  };
+
+  const { health } = buildRouteHealthEntry(
+    "ollama-cloud",
+    "ollama-cloud/glm-5",
+    "quota",
+    60 * 60 * 1000,
+    existing,
+    now,
+  );
+
+  assert.equal(health.retryCount, 5, "repeat failures must remain observable");
 });

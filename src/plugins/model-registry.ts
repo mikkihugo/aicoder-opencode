@@ -502,6 +502,66 @@ export function computeProviderHealthUpdate(
   };
 }
 
+/**
+ * Build the `{routeKey, health}` pair that writers of `modelRouteHealthMap`
+ * should store, normalizing the key through `composeRouteKey` so write-side
+ * and read-side lookups cannot drift.
+ *
+ * Before this helper, the four write sites (`session.error` model_not_found,
+ * `assistant.message.completed` zero-token quota, `chat.params` immediate
+ * timeout, `chat.params` hang-timer timeout) all built the key as the
+ * naive template literal `${providerID}/${model.id}`. When opencode
+ * delivers a model id that is ALREADY composite — common for non-openrouter
+ * providers where `model.id = "ollama-cloud/glm-5"` — the naive write
+ * produced `ollama-cloud/ollama-cloud/glm-5`, which no reader using
+ * `composeRouteKey` could ever look up. The penalty was written to a
+ * dead key that lived forever in-memory and on-disk as a zombie, while
+ * the actual route was still advertised as healthy and the router
+ * immediately re-selected it, re-failed, re-zombied, in a tight loop.
+ * Simultaneously, a plain-id provider like `longcat` (unprefixed
+ * `LongCat-Flash-Chat`) worked fine, so the bug was provider-specific
+ * and silent until one of the affected routes actually failed.
+ *
+ * The fix routes writers through `composeRouteKey`, which is idempotent
+ * on already-composite ids and additive on plain ones. The pair return
+ * value stays pure so the helper can be unit-tested without touching a
+ * live `modelRouteHealthMap`.
+ *
+ * Args:
+ *   providerID: The opencode runtime provider id (`input.provider.info.id`
+ *     or `sessionActiveProviderMap.get(sessionID)`).
+ *   modelID: The opencode runtime model id (`model.id`), which may or may
+ *     not already contain the provider prefix — this helper handles both.
+ *   state: The classified penalty state for the incoming error.
+ *   durationMs: How long (from `now`) the penalty should last.
+ *   existing: The current entry at this key, used to increment `retryCount`
+ *     so repeat failures remain observable in the health tool output.
+ *   now: Current wall-clock timestamp in ms (injected for testability).
+ *
+ * Returns:
+ *   `{ routeKey, health }` — the caller writes `map.set(routeKey, health)`
+ *   and then triggers persistence. The caller remains responsible for the
+ *   mutation so this helper stays pure.
+ */
+export function buildRouteHealthEntry(
+  providerID: string,
+  modelID: string,
+  state: ProviderHealthState,
+  durationMs: number,
+  existing: ModelRouteHealth | undefined,
+  now: number,
+): { routeKey: string; health: ModelRouteHealth } {
+  const routeKey = composeRouteKey({ provider: providerID, model: modelID });
+  return {
+    routeKey,
+    health: {
+      state,
+      until: now + durationMs,
+      retryCount: (existing?.retryCount ?? 0) + 1,
+    },
+  };
+}
+
 export function clearSessionHangState(
   sessionID: string,
   sessionStartTimeMap: Map<string, number>,
@@ -1613,7 +1673,6 @@ export const ModelRegistryPlugin: Plugin = async () => {
         );
         if (!providerID) return;
         const modelID = model?.id;
-        const routeKey = modelID ? `${providerID}/${modelID}` : null;
 
         // "Model not found" message → model_not_found backoff (1h).
         // Note: we require the message match — a bare 500 is routinely a
@@ -1622,13 +1681,18 @@ export const ModelRegistryPlugin: Plugin = async () => {
         // (openrouter synthesized), 404+"model not found" (direct providers).
         const isModelNotFound =
           modelID !== undefined && message.includes("model not found");
-        if (isModelNotFound && routeKey) {
-          const existing = modelRouteHealthMap.get(routeKey);
-          modelRouteHealthMap.set(routeKey, {
-            state: "model_not_found",
-            until: Date.now() + QUOTA_BACKOFF_DURATION_MS,
-            retryCount: (existing?.retryCount ?? 0) + 1,
-          });
+        if (isModelNotFound && modelID) {
+          const { routeKey, health } = buildRouteHealthEntry(
+            providerID,
+            modelID,
+            "model_not_found",
+            QUOTA_BACKOFF_DURATION_MS,
+            modelRouteHealthMap.get(
+              composeRouteKey({ provider: providerID, model: modelID }),
+            ),
+            Date.now(),
+          );
+          modelRouteHealthMap.set(routeKey, health);
           void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
           return;
         }
@@ -1694,13 +1758,17 @@ export const ModelRegistryPlugin: Plugin = async () => {
         if (tokens.input === 0 && tokens.output === 0) {
           if (!providerID || !model) return;
 
-          const routeKey = `${providerID}/${model.id}`;
-          const existing = modelRouteHealthMap.get(routeKey);
-          modelRouteHealthMap.set(routeKey, {
-            state: "quota",
-            until: Date.now() + QUOTA_BACKOFF_DURATION_MS,
-            retryCount: (existing?.retryCount ?? 0) + 1,
-          });
+          const { routeKey, health } = buildRouteHealthEntry(
+            providerID,
+            model.id,
+            "quota",
+            QUOTA_BACKOFF_DURATION_MS,
+            modelRouteHealthMap.get(
+              composeRouteKey({ provider: providerID, model: model.id }),
+            ),
+            Date.now(),
+          );
+          modelRouteHealthMap.set(routeKey, health);
           void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
         }
         return;
@@ -1735,13 +1803,17 @@ export const ModelRegistryPlugin: Plugin = async () => {
           const providerID = input.provider.info.id;
           const model = input.model;
           if (providerID && model) {
-            const routeKey = `${providerID}/${model.id}`;
-            const existing = modelRouteHealthMap.get(routeKey);
-            modelRouteHealthMap.set(routeKey, {
-              state: "timeout",
-              until: Date.now() + QUOTA_BACKOFF_DURATION_MS,
-              retryCount: (existing?.retryCount ?? 0) + 1,
-            });
+            const { routeKey, health } = buildRouteHealthEntry(
+              providerID,
+              model.id,
+              "timeout",
+              QUOTA_BACKOFF_DURATION_MS,
+              modelRouteHealthMap.get(
+                composeRouteKey({ provider: providerID, model: model.id }),
+              ),
+              Date.now(),
+            );
+            modelRouteHealthMap.set(routeKey, health);
             void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
           }
         } else {
@@ -1754,13 +1826,17 @@ export const ModelRegistryPlugin: Plugin = async () => {
               const providerID = sessionActiveProviderMap.get(input.sessionID);
               const model = sessionActiveModelMap.get(input.sessionID);
               if (providerID && model) {
-                const routeKey = `${providerID}/${model.id}`;
-                const existing = modelRouteHealthMap.get(routeKey);
-                modelRouteHealthMap.set(routeKey, {
-                  state: "timeout",
-                  until: Date.now() + QUOTA_BACKOFF_DURATION_MS,
-                  retryCount: (existing?.retryCount ?? 0) + 1,
-                });
+                const { routeKey, health } = buildRouteHealthEntry(
+                  providerID,
+                  model.id,
+                  "timeout",
+                  QUOTA_BACKOFF_DURATION_MS,
+                  modelRouteHealthMap.get(
+                    composeRouteKey({ provider: providerID, model: model.id }),
+                  ),
+                  Date.now(),
+                );
+                modelRouteHealthMap.set(routeKey, health);
                 void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
               }
             }
