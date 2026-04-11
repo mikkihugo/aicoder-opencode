@@ -4717,6 +4717,75 @@ export function filterEnabledEntriesByOptionalRole(
   });
 }
 
+/**
+ * Resolve an agent's declared preferred-model list into the single route
+ * the router should dispatch to, honoring author order and allowing
+ * sibling-route degradation WITHIN THE SAME REGISTRY ENTRY but never
+ * across entries.
+ *
+ * The function has three independently drift-prone surfaces that this
+ * helper's six pre-existing pins only partially cover. They are each
+ * called out here so a future refactor cannot silently collapse them:
+ *
+ * 1. **Exact-match precedence over first-healthy-visible** — within a
+ *    matched entry, the helper MUST prefer the route whose model ID
+ *    literally equals `preferredModel` over the ascending-priority
+ *    first-healthy route. The pre-existing "exact route is healthy"
+ *    pin only exercises the case where the preferred route is already
+ *    the priority-1 visible sibling, so dropping the explicit exact
+ *    lookup would still pass that pin (priority-1 is what the
+ *    fallback-find path returns anyway). The NEW pin targets the
+ *    priority-2 case: preferred is a LATER sibling, both are healthy,
+ *    and the helper must still return the explicit preference. This
+ *    preserves the semantic that an agent's declared preference is a
+ *    hard requirement, not a priority-order hint.
+ *
+ * 2. **`filterVisibleProviderRoutes` integration rejects hidden paid
+ *    routes** — `provider_order` may contain routes whose providers
+ *    are hidden by the visibility filter (xai, deepseek, github-copilot,
+ *    cloudflare-ai-gateway, togetherai, cerebras, minimax-cn*, and
+ *    openrouter paid routes). The helper runs the filter on every
+ *    entry, so an agent that preferred `xai/grok-4` gets null — the
+ *    route is invisible and the filter must not be bypassed. A future
+ *    refactor that replaced the `filterVisibleProviderRoutes(entry.provider_order)`
+ *    call with raw `entry.provider_order` would silently resurrect
+ *    hidden-paid dispatch paths. None of the existing pins exercise a
+ *    hidden-provider preference; the NEW pin does.
+ *
+ * 3. **`entryContainsPreferred` gate prevents cross-entry fallback
+ *    leak** — the inner loop's gate short-circuits any entry that does
+ *    not contain the preferred model among its visible routes. Without
+ *    the gate, the fallback-find branch would happily return the first
+ *    healthy visible route of a completely UNRELATED entry — pollution
+ *    across the registry boundary. The existing pins 4, 5, and 6
+ *    incidentally cover this under sabotage (multiple pins fire when
+ *    the gate is dropped because the semantic is load-bearing), but
+ *    none of them construct the most explicit shape: entry A holds
+ *    the preferred model on an unhealthy provider AND entry B holds a
+ *    DIFFERENT model on a healthy provider. With the gate, the helper
+ *    returns null because entry B is skipped. Without the gate, the
+ *    helper returns entry B's healthy "other" route — dangerous
+ *    cross-entry bleed. The NEW pin nails this shape explicitly.
+ *
+ * Author-order semantics, empty-preferences early return, tier
+ * contract, and same-entry sibling degradation are already covered by
+ * the six pre-existing pins and are NOT re-tested here.
+ *
+ * Args:
+ *   preferredModels: Ordered list of model IDs declared by the agent's
+ *     metadata. Earlier entries win on ties.
+ *   candidateEntries: Registry entries the caller considers eligible.
+ *     Must be pre-filtered by enabled+role but NOT by complexity tier
+ *     (see pin 6's contract note).
+ *   providerHealthMap: In-memory provider-level health table.
+ *   modelRouteHealthMap: In-memory composite-route health table.
+ *   now: Current epoch ms for `until`-based health expiry.
+ *
+ * Returns:
+ *   `{ selectedModelRoute, reasoning }` when a preferred (or same-entry
+ *   sibling) route is healthy and visible. `null` when no preference
+ *   matches a visible route or every candidate is unhealthy.
+ */
 export function findPreferredHealthyRoute(
   preferredModels: string[],
   candidateEntries: ModelRegistryEntry[],

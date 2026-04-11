@@ -6461,3 +6461,88 @@ test("findCuratedFallbackRoute_whenEveryRouteIsDisqualified_returnsNoFallbackSen
 
   assert.equal(fallback, "no fallback configured");
 });
+
+// M100 asymmetric pins for findPreferredHealthyRoute drift surfaces.
+// Each pin fires uniquely under exactly one of three sabotages on the
+// helper body. Pre-existing pins 4/5/6 incidentally fire under S3 as
+// additive coverage — documented and accepted.
+
+test("findPreferredHealthyRoute_whenPreferredIsPriority2Sibling_returnsExactNotFirstHealthy", () => {
+  // Drift surface 1: exact-match precedence. When the agent's declared
+  // preference is a LATER sibling inside an entry (both healthy), the
+  // helper must return the explicit preference, not the ascending-
+  // priority first-healthy visible route. A refactor that collapsed
+  // the exact-find block into the fallback-find scan would pass the
+  // existing pin (where preferred == priority-1 anyway) and silently
+  // return alpha here instead of beta.
+  const entries = [
+    buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+      { provider: "openrouter", model: "openrouter/alpha:free", priority: 1 },
+      { provider: "openrouter", model: "openrouter/beta:free", priority: 2 },
+    ]),
+  ];
+  const decision = findPreferredHealthyRoute(
+    ["openrouter/beta:free"],
+    entries,
+    new Map(),
+    new Map(),
+    0,
+  );
+  assert.deepEqual(decision, {
+    selectedModelRoute: "openrouter/beta:free",
+    reasoning: "Preferred model from agent metadata, healthy provider",
+  });
+});
+
+test("findPreferredHealthyRoute_whenPreferredPointsAtHiddenPaidProvider_returnsNull", () => {
+  // Drift surface 2: `filterVisibleProviderRoutes` integration. An
+  // agent that preferred `xai/grok-4` must not resurrect a hidden
+  // paid-provider dispatch path. Replacing the filter call with raw
+  // `entry.provider_order` would silently return "xai/grok-4" here.
+  const entries = [
+    buildModelRegistryEntry("grok-4", ["architect"], "frontier", [
+      { provider: "xai", model: "xai/grok-4", priority: 1 },
+    ]),
+  ];
+  const decision = findPreferredHealthyRoute(
+    ["xai/grok-4"],
+    entries,
+    new Map(),
+    new Map(),
+    0,
+  );
+  assert.equal(decision, null);
+});
+
+test("findPreferredHealthyRoute_whenPreferredIsInUnhealthyEntryAndSiblingEntryHasHealthyOtherModel_returnsNull", () => {
+  // Drift surface 3: `entryContainsPreferred` gate prevents cross-
+  // entry fallback leak. Entry A holds the preferred model on an
+  // unhealthy provider; entry B holds a DIFFERENT model on a healthy
+  // provider. The helper must return null because entry B is skipped
+  // by the gate — the agent's preference is a same-entry constraint,
+  // not a registry-wide "find any healthy route" permission. Without
+  // the gate, the fallback-find branch would walk entry B and return
+  // opencode-go/other, polluting across the registry boundary.
+  const entries = [
+    buildModelRegistryEntry("pref-family", ["architect"], "frontier", [
+      { provider: "ollama-cloud", model: "ollama-cloud/pref-free", priority: 1 },
+    ]),
+    buildModelRegistryEntry("other-family", ["architect"], "frontier", [
+      { provider: "opencode-go", model: "opencode-go/other-free", priority: 1 },
+    ]),
+  ];
+  const providerHealthMap = new Map([
+    [
+      "ollama-cloud",
+      { state: "quota" as const, until: 100, retryCount: 0 },
+    ],
+  ]);
+  const decision = findPreferredHealthyRoute(
+    ["ollama-cloud/pref-free"],
+    entries,
+    providerHealthMap,
+    new Map(),
+    50,
+  );
+  assert.equal(decision, null);
+});
