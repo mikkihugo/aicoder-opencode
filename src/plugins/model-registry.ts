@@ -3835,6 +3835,80 @@ export function formatPenaltySectionPrefix(
   ];
 }
 
+/**
+ * Assemble the agent-facing "Provider health status" system-prompt block
+ * from the live provider and route penalty maps.
+ *
+ * This is the SOLE renderer of the health-status section injected into
+ * every chat turn via `experimental.chat.system.transform`. It has four
+ * pre-existing pins (route-only section, no-penalties null, key_missing
+ * null, quota+key_missing mixed filter) that cover the collector
+ * integration and the key_missing filter but leave three independent
+ * drift surfaces uncovered:
+ *
+ * 1. **Provider-section "Curated fallbacks (longcat/claude/gpt/grok
+ *    excluded):" label literal.** Every provider-penalty section pushes
+ *    this exact line before the per-entry fallback bullets. The
+ *    parenthetical exclusion note is NOT decoration — it is an agent-
+ *    legibility contract telling the LLM *why* proprietary models (the
+ *    ones banned by `isFallbackBlocked`) are absent from the bullet
+ *    list below it. Without the note, an agent seeing e.g. a 2h
+ *    openrouter `key_dead` with a curated-fallback list that doesn't
+ *    include `openrouter/anthropic/claude-3.5-sonnet:free` has no
+ *    signal that the absence is deliberate; it may try to invoke the
+ *    brand-blocked route anyway, trigger a hard fail, and burn a turn.
+ *    A refactor that "simplifies" the label to just
+ *    `"Curated fallbacks:"` silently strips that contract. The label
+ *    appears ONLY on provider-penalty sections — route-penalty sections
+ *    use the different singular `"Curated fallback for ${id}:"` shape,
+ *    so the label is asymmetric across section types by design.
+ *
+ * 2. **`if (owningEntry)` guard on route-penalty sections.** The
+ *    `activeRoutePenalties` iteration searches `modelRegistryEntries`
+ *    for the entry owning each penalized composite route key. When no
+ *    current registry entry matches (legacy persisted key from a
+ *    removed model, a race between a registry hot-reload and a
+ *    still-firing penalty, or a route whose owning entry was disabled
+ *    after the penalty was recorded), `owningEntry` is `undefined` and
+ *    the section MUST emit header-only — no `findCuratedFallbackRoute`
+ *    call, no `Curated fallback for` bullet. The guard is load-bearing:
+ *    `findCuratedFallbackRoute` dereferences `entry.provider_order` on
+ *    the first line of its body, so dropping the `if` produces a
+ *    `TypeError: cannot read properties of undefined (reading
+ *    'provider_order')` that crashes the entire
+ *    `experimental.chat.system.transform` hook and — because hook
+ *    failures are swallowed by `logPluginHookFailure` — the plugin
+ *    silently stops injecting system prompts for the rest of the
+ *    session. None of the pre-existing pins exercises an unknown-
+ *    owning-entry route penalty; the NEW pin does.
+ *
+ * 3. **`\n\n` cross-section separator when both provider and route
+ *    penalties exist.** The final `sections.join("\n\n")` uses a blank
+ *    line between sections; every section is itself joined with
+ *    single-`\n`. The double-newline separator is what lets downstream
+ *    markdown renderers (and the agent's own parsing) identify each
+ *    section as a distinct block. A refactor that changes the join to
+ *    `"\n"` silently merges adjacent sections into one opaque
+ *    paragraph and the agent reads e.g. a provider quota block's
+ *    fallback bullet as if it were part of the route block's header.
+ *    The pre-existing pins only assert against single-section outputs
+ *    (route-only in pin 1328, provider-only in pin 1451), so the
+ *    cross-section separator is silently load-bearing but untested.
+ *
+ * Args:
+ *   modelRegistryEntries: Curated registry rows. Used to find the
+ *     affected entries per penalized provider AND the owning entry per
+ *     penalized route.
+ *   providerHealthMap: Live provider-level health table.
+ *   modelRouteHealthMap: Live composite-route-keyed health table.
+ *   now: Wall-clock ms for expiry comparisons inside
+ *     `collectAgentVisibleLivePenalties` and `findCuratedFallbackRoute`.
+ *
+ * Returns:
+ *   The assembled system-prompt block, or `null` when there are no
+ *   agent-visible penalties at all (delegated to
+ *   `collectAgentVisibleLivePenalties`'s null sentinel).
+ */
 export function buildProviderHealthSystemPrompt(
   modelRegistryEntries: ModelRegistryEntry[],
   providerHealthMap: Map<string, ProviderHealth>,

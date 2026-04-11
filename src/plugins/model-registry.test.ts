@@ -6546,3 +6546,133 @@ test("findPreferredHealthyRoute_whenPreferredIsInUnhealthyEntryAndSiblingEntryHa
   );
   assert.equal(decision, null);
 });
+
+// M101 asymmetric pins for buildProviderHealthSystemPrompt drift surfaces.
+// Each pin fires uniquely under exactly one sabotage targeting the helper
+// body's three undocumented invariants.
+
+test("buildProviderHealthSystemPrompt_whenProviderPenaltyExists_emitsCuratedFallbacksLabelWithExclusionNote", () => {
+  // Drift surface 1: the exact "Curated fallbacks (longcat/claude/gpt/grok
+  // excluded):" label literal. Dropping the parenthetical exclusion note
+  // silently strips the agent-legibility contract that tells the LLM why
+  // proprietary models are absent from the bullet list below. A "simplify
+  // to just 'Curated fallbacks:'" refactor would pass every pre-existing
+  // pin because none of them assert this exact literal.
+  const now = Date.now();
+  const entry = buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+    { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+    { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+  ]);
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  const prompt = buildProviderHealthSystemPrompt(
+    [entry],
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+  assert.notEqual(prompt, null);
+  assert.ok(
+    (prompt as string).includes("Curated fallbacks (longcat/claude/gpt/grok excluded):"),
+    "provider-penalty section must include the exact brand-exclusion note",
+  );
+});
+
+test("buildProviderHealthSystemPrompt_whenRoutePenaltyHasNoOwningEntry_emitsHeaderOnlyWithoutCrashing", () => {
+  // Drift surface 2: the `if (owningEntry)` guard on route-penalty
+  // sections. A persisted route key with no matching current registry
+  // entry must produce a header-only section — dropping the guard
+  // would crash inside findCuratedFallbackRoute dereferencing
+  // `undefined.provider_order` and take down the entire transform hook.
+  const now = Date.now();
+  const modelRouteHealthMap = new Map([
+    [
+      "removed-provider/legacy-model",
+      { state: "timeout" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  let prompt: string | null | undefined;
+  assert.doesNotThrow(() => {
+    prompt = buildProviderHealthSystemPrompt(
+      [],
+      new Map(),
+      modelRouteHealthMap,
+      now,
+    );
+  });
+  assert.ok(typeof prompt === "string", "prompt must be non-null string");
+  assert.match(prompt, /Route removed-provider\/legacy-model \[TIMEOUT\]/);
+  assert.equal(
+    prompt.includes("Curated fallback for"),
+    false,
+    "unknown-owning-entry route section must NOT emit a fallback bullet",
+  );
+});
+
+test("buildProviderHealthSystemPrompt_whenBothProviderAndRoutePenaltiesExist_joinsSectionsWithBlankLine", () => {
+  // Drift surface 3: the `\n\n` cross-section separator. Pre-existing
+  // pins only exercise single-section outputs, so the blank-line join
+  // between provider and route sections is silently load-bearing. A
+  // refactor that collapses the join to `"\n"` merges adjacent sections
+  // into one opaque paragraph.
+  const now = Date.now();
+  const providerEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+    ],
+  );
+  const routeEntry = buildModelRegistryEntry(
+    "qwen3-coder-plus",
+    ["implementation_worker"],
+    "strong",
+    [
+      { provider: "iflowcn", model: "iflowcn/qwen3-coder-plus", priority: 1 },
+      { provider: "opencode-go", model: "opencode-go/qwen3-coder-plus", priority: 2 },
+    ],
+  );
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  const modelRouteHealthMap = new Map([
+    [
+      "iflowcn/qwen3-coder-plus",
+      { state: "model_not_found" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  const prompt = buildProviderHealthSystemPrompt(
+    [providerEntry, routeEntry],
+    providerHealthMap,
+    modelRouteHealthMap,
+    now,
+  );
+  assert.notEqual(prompt, null);
+  // Provider section content must appear before the blank-line separator,
+  // route section after. Split on the `\n\n` separator and assert both
+  // halves are non-empty and contain their respective markers.
+  const sections = (prompt as string).split("\n\n");
+  assert.ok(
+    sections.length >= 2,
+    "provider and route sections must be separated by a blank line",
+  );
+  assert.ok(
+    sections.some((section) => section.includes("Provider opencode [QUOTA BACKOFF]")),
+    "provider section must be one of the blank-line-separated chunks",
+  );
+  assert.ok(
+    sections.some((section) =>
+      section.includes("Route iflowcn/qwen3-coder-plus [MODEL NOT FOUND]"),
+    ),
+    "route section must be one of the blank-line-separated chunks",
+  );
+});
