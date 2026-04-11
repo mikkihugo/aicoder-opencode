@@ -706,3 +706,141 @@ test("provider_models_whenOpenrouterEntryHasCompositePrefix_filterRetainsRawMode
     });
   });
 });
+
+test("initializeRuntimeProviderState_whenRegistryLoadsSuccessfully_installsKeyMissingForUncredentialedProviders", async () => {
+  // M58 regression pin: the `ModelRegistryPlugin` factory used to call
+  // `loadPersistedProviderHealth()` directly, bypassing `loadAuthKeys()`,
+  // env-var checks, and the stale-entry reconciliation loop. This test
+  // exercises the factory's bootstrap path through `initializeRuntimeProviderState`
+  // and verifies an uncredentialed provider gets flagged `key_missing`.
+  await withIsolatedHome(async (homeDirectory) => {
+    await writeAuthFile(homeDirectory, {});
+    const savedKey = process.env.UNCREDENTIALED_FAKE_PROVIDER_API_KEY;
+    delete process.env.UNCREDENTIALED_FAKE_PROVIDER_API_KEY;
+    try {
+      await withFreshHealthState(async () => {
+        const { initializeRuntimeProviderState } = await import("./model-registry.js");
+
+        const runtime = await initializeRuntimeProviderState(async () => ({
+          version: 1,
+          defaults: { fields: [] },
+          models: [
+            buildModelRegistryEntry("fake-model", ["architect"], [
+              {
+                provider: "uncredentialed-fake-provider",
+                model: "uncredentialed-fake-provider/m",
+                priority: 1,
+              },
+            ]),
+          ],
+        }));
+
+        assert.equal(
+          runtime.providerHealthMap.get("uncredentialed-fake-provider")?.state,
+          "key_missing",
+        );
+      });
+    } finally {
+      if (savedKey === undefined) delete process.env.UNCREDENTIALED_FAKE_PROVIDER_API_KEY;
+      else process.env.UNCREDENTIALED_FAKE_PROVIDER_API_KEY = savedKey;
+      void homeDirectory;
+    }
+  });
+});
+
+test("ModelRegistryPlugin_whenFactoryBoots_installsKeyMissingForUncredentialedCuratedProviders", async () => {
+  // M58 regression pin for the factory wiring itself. The previous factory
+  // called `loadPersistedProviderHealth()` directly and never invoked
+  // `initializeProviderHealthState`, so `key_missing` entries were never
+  // installed for uncredentialed providers at startup. The direct helper
+  // tests above can't catch this — they pin the helper, not the caller.
+  // This test exercises the real `ModelRegistryPlugin` factory with an empty
+  // auth.json and asserts that the live `get_quota_backoff_status` tool
+  // (backed by the same `providerHealthMap` the plugin uses for routing)
+  // reports at least one curated-registry provider in `key_missing` state.
+  await withIsolatedHome(async (homeDirectory) => {
+    await writeAuthFile(homeDirectory, {});
+    // Snapshot and clear every env var the plugin might interpret as a
+    // credential so we get a clean "no credentials anywhere" run. Without
+    // this, a parent shell that exported OPENROUTER_API_KEY would mask the
+    // regression: every provider would be credentialed via env-var fallback
+    // and the wiring check would pass vacuously.
+    const savedEnv: Record<string, string | undefined> = {};
+    for (const key of Object.keys(process.env)) {
+      if (/_API_KEY$/.test(key) || /_TOKEN$/.test(key)) {
+        savedEnv[key] = process.env[key];
+        delete process.env[key];
+      }
+    }
+    try {
+      await withFreshHealthState(async () => {
+        const { ModelRegistryPlugin } = await import("./model-registry.js");
+        const plugin = await (ModelRegistryPlugin as any)({ directory: process.cwd() });
+
+        const rawStatus = await (plugin.tool as any).get_quota_backoff_status.execute({});
+        const status = JSON.parse(rawStatus as string);
+
+        const keyMissingEntries = Object.values(status).filter(
+          (entry: any) => entry?.type === "provider" && entry?.state === "key_missing",
+        );
+        assert.equal(
+          keyMissingEntries.length > 0,
+          true,
+          "expected factory to install key_missing entries for uncredentialed providers from models.jsonc",
+        );
+        // Every key_missing entry must render its `until` as the `"never"`
+        // sentinel — no ISO string — because `key_missing` has no expiry.
+        for (const entry of keyMissingEntries) {
+          assert.equal((entry as any).until, "never");
+        }
+      });
+    } finally {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      void homeDirectory;
+    }
+  });
+});
+
+test("formatHealthExpiry_whenUntilIsInfinite_returnsNeverSentinel", async () => {
+  const { formatHealthExpiry } = await import("./model-registry.js");
+  assert.equal(formatHealthExpiry(Number.POSITIVE_INFINITY), "never");
+});
+
+test("formatHealthExpiry_whenUntilIsFiniteMillis_returnsIsoString", async () => {
+  const { formatHealthExpiry } = await import("./model-registry.js");
+  const fixedEpoch = Date.UTC(2026, 0, 1, 0, 0, 0);
+  assert.equal(formatHealthExpiry(fixedEpoch), "2026-01-01T00:00:00.000Z");
+});
+
+test("initializeRuntimeProviderState_whenRegistryLoaderThrows_swallowsErrorAndReturnsEmptyMaps", async () => {
+  // When registry load fails (disk corruption, schema drift), the plugin
+  // must still come up with empty maps so opencode itself boots. This test
+  // pins the error-swallow contract and verifies the error logger is called
+  // exactly once with the thrown error.
+  await withIsolatedHome(async (homeDirectory) => {
+    await withFreshHealthState(async () => {
+      const { initializeRuntimeProviderState } = await import("./model-registry.js");
+
+      const loadError = new Error("fake registry load failure");
+      const loggedErrors: unknown[] = [];
+
+      const runtime = await initializeRuntimeProviderState(
+        async () => {
+          throw loadError;
+        },
+        (error) => {
+          loggedErrors.push(error);
+        },
+      );
+
+      assert.equal(loggedErrors.length, 1);
+      assert.equal(loggedErrors[0], loadError);
+      assert.equal(runtime.providerHealthMap.size, 0);
+      assert.equal(runtime.modelRouteHealthMap.size, 0);
+      void homeDirectory;
+    });
+  });
+});

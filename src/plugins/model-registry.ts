@@ -7,6 +7,7 @@ import { readFile, writeFile, mkdir, rename, unlink } from "node:fs/promises";
 import {
   buildModelRegistryPayload,
   type CapabilityTier,
+  type ModelRegistry,
   type ModelRegistryEntry,
   filterModelRegistryEntries,
   loadModelRegistry,
@@ -140,6 +141,40 @@ type ModelIdentity = {
 
 function logRegistryLoadError(error: unknown): void {
   console.error(MODEL_REGISTRY_LOAD_ERROR_MESSAGE, error);
+}
+
+/**
+ * Render a health-entry `until` timestamp for logs, system prompts, and tool
+ * output without throwing on the `key_missing` sentinel.
+ *
+ * `key_missing` entries are persisted with `until: "never"` and hydrated to
+ * `Number.POSITIVE_INFINITY` by `parsePersistedHealthEntry`. `new Date(Infinity)
+ * .toISOString()` throws `RangeError: Invalid Date`, which used to crash the
+ * `chat.params` hook, the `get_quota_backoff_status` tool, the
+ * `recommend_model_for_role` fallback payload, and
+ * `computeRegistryEntryHealthReport`. This helper formats `Infinity` back to
+ * the same `"never"` sentinel so the render paths remain closed over the
+ * entire `ProviderHealth` domain — no code path can panic on a live
+ * key_missing entry.
+ *
+ * Extracted as a pure helper so the contract can be pinned with unit tests
+ * and so every call site shares one source of truth for the sentinel. Before
+ * this helper, M58's `ModelRegistryPlugin` wire-up exposed a latent crash
+ * because pre-M58 the factory never installed any `key_missing` entries at
+ * startup, so the `new Date(Infinity)` branch was unreachable in practice.
+ *
+ * Args:
+ *   until: The `until` timestamp from a `ProviderHealth` or `ModelRouteHealth`
+ *     entry — a finite millisecond epoch or `Number.POSITIVE_INFINITY`.
+ *
+ * Returns:
+ *   `"never"` when `until` is infinite, otherwise the ISO-8601 string.
+ */
+export function formatHealthExpiry(until: number): string {
+  if (!Number.isFinite(until)) {
+    return "never";
+  }
+  return new Date(until).toISOString();
 }
 
 /**
@@ -1324,7 +1359,7 @@ export function computeRegistryEntryHealthReport(
   if (providerHealth && providerHealth.until > now) {
     return {
       state: providerHealth.state,
-      until: new Date(providerHealth.until).toISOString(),
+      until: formatHealthExpiry(providerHealth.until),
       scope: "provider",
     };
   }
@@ -1332,7 +1367,7 @@ export function computeRegistryEntryHealthReport(
   if (routeHealth && routeHealth.until > now) {
     return {
       state: routeHealth.state,
-      until: new Date(routeHealth.until).toISOString(),
+      until: formatHealthExpiry(routeHealth.until),
       scope: "route",
     };
   }
@@ -1382,7 +1417,7 @@ export function buildProviderHealthSystemPrompt(
 
   for (const [providerID, health] of activeProviderPenalties) {
     const label = healthStateLabel(health.state);
-    const until = new Date(health.until).toISOString();
+    const until = formatHealthExpiry(health.until);
 
     const affectedEntries = modelRegistryEntries.filter(
       (entry) =>
@@ -1420,7 +1455,7 @@ export function buildProviderHealthSystemPrompt(
   // all from the system prompt.
   for (const [routeKey, health] of activeRoutePenalties) {
     const label = healthStateLabel(health.state);
-    const until = new Date(health.until).toISOString();
+    const until = formatHealthExpiry(health.until);
 
     const owningEntry = modelRegistryEntries.find(
       (entry) =>
@@ -2404,11 +2439,68 @@ async function listCuratedModels(
   );
 }
 
+/**
+ * Bootstrap runtime provider/route health for the live plugin factory.
+ *
+ * This is the production entry point that wires `initializeProviderHealthState`
+ * into the plugin startup path. It exists because the `ModelRegistryPlugin`
+ * factory previously called `loadPersistedProviderHealth()` directly and
+ * never invoked `initializeProviderHealthState` — which meant `loadAuthKeys`,
+ * env-var credential checks, and the `key_missing` reconciliation loop were
+ * dead code at runtime, even though every unit test that calls
+ * `initializeProviderHealthState` directly passed. The real-world impact was
+ * that a fresh install (or a reload after rotating credentials) never
+ * installed `key_missing` entries for uncredentialed providers, so the
+ * fallback scanner would happily route traffic through a provider whose
+ * key was missing and burn retries on 401/403 responses before the runtime
+ * feedback path could penalize the route. Extracted as a pure helper so the
+ * wire-up has its own regression pin — the previous silent failure happened
+ * because nothing tested the factory's bootstrap sequence, only the pieces
+ * it was supposed to call.
+ *
+ * When the registry fails to load (disk corruption, schema drift, missing
+ * file), fall back to `initializeProviderHealthState([])` — an empty
+ * registry means no providers are "known" and nothing is marked key_missing,
+ * but previously-persisted entries from `loadPersistedProviderHealth` are
+ * still retained. Swallowing the error here is intentional: the plugin must
+ * still come up so the user sees opencode at all, and the individual tool
+ * handlers re-load the registry and surface load failures with the same
+ * `logRegistryLoadError` hook.
+ *
+ * Args:
+ *   loadRegistry: Async loader for the curated model registry. Injected so
+ *     tests can supply a fixed registry or a throwing loader without
+ *     constructing a disk fixture.
+ *   logError: Error logger invoked when the registry loader throws. Defaults
+ *     to `logRegistryLoadError` which writes to `console.error`.
+ *
+ * Returns:
+ *   The same `{ providerHealthMap, modelRouteHealthMap }` shape returned by
+ *   `initializeProviderHealthState`, ready for use inside the plugin closure.
+ */
+export async function initializeRuntimeProviderState(
+  loadRegistry: () => Promise<ModelRegistry>,
+  logError: (error: unknown) => void = logRegistryLoadError,
+): Promise<{
+  providerHealthMap: Map<string, ProviderHealth>;
+  modelRouteHealthMap: Map<string, ModelRouteHealth>;
+}> {
+  try {
+    const modelRegistry = await loadRegistry();
+    return await initializeProviderHealthState(modelRegistry.models);
+  } catch (error) {
+    logError(error);
+    return await initializeProviderHealthState([]);
+  }
+}
+
 // Exported functions for testing and external use
 export { inferTaskComplexity, recommendTaskModelRoute, initializeProviderHealthState };
 
 export const ModelRegistryPlugin: Plugin = async () => {
-  const { providerHealthMap, modelRouteHealthMap } = await loadPersistedProviderHealth();
+  const { providerHealthMap, modelRouteHealthMap } = await initializeRuntimeProviderState(
+    () => loadModelRegistry(CONTROL_PLANE_ROOT_DIRECTORY),
+  );
   const sessionActiveProviderMap = new Map<string, string>();
   const sessionActiveModelMap = new Map<string, { id: string; providerID: string }>();
   const sessionStartTimeMap = new Map<string, number>();
@@ -2507,7 +2599,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
               providerHealthSummary: Object.fromEntries(
                 Array.from(providerHealthMap.entries()).map(([id, h]) => [
                   id,
-                  { state: h.state, until: new Date(h.until).toISOString() },
+                  { state: h.state, until: formatHealthExpiry(h.until) },
                 ]),
               ),
             }, null, 2);
@@ -2558,7 +2650,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
             }
             status[providerID] = {
               state: health.state,
-              until: new Date(health.until).toISOString(),
+              until: formatHealthExpiry(health.until),
               type: "provider",
               retryCount: health.retryCount,
             };
@@ -2572,7 +2664,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
             }
             status[routeKey] = {
               state: health.state,
-              until: new Date(health.until).toISOString(),
+              until: formatHealthExpiry(health.until),
               type: "model_route",
               retryCount: health.retryCount,
             };
