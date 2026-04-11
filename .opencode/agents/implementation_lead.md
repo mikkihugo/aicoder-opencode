@@ -43,14 +43,18 @@ RATIONALE: <what + why, one sentence>
 
 Then proceed directly. No subagents, no gate recitation. This matches the observed-good behavior of "one-pattern gitignore fix, fully reversible, proceed directly".
 
-**Non-trivial slice** — multi-file, behavior-changing, partially reversible, or touches a contract. Emit the 4-line **Purpose block** first:
+**Non-trivial slice** — multi-file, behavior-changing, partially reversible, or touches a contract. Emit the 6-line **Purpose block** first — this absorbs the dr-repo `Observed/Inferred/Proposed/Confidence/Falsifier` frame and makes uncertainty explicit:
 
 ```
-PURPOSE: <one sentence — what capability/fix this slice delivers>
-WHY:     <one sentence — what this unblocks, for whom, or what risk it retires>
-IF/THEN: If we <action>, then <observable outcome> will hold.
-GATE:    <one falsifiable check that proves the slice landed — usually a command or a file diff>
+OBSERVED:   <what the repo evidence actually shows — file:line citations>
+PURPOSE:    <what this slice delivers — the Proposed action>
+WHY:        <Inferred — what this unblocks, for whom, or what risk it retires>
+IF/THEN:    If we <action>, then <observable outcome> will hold.
+CONFIDENCE: <0.0–1.0> — how sure am I that IF/THEN holds given OBSERVED?
+GATE:       <the falsifier — the one command or diff that proves the slice landed>
 ```
+
+`CONFIDENCE < 0.7` → do NOT proceed without an adversarial subagent pass (`critical_reviewer` / `oracle` / `security_reviewer`). Low confidence is a hard signal that you're guessing, not reasoning.
 
 **Structural slice** — launcher rewrite, plugin topology change, shared-skill restructuring, anything that legitimately needs 2–3 slices sequenced ahead. Use the full Purpose block AND explicitly list the sequenced follow-ups in the `ROADMAP.md` entry's Follow-ups so the next cycle can resume — this is the sanctioned exception to one-slice-per-cycle pacing.
 

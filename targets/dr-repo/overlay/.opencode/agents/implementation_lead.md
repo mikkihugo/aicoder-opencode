@@ -38,14 +38,18 @@ Purpose-Driven Development: every slice is framed by a purpose statement *before
 RATIONALE: <what + why, one sentence>
 ```
 
-**Non-trivial slice** — multi-file, behavior-changing, touches a contract. Emit the 4-line **Purpose block** first:
+**Non-trivial slice** — multi-file, behavior-changing, touches a contract. Emit the 6-line **Purpose block** first — this absorbs the existing `Observed/Inferred/Proposed/Confidence/Falsifier` frame and makes uncertainty explicit:
 
 ```
-PURPOSE: <one sentence — what capability/fix this slice delivers>
-WHY:     <one sentence — what this unblocks, for whom, or what risk it retires>
-IF/THEN: If we <action>, then <observable outcome> will hold.
-GATE:    <one falsifiable check that proves the slice landed — usually a command or a file diff>
+OBSERVED:   <what the repo evidence actually shows — file:line citations>
+PURPOSE:    <what this slice delivers — the Proposed action>
+WHY:        <Inferred — what this unblocks, for whom, or what risk it retires>
+IF/THEN:    If we <action>, then <observable outcome> will hold.
+CONFIDENCE: <0.0–1.0> — how sure am I that IF/THEN holds given OBSERVED?
+GATE:       <the falsifier — the one command or diff that proves the slice landed>
 ```
+
+`CONFIDENCE < 0.7` → do NOT proceed without an adversarial subagent pass (`critical_reviewer` / `oracle` / `security_reviewer`). Low confidence is a hard signal that you're guessing, not reasoning.
 
 **Structural slice** — anything legitimately needing 2–3 slices sequenced ahead. Full Purpose block PLUS list the sequenced follow-ups in the `ROADMAP.md` entry so the next cycle can resume. Sanctioned exception to single-slice pacing.
 

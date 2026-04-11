@@ -90,6 +90,31 @@ Completion Notes (2026-04-11):
 - Target-specific backups should go to `<root>/.opencode/xdg-data/opencode/backups/`
 - Or at minimum, include target name in backup filename
 
+### M8: Letta-workspace overlay — make agent files durable `⬜ PENDING`
+
+- `letta-workspace/.opencode/` is in letta-workspace's `.gitignore` — agent files (including the PDD-softened `implementation_lead.md`) live only on the local machine, not version-controlled anywhere. If the `.opencode/` dir is deleted or the machine reset, the rules are lost.
+- `dr-repo/.opencode/agents` is a symlink into `aicoder-opencode/targets/dr-repo/overlay/.opencode/agents`, which IS tracked in this repo. That's the correct shape.
+- Fix: create `targets/letta-workspace/overlay/.opencode/agents/`, seed it with the current live files, and symlink `letta-workspace/.opencode/agents` into it. Parallel to the dr-repo layout.
+- Parked on the "don't make cross-repo symlinks mid-flight" heuristic — the 3 autopilots are all running slices now; structural symlink swap should wait for an idle moment.
+
+### M9: Enforce partner/combatant review discipline `⬜ PENDING`
+
+- During the M1 slice, the aicoder autopilot dispatched exactly 1 subagent (`roadmap_keeper`) and then did all 38 bash + 12 read + 4 edit calls solo. The implementation_lead workflow prompt explicitly says "for every non-trivial slice, run a concrete partner/combatant pair in parallel before coding" — this step was silently skipped.
+- The PDD Purpose-gate softening does NOT enforce subagent dispatch; it only asks the lead to frame the slice. A lead that frames AND skips review still ships un-reviewed code.
+- Fix options: (a) add a hard rule that non-trivial slices MUST show a `task` tool call to a supportive + adversarial specialist before any `edit` tool call; (b) add a pre-commit hook that rejects autopilot commits lacking a review annotation in the checkpoint; (c) add a verifier-pass check at close-out that refuses to mark `[COMMIT]` without review evidence.
+- Evidence: `ses_284ca4aa4ffeIUhQjEjeomSPUB` on `:8080`, commit `c700ce8` shipped solo after only `roadmap_keeper`.
+
+### M10: `aicoder-opencode install <target>` command — propagate agent rules + plugins to target overlays `⬜ PENDING`
+
+- Current state: `dr-repo/.opencode/agents` is a symlink into `aicoder-opencode/targets/dr-repo/overlay/.opencode/agents`, so editing the overlay in aicoder-opencode automatically reaches dr-repo. `letta-workspace/.opencode/` is gitignored with no overlay (see M8) — my edits there are ephemeral.
+- Desired: `aicoder-opencode` is the single source of truth for agent rules, plugins, and commands across all targets. An `install <target>` command should:
+  1. Verify the target's overlay directory exists under `targets/<target>/overlay/` in this repo
+  2. Seed it from the source directories (`.opencode/agents/`, `.opencode/plugins/`, `.opencode/commands/`) with any target-specific patches applied
+  3. Create or refresh symlinks in the target repo pointing into the overlay
+  4. Never edit target repos in-place for shared rules — only for target-specific overrides
+- Prereq: M8 (create letta-workspace overlay).
+- Also think about: a `--check` mode that verifies symlinks haven't been tampered with, and a CI check that flags drift between the live file and the overlay.
+
 ### M7: Shared plugin propagation verification `⬜ PENDING`
 
 - Verify that overlay shims in `targets/*/overlay/.opencode/plugins/` are in sync with `src/plugins/`
