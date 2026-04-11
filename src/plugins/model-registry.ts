@@ -181,6 +181,105 @@ type PersistedHealthMap = Record<string, PersistedHealthEntry>;
  * Returns:
  *   The `PersistedHealthEntry` shape ready for `JSON.stringify`.
  */
+/**
+ * Render a `ProviderHealth` / `ModelRouteHealth` entry into the
+ * on-disk `PersistedHealthEntry` shape with the `Number.POSITIVE_INFINITY`
+ * `until` sentinel replaced by the string `"never"`.
+ *
+ * This is the inverse of `parsePersistedHealthEntry` (M108) — the two
+ * functions are a round-trip pair, used by `persistProviderHealth`
+ * (writer) and `loadPersistedProviderHealth` (reader) respectively to
+ * serialize and deserialize the flat JSON health map shared by the
+ * provider-level and route-level in-memory maps. The `"never"` sentinel
+ * exists because `JSON.stringify(Number.POSITIVE_INFINITY) === "null"`
+ * — i.e. `JSON.stringify` silently lowers infinity to `null`, and
+ * `parsePersistedHealthEntry` then rejects the entry as
+ * missing-field corrupt on reload, which would silently drop every
+ * `key_missing` penalty across a plugin restart. The `"never"` string
+ * is chosen because it is a human-readable breadcrumb that survives
+ * `JSON.stringify` / `JSON.parse` unchanged and is recognized by the
+ * load path as the re-hydration trigger for `Number.POSITIVE_INFINITY`.
+ *
+ * The spread form `{...health, until: ...}` is load-bearing: it
+ * auto-propagates any NEW fields that future `ProviderHealth` /
+ * `ModelRouteHealth` schemas grow (for example a `lastError` string or
+ * a `firstObserved` timestamp) into the persisted form with zero
+ * changes here, so the serializer and `parsePersistedHealthEntry` stay
+ * in sync without having to list fields in two places. A refactor to
+ * explicit field listing (`{state, until, retryCount}`) for "clarity"
+ * would regress forward-compatibility silently.
+ *
+ * ## Drift surfaces (M111 PDD)
+ *
+ * Pre-existing pins (M81) cover three return-value facts: infinity →
+ * `"never"`, finite numbers pass through, `state` and `retryCount`
+ * survive the spread. They do NOT cover:
+ *
+ * 1. **Return value is a FRESH object, not the input by reference.**
+ *    The `{...health, until: ...}` spread creates a brand-new object.
+ *    A plausible "optimization" regression to
+ *    `Object.assign(health, { until: "never" })` (or a bare
+ *    `health.until = "never"; return health;`) would mutate the
+ *    in-memory caller's handle — replacing its `Number.POSITIVE_INFINITY`
+ *    with the string `"never"`, turning a valid `ProviderHealth`
+ *    object into a type-violating half-serialized form that still
+ *    sits in `providerHealthMap`. Every subsequent reader of that
+ *    entry (`findLiveProviderPenalty`, `computeRegistryEntryHealthReport`,
+ *    `formatHealthExpiry`) would see a string where it expects a
+ *    number, and the `until > now` comparison would silently become
+ *    `"never" > 123456789` which in JavaScript is `false` — so the
+ *    penalty would appear to be expired on the next read, leaking
+ *    `key_missing` entries out of the health gate. The pre-existing
+ *    M81 pins only inspect the `serialized` return and never re-read
+ *    the input, so this regression passes all three of them. Pin:
+ *    after the call, the input handle's `until` is still
+ *    `Number.POSITIVE_INFINITY` (not mutated), and `serialized !== health`.
+ *
+ * 2. **Forward-compat: the spread carries unknown/new fields through.**
+ *    The function's contract is "replace `until` sentinel, pass
+ *    everything else through." This lets future `ProviderHealth` /
+ *    `ModelRouteHealth` schemas grow new fields without touching the
+ *    serializer. A regression to explicit field listing
+ *    (`return { state: health.state, until: ..., retryCount: health.retryCount };`)
+ *    would silently drop any new field. M81 pin #3 asserts only the
+ *    two canonical fields and would pass the regression because the
+ *    canonical fields are still listed. Pin: inject a non-schema
+ *    test-only field on the input, assert the serialized output
+ *    carries the same field verbatim. Uses `as unknown as` coercion
+ *    because TypeScript would reject the non-schema field at the
+ *    call site — the test is for the runtime spread, not the static
+ *    type.
+ *
+ * 3. **Strict `===` infinity check — NaN and `-Infinity` are NOT
+ *    converted to `"never"`.** The check is `health.until === Number.POSITIVE_INFINITY`
+ *    — strictly positive infinity. A plausible "generalization"
+ *    refactor to `!Number.isFinite(health.until) ? "never" : ...`
+ *    would fold NaN AND `-Infinity` AND `+Infinity` all into the
+ *    `"never"` sentinel. That looks defensive but silently corrupts
+ *    the load path: NaN and `-Infinity` in the in-memory health map
+ *    are not valid states — they should be rejected on reload, not
+ *    silently re-hydrated as `key_missing`-equivalent permanent
+ *    penalties. `parsePersistedHealthEntry`'s M108 docstring explicitly
+ *    says it rejects `NaN` / non-finite / negative `retryCount` via
+ *    the `!Number.isFinite` clause; the serializer's strict `===`
+ *    check is the intentional symmetric counterpart that keeps the
+ *    corrupt signal observable. M81 pin #1 uses `Number.POSITIVE_INFINITY`
+ *    exactly and passes under both the strict and the generalized
+ *    forms. Pin: NaN input passes through as `NaN` (or equivalent
+ *    verification that the result is NOT `"never"`).
+ *
+ * Args:
+ *   health: A runtime `ProviderHealth` or `ModelRouteHealth` entry.
+ *     The serializer does not care which — both share the
+ *     `{state, until, retryCount}` shape and the `until === POSITIVE_INFINITY`
+ *     sentinel convention.
+ *
+ * Returns:
+ *   A fresh `PersistedHealthEntry` object whose `until` is either
+ *   the original finite number or the literal string `"never"`. The
+ *   caller installs the result directly into the flat JSON map that
+ *   `persistProviderHealth` atomically writes to disk.
+ */
 export function serializeHealthEntryForPersistence(
   health: ProviderHealth | ModelRouteHealth,
 ): PersistedHealthEntry {

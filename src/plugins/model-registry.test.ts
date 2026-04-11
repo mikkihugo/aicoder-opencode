@@ -752,6 +752,71 @@ test("serializeHealthEntryForPersistence_whenCalled_preservesStateAndRetryCount"
   assert.equal(serialized.retryCount, 7);
 });
 
+test("serializeHealthEntryForPersistence_whenCalled_returnsFreshObjectLeavingInputUntilUnmutated", () => {
+  // M111 drift pin 1/3 — return value is a FRESH object, input is
+  // NOT mutated. A regression to `Object.assign(health, {until: ...})`
+  // or `health.until = "never"; return health;` would lobotomize the
+  // in-memory handle: the `providerHealthMap` entry's `until` would
+  // become the string `"never"`, and every downstream reader that
+  // does `until > now` would silently evaluate to `false`, leaking
+  // `key_missing` entries out of the health gate. The three M81 pins
+  // only inspect the `serialized` return — they never re-read the
+  // input — so this regression passes all three. This pin checks
+  // both fresh-object identity AND input immutability.
+  const inputHealth: ProviderHealth = {
+    state: "key_missing",
+    until: Number.POSITIVE_INFINITY,
+    retryCount: 0,
+  };
+  const serialized = serializeHealthEntryForPersistence(inputHealth);
+  assert.notEqual(serialized, inputHealth);
+  assert.equal(inputHealth.until, Number.POSITIVE_INFINITY);
+  assert.equal(serialized.until, "never");
+});
+
+test("serializeHealthEntryForPersistence_whenInputHasUnknownForwardCompatField_carriesItThroughTheSpread", () => {
+  // M111 drift pin 2/3 — forward-compat: the `{...health, until: ...}`
+  // spread form is load-bearing because it auto-propagates future
+  // schema additions (say, a `lastError` string or a `firstObserved`
+  // timestamp) into the persisted form without touching this
+  // function. A regression to explicit field listing
+  // (`return {state, until, retryCount: ...}`) would silently drop
+  // the new field. M81 pin #3 only asserts `state` and `retryCount`
+  // and would pass that regression. This pin uses `as unknown as` to
+  // inject a non-schema field; the test is about the runtime spread,
+  // not TypeScript's static view of the shape.
+  const inputWithExtra = {
+    state: "quota" as const,
+    until: 1_700_000_000_000,
+    retryCount: 4,
+    futureField: "forward-compat-breadcrumb",
+  } as unknown as ProviderHealth;
+  const serialized = serializeHealthEntryForPersistence(inputWithExtra);
+  assert.equal(
+    (serialized as unknown as { futureField: string }).futureField,
+    "forward-compat-breadcrumb",
+  );
+});
+
+test("serializeHealthEntryForPersistence_whenUntilIsNaN_passesThroughAsNaNNotNeverSentinel", () => {
+  // M111 drift pin 3/3 — strict `=== Number.POSITIVE_INFINITY` check.
+  // A "defensive generalization" to `!Number.isFinite(until)` would
+  // fold NaN AND `-Infinity` AND `+Infinity` into `"never"`, silently
+  // corrupting the load path: NaN / -Infinity are invalid in-memory
+  // states and MUST remain observable so `parsePersistedHealthEntry`'s
+  // finite check rejects them on reload, not silently re-hydrates
+  // them as `key_missing`-equivalent permanent penalties. M81 pin #1
+  // uses exactly `Number.POSITIVE_INFINITY` and passes under both the
+  // strict and the generalized forms. This pin discriminates.
+  const serialized = serializeHealthEntryForPersistence({
+    state: "quota",
+    until: Number.NaN,
+    retryCount: 0,
+  });
+  assert.notEqual(serialized.until, "never");
+  assert.equal(Number.isNaN(serialized.until), true);
+});
+
 test("assembleHealthAwareSystemPrompts_whenBothPromptsPresent_returnsProviderFirst", () => {
   // M87 pin: both builders returned non-null strings. The helper
   // must return a length-2 array with provider-health FIRST and
