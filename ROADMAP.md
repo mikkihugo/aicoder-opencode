@@ -172,6 +172,17 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M22: `provider.models` openrouter filter never matched — every curated openrouter model silently hidden from opencode `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `buildEnabledProviderModelSet` collects `provider_order[].model` values into a Set and the `provider.models` hook uses `Set.has(modelID)` to filter `Object.entries(provider.models)`. But `provider_order[].model` in `config/models.jsonc` is the COMPOSITE form (`"openrouter/xiaomi/mimo-v2-pro"`) while opencode's `provider.models` is keyed by the provider-relative RAW id (`"xiaomi/mimo-v2-pro"`). Same root cause as M21, different dead-code site. The Set never matched any key → filter returned `{}` → the openrouter provider ended up with zero visible models every time the hook ran.
+- **Consequence**: every curated openrouter model (xiaomi/mimo-v2-pro, bytedance-seed/*, meituan/longcat, xai/grok-4-fast, etc.) was silently invisible to opencode's model picker when this hook was active. The fallback `return provider.models` only fired on load-error — not on empty-filter.
+- **Why no tests caught it**: no test exercised the `provider.models` hook against a fake ProviderV2 shape at all. The hook's type signature treats `provider.models` as opaque, masking the key-shape assumption.
+- **Fix**: strip the `${providerID}/` prefix when building the Set so entries are stored in the same raw-id form that opencode uses as the filter key. Defensive: if the registry entry isn't prefixed (unusual but not schema-forbidden), store as-is.
+- **Test**: new `provider_models_whenOpenrouterEntryHasCompositePrefix_filterRetainsRawModelIDKeys` calls the real plugin's `provider.models` hook with a fake ProviderV2 whose `models` record has both a curated key (`"xiaomi/mimo-v2-pro"`) and a non-curated key (`"not-in-registry/model"`), then asserts the curated key survives and the non-curated key is filtered out. Verified to FAIL on HEAD without the fix (`git stash` confirmed).
+- **Verification**: 127/127 tests pass (126 + 1 new), `tsc -p tsconfig.json` clean, dist rebuilt.
+- **Files**: `src/plugins/model-registry.ts`, `src/plugins/model-registry.keyless.test.ts`.
+
 ### M21: `findRegistryEntryByModel` never matched — capability-tier temperature override AND routing-context system prompt silently dead `✅ COMPLETED`
 
 Completion Notes (2026-04-11):

@@ -623,3 +623,43 @@ test("chat_params_whenModelIsInRegistry_setsCapabilityTierTemperature", async ()
     }
   });
 });
+
+test("provider_models_whenOpenrouterEntryHasCompositePrefix_filterRetainsRawModelIDKeys", async () => {
+  // Regression: buildEnabledProviderModelSet used to dump
+  // `provider_order[].model` values — which are the COMPOSITE form
+  // ("openrouter/xiaomi/mimo-v2-pro") per models.jsonc convention — into
+  // a Set that was then checked against `Object.entries(provider.models)`
+  // keys. Opencode's provider.models is keyed by the provider-relative
+  // RAW id ("xiaomi/mimo-v2-pro"), so the Set.has check never matched
+  // and the openrouter provider.models hook silently returned `{}` —
+  // hiding every curated model from opencode's model picker. This test
+  // pins the prefix-stripping contract by asserting the hook preserves
+  // the raw-id key when a matching composite registry entry exists.
+  await withIsolatedHome(async (homeDirectory) => {
+    await writeAuthFile(homeDirectory, {
+      openrouter: { type: "api", key: "real-key" },
+    });
+
+    await withFreshHealthState(async () => {
+      const { ModelRegistryPlugin } = await import("./model-registry.js");
+      const plugin = await (ModelRegistryPlugin as any)({ directory: process.cwd() });
+
+      // Build a fake opencode ProviderV2 with models keyed by raw id.
+      // Include one id that IS in the registry and one that is not.
+      const fakeProvider = {
+        id: "openrouter",
+        models: {
+          "xiaomi/mimo-v2-pro": { id: "xiaomi/mimo-v2-pro", providerID: "openrouter" },
+          "not-in-registry/model": { id: "not-in-registry/model", providerID: "openrouter" },
+        },
+      };
+
+      const result = await (plugin.provider.models as any)(fakeProvider, {});
+
+      // The raw-id key for the registry entry must survive the filter.
+      assert.equal(Object.keys(result).includes("xiaomi/mimo-v2-pro"), true);
+      // The non-curated model must be filtered out.
+      assert.equal(Object.keys(result).includes("not-in-registry/model"), false);
+    });
+  });
+});

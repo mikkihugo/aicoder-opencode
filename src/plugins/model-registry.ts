@@ -182,15 +182,27 @@ function buildEnabledProviderModelSet(
   modelRegistryEntries: ModelRegistryEntry[],
   providerID: string,
 ): Set<string> {
-  return new Set(
-    modelRegistryEntries
-      .filter((modelRegistryEntry) => modelRegistryEntry.enabled)
-      .flatMap((modelRegistryEntry) =>
-        modelRegistryEntry.provider_order
-          .filter((providerRoute) => providerRoute.provider === providerID)
-          .map((providerRoute) => providerRoute.model),
-      ),
-  );
+  // opencode's `provider.models` is keyed by the provider-relative raw model
+  // id (e.g. `"xiaomi/mimo-v2-pro"` for the openrouter provider), but
+  // `provider_order[].model` in models.jsonc is the COMPOSITE form
+  // (`"openrouter/xiaomi/mimo-v2-pro"`) by registry convention. The filter
+  // in the `provider.models` hook compares Set.has(modelID) against those
+  // raw keys, so we normalize by stripping the `${providerID}/` prefix.
+  // Without this, the Set never matches any key and the openrouter
+  // curation hook silently returns `{}` — zero models visible to opencode.
+  const providerPrefix = `${providerID}/`;
+  const rawModelIDs = new Set<string>();
+  for (const modelRegistryEntry of modelRegistryEntries) {
+    if (!modelRegistryEntry.enabled) continue;
+    for (const providerRoute of modelRegistryEntry.provider_order) {
+      if (providerRoute.provider !== providerID) continue;
+      const rawModelID = providerRoute.model.startsWith(providerPrefix)
+        ? providerRoute.model.slice(providerPrefix.length)
+        : providerRoute.model;
+      rawModelIDs.add(rawModelID);
+    }
+  }
+  return rawModelIDs;
 }
 
 function findRegistryEntryByModel(
