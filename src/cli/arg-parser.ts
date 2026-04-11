@@ -20,7 +20,7 @@ export type ParsedCommand =
   | { command: "list-model-families"; rawArgs: string[] }
   | { command: "select-models"; roleName: string; rawArgs: string[] }
   | { command: "manage-models" }
-  | { command: "opencode-database-maintenance"; targetName: string | null; mode: string | undefined }
+  | { command: "opencode-database-maintenance"; targetName: string | null; allTargets: boolean; mode: string | undefined }
   | { command: "help" };
 
 /**
@@ -118,27 +118,48 @@ export function parseStallThreshold(argv: string[], position: number, defaultVal
 }
 
 /**
- * Parse the database maintenance mode argument index when --target is present.
+ * Parse the database maintenance arguments including --target and --all-targets flags.
  *
  * Args:
  *   argv: Full process.argv (starting at index 3).
  *
  * Returns:
- *   Object with optional targetName and mode string.
+ *   Object with optional targetName, allTargets flag, and mode string.
+ *
+ * Raises:
+ *   Error: When both --target and --all-targets are specified.
  */
 export function parseDatabaseMaintenanceArgs(argv: string[]): {
   targetName: string | null;
+  allTargets: boolean;
   mode: string | undefined;
 } {
   const hasTargetFlag = argv[3] === "--target";
+  const hasAllTargetsFlag = argv[3] === "--all-targets";
+
+  if (hasTargetFlag && hasAllTargetsFlag) {
+    throw new Error("--target and --all-targets are mutually exclusive");
+  }
+
   if (hasTargetFlag) {
     return {
       targetName: argv[4] ?? null,
+      allTargets: false,
       mode: argv[5],
     };
   }
+
+  if (hasAllTargetsFlag) {
+    return {
+      targetName: null,
+      allTargets: true,
+      mode: argv[4],
+    };
+  }
+
   return {
     targetName: null,
+    allTargets: false,
     mode: argv[3],
   };
 }
@@ -230,8 +251,8 @@ export function parseCommand(argv: string[]): ParsedCommand {
       return { command: "manage-models" };
 
     case "opencode-database-maintenance": {
-      const { targetName, mode } = parseDatabaseMaintenanceArgs(argv);
-      return { command: "opencode-database-maintenance", targetName, mode };
+      const { targetName, allTargets, mode } = parseDatabaseMaintenanceArgs(argv);
+      return { command: "opencode-database-maintenance", targetName, allTargets, mode };
     }
 
     default:

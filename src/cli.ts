@@ -1,4 +1,4 @@
-import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -18,10 +18,12 @@ import {
 import {
   quoteShellArgument,
   renderShellCommand,
+  parseDatabaseMaintenanceArgs,
 } from "./cli/arg-parser.js";
 import {
   backupOpencodeDatabase,
   checkpointOpencodeDatabase,
+  deriveTargetBackupDirectory,
   deriveTargetDatabasePath,
   parseOpencodeDatabaseMaintenanceMode,
   vacuumOpencodeDatabase,
@@ -520,7 +522,7 @@ function printUsageAndExit(): never {
       "|list-models [--free] [--provider <provider>] [--enabled]",
       "|list-model-families [--free] [--provider <provider>]",
       "|select-models <role> [--free] [--provider <provider>]",
-      "|manage-models|opencode-database-maintenance [--target <name>] <checkpoint|backup|vacuum>\n",
+      "|manage-models|opencode-database-maintenance [--target <name>|--all-targets] <checkpoint|backup|vacuum>\n",
     ].join(""),
   );
   process.exit(1);
@@ -721,25 +723,103 @@ async function main(): Promise<void> {
   }
 
   if (commandName === "opencode-database-maintenance") {
-    let targetDatabasePath: string | undefined;
-    let modeArgumentIndex = 3;
-
-    if (process.argv[3] === "--target") {
-      const targetName = process.argv[4];
-      if (!targetName) {
-        printUsageAndExit();
-      }
-      const targetConfiguration = await loadTargetConfiguration(targetName);
-      targetDatabasePath = deriveTargetDatabasePath(targetConfiguration.root);
-      modeArgumentIndex = 5;
-    }
-
-    const maintenanceMode = parseOpencodeDatabaseMaintenanceMode(process.argv[modeArgumentIndex]);
+    const { targetName, allTargets, mode } = parseDatabaseMaintenanceArgs(process.argv);
+    const maintenanceMode = parseOpencodeDatabaseMaintenanceMode(mode);
     if (!maintenanceMode) {
       printUsageAndExit();
     }
 
-    const maintenanceOptions = targetDatabasePath ? { databasePath: targetDatabasePath } : {};
+    if (allTargets) {
+      const targetNames = await listTargetNames();
+      const targetResults: Array<{
+        targetName: string;
+        success: boolean;
+        databasePath: string | null;
+        error: string | null;
+      }> = [];
+
+      for (const currentTargetName of targetNames) {
+        const targetConfiguration = await loadTargetConfiguration(currentTargetName);
+        if (targetConfiguration.kind !== "repo") {
+          targetResults.push({
+            targetName: currentTargetName,
+            success: true,
+            databasePath: null,
+            error: null,
+          });
+          continue;
+        }
+
+        const targetDatabasePath = deriveTargetDatabasePath(targetConfiguration.root);
+        const targetBackupDirectory = deriveTargetBackupDirectory(targetConfiguration.root);
+        try {
+          await stat(targetDatabasePath);
+        } catch {
+          targetResults.push({
+            targetName: currentTargetName,
+            success: true,
+            databasePath: targetDatabasePath,
+            error: null,
+          });
+          continue;
+        }
+
+        try {
+          const targetOptions = {
+            databasePath: targetDatabasePath,
+            backupDirectory: targetBackupDirectory,
+          };
+          const maintenanceResult = maintenanceMode === "checkpoint"
+            ? await checkpointOpencodeDatabase(targetOptions)
+            : maintenanceMode === "backup"
+              ? await backupOpencodeDatabase(targetOptions)
+              : await vacuumOpencodeDatabase(targetOptions);
+
+          targetResults.push({
+            targetName: currentTargetName,
+            success: true,
+            databasePath: maintenanceResult.databasePath,
+            error: null,
+          });
+        } catch (error: unknown) {
+          targetResults.push({
+            targetName: currentTargetName,
+            success: false,
+            databasePath: targetDatabasePath,
+            error: error instanceof Error ? error.message : "unknown error",
+          });
+        }
+      }
+
+      const succeededCount = targetResults.filter((result) => result.success).length;
+      const failedCount = targetResults.filter((result) => !result.success).length;
+
+      const batchResult = {
+        mode: maintenanceMode,
+        targets: targetResults,
+        summary: {
+          total: targetResults.length,
+          succeeded: succeededCount,
+          failed: failedCount,
+        },
+      };
+
+      process.stdout.write(`${JSON.stringify(batchResult, null, 2)}\n`);
+      process.exit(failedCount > 0 ? 1 : 0);
+    }
+
+    let targetDatabasePath: string | undefined;
+    let targetBackupDirectory: string | undefined;
+    if (targetName) {
+      const targetConfiguration = await loadTargetConfiguration(targetName);
+      targetDatabasePath = deriveTargetDatabasePath(targetConfiguration.root);
+      targetBackupDirectory = deriveTargetBackupDirectory(targetConfiguration.root);
+    }
+
+    const maintenanceOptions = {
+      ...(targetDatabasePath ? { databasePath: targetDatabasePath } : {}),
+      ...(targetBackupDirectory ? { backupDirectory: targetBackupDirectory } : {}),
+    };
     const maintenanceResult = maintenanceMode === "checkpoint"
       ? await checkpointOpencodeDatabase(maintenanceOptions)
       : maintenanceMode === "backup"

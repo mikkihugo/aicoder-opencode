@@ -75,11 +75,18 @@ Completion Notes (2026-04-11):
 - Type check clean, all 110 tests pass (51 new + 59 existing)
 - Key test coverage: argument parsing edge cases, missing target names, invalid thresholds, --target flag handling, error exit codes, all 3 target validations, DB maintenance with/without --target
 
-### M4: Batch database maintenance across all targets `⬜ PENDING`
+### M4: Batch database maintenance across all targets `✅ COMPLETED`
 
-- Currently requires one invocation per target
-- A `--all-targets` flag would run checkpoint/backup across all configured targets in one call
-- Useful for scheduled maintenance (cron, systemd timer)
+Completion Notes (2026-04-11):
+- Added `--all-targets` flag to `opencode-database-maintenance` CLI command
+- Updated `parseDatabaseMaintenanceArgs()` in `src/cli/arg-parser.ts` to handle `--all-targets`
+- Added batch handler in `src/cli.ts` that iterates all repo targets sequentially
+- Skips monorepo targets (no per-target DB) and targets without existing DB files
+- Output: JSON with `targets` array (per-target success/error) and `summary` (total/succeeded/failed)
+- Exit code 1 if any target fails, 0 if all succeed
+- Updated usage text: `--target <name>|--all-targets`
+- Added 5 tests: 3 unit tests for arg parsing + 2 integration tests for batch execution
+- All 118 tests pass
 
 ### M5: Database path auto-discovery `⬜ PENDING`
 

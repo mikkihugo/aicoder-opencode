@@ -166,27 +166,42 @@ test("parseStallThreshold_whenZero_throws", () => {
 
 test("parseDatabaseMaintenanceArgs_whenNoTarget_returnsMode", () => {
   const result = parseDatabaseMaintenanceArgs(["node", "cli.js", "cmd", "checkpoint"]);
-  assert.deepEqual(result, { targetName: null, mode: "checkpoint" });
+  assert.deepEqual(result, { targetName: null, allTargets: false, mode: "checkpoint" });
 });
 
 test("parseDatabaseMaintenanceArgs_whenTargetProvided_returnsTargetAndMode", () => {
   const result = parseDatabaseMaintenanceArgs(["node", "cli.js", "cmd", "--target", "dr-repo", "backup"]);
-  assert.deepEqual(result, { targetName: "dr-repo", mode: "backup" });
+  assert.deepEqual(result, { targetName: "dr-repo", allTargets: false, mode: "backup" });
 });
 
 test("parseDatabaseMaintenanceArgs_whenTargetMissingName_returnsNullTarget", () => {
   const result = parseDatabaseMaintenanceArgs(["node", "cli.js", "cmd", "--target"]);
-  assert.deepEqual(result, { targetName: null, mode: undefined });
+  assert.deepEqual(result, { targetName: null, allTargets: false, mode: undefined });
 });
 
 test("parseDatabaseMaintenanceArgs_whenNoArgs_returnsUndefined", () => {
   const result = parseDatabaseMaintenanceArgs(["node", "cli.js", "cmd"]);
-  assert.deepEqual(result, { targetName: null, mode: undefined });
+  assert.deepEqual(result, { targetName: null, allTargets: false, mode: undefined });
 });
 
 test("parseDatabaseMaintenanceArgs_whenTargetWithNoMode_returnsTarget", () => {
   const result = parseDatabaseMaintenanceArgs(["node", "cli.js", "cmd", "--target", "dr-repo"]);
-  assert.deepEqual(result, { targetName: "dr-repo", mode: undefined });
+  assert.deepEqual(result, { targetName: "dr-repo", allTargets: false, mode: undefined });
+});
+
+test("parseDatabaseMaintenanceArgs_whenAllTargets_returnsAllTargetsTrue", () => {
+  const result = parseDatabaseMaintenanceArgs(["node", "cli.js", "cmd", "--all-targets", "checkpoint"]);
+  assert.deepEqual(result, { targetName: null, allTargets: true, mode: "checkpoint" });
+});
+
+test("parseDatabaseMaintenanceArgs_whenAllTargetsNoMode_returnsAllTargetsTrue", () => {
+  const result = parseDatabaseMaintenanceArgs(["node", "cli.js", "cmd", "--all-targets"]);
+  assert.deepEqual(result, { targetName: null, allTargets: true, mode: undefined });
+});
+
+test("parseDatabaseMaintenanceArgs_whenAllTargetsBackup_returnsAllTargetsAndBackup", () => {
+  const result = parseDatabaseMaintenanceArgs(["node", "cli.js", "cmd", "--all-targets", "backup"]);
+  assert.deepEqual(result, { targetName: null, allTargets: true, mode: "backup" });
 });
 
 // ─── parseCommand ──────────────────────────────────────────────────────
@@ -286,6 +301,7 @@ test("parseCommand_whenDbMaintenanceNoTarget_returnsNullTarget", () => {
   assert.deepEqual(result, {
     command: "opencode-database-maintenance",
     targetName: null,
+    allTargets: false,
     mode: "checkpoint",
   });
 });
@@ -297,7 +313,20 @@ test("parseCommand_whenDbMaintenanceWithTarget_returnsTargetAndMode", () => {
   assert.deepEqual(result, {
     command: "opencode-database-maintenance",
     targetName: "dr-repo",
+    allTargets: false,
     mode: "backup",
+  });
+});
+
+test("parseCommand_whenDbMaintenanceAllTargets_returnsAllTargetsAndMode", () => {
+  const result = parseCommand([
+    "node", "cli.js", "opencode-database-maintenance", "--all-targets", "checkpoint",
+  ]);
+  assert.deepEqual(result, {
+    command: "opencode-database-maintenance",
+    targetName: null,
+    allTargets: true,
+    mode: "checkpoint",
   });
 });
 
@@ -438,4 +467,34 @@ test("integration_dbMaintenance_missingTargetName_exitsWithError", async () => {
 test("integration_unknownCommand_exitsWithError", async () => {
   const { exitCode } = await runCli("nonexistent-command");
   assert.notEqual(exitCode, 0);
+});
+
+test("integration_dbMaintenance_allTargets_checkpoint_returnsBatchResult", async () => {
+  const { stdout, exitCode } = await runCli(
+    "opencode-database-maintenance", "--all-targets", "checkpoint",
+  );
+  assert.equal(exitCode, 0);
+  const result = JSON.parse(stdout);
+  assert.equal(result.mode, "checkpoint");
+  assert.ok(Array.isArray(result.targets));
+  assert.ok(result.targets.length >= 2, "should have at least dr-repo and letta-workspace");
+  assert.ok(result.summary);
+  assert.equal(result.summary.total, result.targets.length);
+  assert.equal(result.summary.succeeded + result.summary.failed, result.summary.total);
+
+  const targetNames = result.targets.map((t: { targetName: string }) => t.targetName);
+  assert.ok(targetNames.includes("dr-repo"));
+  assert.ok(targetNames.includes("letta-workspace"));
+});
+
+test("integration_dbMaintenance_allTargets_includesSummaryCounts", async () => {
+  const { stdout, exitCode } = await runCli(
+    "opencode-database-maintenance", "--all-targets", "checkpoint",
+  );
+  assert.equal(exitCode, 0);
+  const result = JSON.parse(stdout);
+  assert.equal(typeof result.summary.succeeded, "number");
+  assert.equal(typeof result.summary.failed, "number");
+  assert.ok(result.summary.succeeded >= 0);
+  assert.ok(result.summary.failed >= 0);
 });
