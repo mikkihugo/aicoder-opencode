@@ -663,7 +663,65 @@ export async function loadRegistryAndLookupEntryForInputModel(
   return { registry, entry };
 }
 
-function buildRoutingContextSystemPrompt(modelRegistryEntry: ModelRegistryEntry): string {
+/**
+ * Render the "Active model routing context" system prompt section that
+ * is injected into the chat params when the active model is a curated
+ * registry entry. The agent reads this section to know which model it
+ * is currently routed to, what that model is best/not-for, and what
+ * the cost + billing picture looks like — all fields the operator
+ * curated in `models.jsonc` rather than anything opencode computes.
+ *
+ * This renderer is the sole source of truth for three independent
+ * drift surfaces. Each surface has a concrete failure mode history at
+ * parallel rendering sites elsewhere in this plugin, and collapsing
+ * them into one named, documented helper is the only way to keep them
+ * from drifting apart:
+ *
+ *  1. **Header-first invariant.** The section MUST begin with the
+ *     canonical `ACTIVE_MODEL_ROUTING_CONTEXT_HEADER` literal
+ *     (`"## Active model routing context"`) as its very first line —
+ *     opencode's `experimental.chat.system.transform` pipeline
+ *     concatenates multiple system prompt sections, and downstream
+ *     splitters find this section by header match. A refactor that
+ *     drops the header line (e.g. "the Model line is enough context")
+ *     silently merges this section into whichever section happened to
+ *     render before it, and agent-facing tools that look for the
+ *     header to extract the active-model context get nothing back.
+ *
+ *  2. **Multi-value comma-space separator (`.join(", ")`).** Three
+ *     list-valued fields (`default_roles`, `best_for`, `not_for`) all
+ *     join their array values with the canonical `", "` separator —
+ *     the same separator every other renderer in this plugin uses for
+ *     agent-readable lists. A refactor that drops the space (the
+ *     "commas are commas, why waste bytes" drift class) silently
+ *     produces `"coding,architect"` instead of `"coding, architect"`,
+ *     and any downstream parser that splits on `", "` stops seeing
+ *     individual values — the whole list collapses into one opaque
+ *     string. The three fields are structurally parallel so the drift
+ *     surface is global: one sabotage changes all three.
+ *
+ *  3. **Cost-tier + billing-mode `" | "` fusion.** The final line
+ *     fuses two distinct semantic axes (economic classification via
+ *     `cost_tier` and billing-relationship classification via
+ *     `billing_mode`) onto ONE line with a pipe separator. Keeping
+ *     them on one line is deliberate — the agent reads them together
+ *     to decide whether to prefer this model for cheap-bulk work vs
+ *     paid-deliberation work — but the pipe separator is the only
+ *     signal that the two axes are distinct. A refactor that changes
+ *     the separator (to `/`, `-`, `,`, or just whitespace) silently
+ *     makes the line ambiguous: `"Cost tier: cheap / Billing:
+ *     paid_api"` could be read as a cost-tier value of `"cheap /
+ *     Billing: paid_api"` by any naive `Cost tier: (\w+)` extractor.
+ *
+ * Args:
+ *   modelRegistryEntry: The curated registry row for the currently
+ *     active model.
+ *
+ * Returns:
+ *   A single multi-line string ready to be pushed into
+ *   `output.system` by the `chat.params` hook.
+ */
+export function buildRoutingContextSystemPrompt(modelRegistryEntry: ModelRegistryEntry): string {
   return [
     ACTIVE_MODEL_ROUTING_CONTEXT_HEADER,
     `Model: ${modelRegistryEntry.id}`,

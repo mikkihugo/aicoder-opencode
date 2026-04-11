@@ -11,6 +11,7 @@ import {
   buildAvailableModelsSystemPrompt,
   buildEnabledProviderModelSet,
   buildLeadingBoundaryRegex,
+  buildRoutingContextSystemPrompt,
   buildProviderHealthSummaryForTool,
   buildProviderHealthSystemPrompt,
   buildRoleRecommendationRoutes,
@@ -6177,4 +6178,86 @@ test("providerEnvVarCandidates_whenProviderIdIsLowerAlphaOnly_producesUpperConve
   const candidates = providerEnvVarCandidates("foo");
 
   assert.deepEqual(candidates, ["FOO_API_KEY"]);
+});
+
+// M97 pin A — header-first invariant: the canonical
+// `"## Active model routing context"` header MUST be the first line of
+// the rendered section so opencode's chat-system transform pipeline
+// can locate the block by header match. A refactor that drops the
+// header line silently merges this section into whichever section
+// rendered before it. Only asserts that `split("\n")[0]` equals the
+// header literal — orthogonal to pins B and C which inspect body
+// lines, so neither separator sabotage can fire this pin.
+test("buildRoutingContextSystemPrompt_whenRenderingEntry_emitsHeaderAsFirstLine", () => {
+  const entry: ModelRegistryEntry = {
+    ...buildModelRegistryEntry("m-hdr", ["coding"], "standard", [
+      { provider: "openrouter", model: "openrouter/hdr-model", priority: 1 },
+    ]),
+    description: "header pin entry",
+    best_for: ["bulk coding"],
+    not_for: [],
+    concurrency: 2,
+    cost_tier: "cheap",
+    billing_mode: "paid_api",
+  };
+
+  const rendered = buildRoutingContextSystemPrompt(entry);
+
+  assert.equal(rendered.split("\n")[0], "## Active model routing context");
+});
+
+// M97 pin B — multi-value comma-space separator: the `Roles:` line
+// must join array values with the canonical `", "` (comma + space)
+// separator. A refactor that drops the space (the "commas are commas"
+// drift class) turns `"coding, architect"` into `"coding,architect"`,
+// silently breaking every downstream parser that splits on `", "`.
+// Asserts an EXACT-string match on the Roles line only — does not
+// inspect the header (pin A's surface) or the cost-tier line (pin C's
+// surface), so a header-drop or pipe-change sabotage cannot fire pin B.
+test("buildRoutingContextSystemPrompt_whenRolesIsMultiValue_joinsWithCommaSpaceSeparator", () => {
+  const entry: ModelRegistryEntry = {
+    ...buildModelRegistryEntry("m-roles", ["coding", "architect"], "standard", [
+      { provider: "openrouter", model: "openrouter/roles-model", priority: 1 },
+    ]),
+    description: "roles pin entry",
+    best_for: ["bulk coding"],
+    not_for: [],
+    concurrency: 2,
+    cost_tier: "cheap",
+    billing_mode: "paid_api",
+  };
+
+  const rendered = buildRoutingContextSystemPrompt(entry);
+  const rolesLine = rendered.split("\n").find((line) => line.startsWith("Roles:"));
+
+  assert.equal(rolesLine, "Roles: coding, architect");
+});
+
+// M97 pin C — cost-tier + billing-mode `" | "` fusion: the final line
+// fuses two distinct semantic axes onto one line with a pipe
+// separator. A refactor that changes the separator to `"/"`, `","`,
+// or plain whitespace silently makes the line ambiguous to any naive
+// `Cost tier: (\w+)` extractor. Asserts the exact full line so any
+// drift in the two labels, the pipe, or the values flips. Uses
+// `cost_tier: "cheap"` and `billing_mode: "paid_api"` — a lowercase
+// single-word + underscore-form pair so the `Roles:` line does not
+// overlap pin B's assertion, and the header is untouched so pin A is
+// unaffected.
+test("buildRoutingContextSystemPrompt_whenRenderingEntry_fusesCostTierAndBillingWithPipeSeparator", () => {
+  const entry: ModelRegistryEntry = {
+    ...buildModelRegistryEntry("m-cost", ["coding"], "standard", [
+      { provider: "openrouter", model: "openrouter/cost-model", priority: 1 },
+    ]),
+    description: "cost pin entry",
+    best_for: ["bulk coding"],
+    not_for: [],
+    concurrency: 2,
+    cost_tier: "cheap",
+    billing_mode: "paid_api",
+  };
+
+  const rendered = buildRoutingContextSystemPrompt(entry);
+  const costLine = rendered.split("\n").find((line) => line.startsWith("Cost tier:"));
+
+  assert.equal(costLine, "Cost tier: cheap | Billing: paid_api");
 });
