@@ -1974,6 +1974,97 @@ async function initializeProviderHealthState(
 }
 
 /**
+ * Find the first healthy route for an agent's explicit preferred-model list.
+ *
+ * Iterates `preferredModels` in author order, then `candidateEntries` for
+ * each preference, and returns the first healthy route in one of four
+ * shapes: exact preferred route, exact provider/different route in the
+ * same registry entry (same model family, different provider fallback),
+ * or `null` if nothing healthy is found for any preference.
+ *
+ * Why the caller must pass `candidateEntries` that are NOT tier-filtered:
+ * an agent that declares `model: minimax/MiniMax-M2.5` (frontier tier)
+ * with no explicit `routing_complexity:` used to have its preference
+ * silently dropped whenever `inferTaskComplexity` returned `"small"` or
+ * `"medium"` for a particular prompt. The caller built `roleMatchedEntries`
+ * by applying BOTH the role filter AND the complexity-tier filter, then
+ * scanned that narrowed set for the preferred model. If the preferred
+ * model's tier was outside the inferred-complexity allowed tiers, the
+ * entry was not in `roleMatchedEntries` at all — the preferred-models
+ * loop found no match, silently fell through to
+ * `selectBestModelForRoleAndTask`, and routed the task to some tiny/fast
+ * model the agent never asked for. An explicit agent preference is a
+ * stronger signal than an inferred complexity: when the author writes
+ * down a specific model, they know what they want, and the router must
+ * NOT override that with a keyword-based inference. The role filter is
+ * still honored because an agent's declared role is also an explicit
+ * author signal; only the complexity-tier filter is dropped for this
+ * lookup. Extracted as a pure helper so the contract can be pinned with
+ * unit tests without constructing the whole plugin.
+ *
+ * Args:
+ *   preferredModels: Author-ordered list of composite `provider/model-id`
+ *     routes from agent frontmatter (`model:` or `models:`). Empty list
+ *     returns `null` immediately.
+ *   candidateEntries: Registry entries filtered by role (if any) but NOT
+ *     by capability tier. The caller is responsible for not leaking a
+ *     complexity-tier filter into this list.
+ *   providerHealthMap: Provider-level health map for the "is this route
+ *     callable right now?" check.
+ *   modelRouteHealthMap: Route-level health map for the same check.
+ *   now: Wall-clock timestamp in ms.
+ *
+ * Returns:
+ *   A decision object when a healthy preferred route is found, or `null`
+ *   when no preference matches any healthy route in the candidate set.
+ */
+export function findPreferredHealthyRoute(
+  preferredModels: string[],
+  candidateEntries: ModelRegistryEntry[],
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  now: number,
+): { selectedModelRoute: string; reasoning: string } | null {
+  if (preferredModels.length === 0) return null;
+
+  const isRouteHealthy = (route: { provider: string; model: string }): boolean => {
+    if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
+    const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
+    return !routeHealth || routeHealth.until <= now;
+  };
+
+  for (const preferredModel of preferredModels) {
+    for (const entry of candidateEntries) {
+      const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
+      const entryContainsPreferred = visibleRoutes.some(
+        (route) => route.model === preferredModel,
+      );
+      if (!entryContainsPreferred) continue;
+
+      const exactRoute = visibleRoutes.find(
+        (route) => route.model === preferredModel && isRouteHealthy(route),
+      );
+      if (exactRoute) {
+        return {
+          selectedModelRoute: exactRoute.model,
+          reasoning: `Preferred model from agent metadata, healthy provider`,
+        };
+      }
+
+      const fallbackRoute = visibleRoutes.find((route) => isRouteHealthy(route));
+      if (fallbackRoute) {
+        return {
+          selectedModelRoute: fallbackRoute.model,
+          reasoning: `Preferred model from agent metadata, healthy fallback provider`,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Recommend a model route for a task, considering agent metadata, provider health, and registry.
  */
 async function recommendTaskModelRoute(
@@ -2032,53 +2123,27 @@ async function recommendTaskModelRoute(
     });
   }
 
-  // If agent has preferred models, try those first.
-  //
-  // Matching semantics: the agent declares composite routes like
-  // `ollama-cloud/glm-5.1`. We find the registry entry that contains that
-  // exact route, then return the first HEALTHY visible route from that
-  // entry — which may be a different provider for the same model family
-  // (e.g. `opencode-go/glm-5.1`) when the declared provider is unhealthy.
-  // This honors the agent's model-family preference without stranding it
-  // on a single provider.
-  if (preferredModels.length > 0) {
-    const isRouteHealthy = (route: { provider: string; model: string }): boolean => {
-      if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
-      const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
-      return !routeHealth || routeHealth.until <= now;
-    };
+  // If agent has preferred models, try those first. Explicit preference
+  // outranks inferred complexity: the lookup uses `rolePreferredEntries`
+  // (role filter only, no capability-tier filter) so an agent declaring
+  // `model: minimax/MiniMax-M2.5` on a "fix typo" prompt still gets its
+  // MiniMax-M2.5 route instead of being silently dropped by the small-
+  // complexity allowedTiers filter. See `findPreferredHealthyRoute`
+  // docstring for the full reachability analysis.
+  const rolePreferredEntries = modelRegistryEntries.filter((entry) => {
+    if (!entry.enabled) return false;
+    if (role && !entry.default_roles.includes(role)) return false;
+    return true;
+  });
 
-    for (const preferredModel of preferredModels) {
-      for (const entry of roleMatchedEntries) {
-        const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
-        const entryContainsPreferred = visibleRoutes.some(
-          (route) => route.model === preferredModel,
-        );
-        if (!entryContainsPreferred) continue;
-
-        // Prefer the exact preferred route if it is healthy.
-        const exactRoute = visibleRoutes.find(
-          (route) => route.model === preferredModel && isRouteHealthy(route),
-        );
-        if (exactRoute) {
-          return {
-            selectedModelRoute: exactRoute.model,
-            reasoning: `Preferred model from agent metadata, healthy provider`,
-          };
-        }
-
-        // Otherwise fall back to any healthy visible route in the same
-        // registry entry (same model family, different provider).
-        const fallbackRoute = visibleRoutes.find((route) => isRouteHealthy(route));
-        if (fallbackRoute) {
-          return {
-            selectedModelRoute: fallbackRoute.model,
-            reasoning: `Preferred model from agent metadata, healthy fallback provider`,
-          };
-        }
-      }
-    }
-  }
+  const preferredDecision = findPreferredHealthyRoute(
+    preferredModels,
+    rolePreferredEntries,
+    providerHealthMap,
+    modelRouteHealthMap,
+    now,
+  );
+  if (preferredDecision) return preferredDecision;
 
   // Fall back to selecting the best model from the registry
   const best = selectBestModelForRoleAndTask(

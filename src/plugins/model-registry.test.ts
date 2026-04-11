@@ -12,6 +12,7 @@ import {
   buildModelNotFoundRouteHealth,
   classifyProviderApiError,
   isFallbackBlocked,
+  findPreferredHealthyRoute,
   hasUsableCredential,
   isZeroTokenQuotaSignal,
   parseAgentFrontmatter,
@@ -3059,4 +3060,194 @@ test("hasUsableCredential_whenEntryIsNullOrUndefined_returnsFalse", () => {
 test("hasUsableCredential_whenLegacyApiKeyShape_returnsTrue", () => {
   // Legacy `{ apiKey: "..." }` shape preserved for old fixtures.
   assert.equal(hasUsableCredential({ apiKey: "sk-legacy" }), true);
+});
+
+test("findPreferredHealthyRoute_whenPreferredModelsEmpty_returnsNull", () => {
+  const entries = [
+    buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5.1", priority: 1 },
+    ]),
+  ];
+  const decision = findPreferredHealthyRoute(
+    [],
+    entries,
+    new Map(),
+    new Map(),
+    0,
+  );
+  assert.equal(decision, null);
+});
+
+test("findPreferredHealthyRoute_whenExactPreferredRouteIsHealthy_returnsExactRoute", () => {
+  const entries = [
+    buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5.1", priority: 1 },
+      { provider: "opencode-go", model: "opencode-go/glm-5.1", priority: 2 },
+    ]),
+  ];
+  const decision = findPreferredHealthyRoute(
+    ["ollama-cloud/glm-5.1"],
+    entries,
+    new Map(),
+    new Map(),
+    0,
+  );
+  assert.deepEqual(decision, {
+    selectedModelRoute: "ollama-cloud/glm-5.1",
+    reasoning: "Preferred model from agent metadata, healthy provider",
+  });
+});
+
+test("findPreferredHealthyRoute_whenExactPreferredRouteIsUnhealthyButSiblingHealthy_returnsSibling", () => {
+  const entries = [
+    buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5.1", priority: 1 },
+      { provider: "opencode-go", model: "opencode-go/glm-5.1", priority: 2 },
+    ]),
+  ];
+  const providerHealthMap = new Map([
+    [
+      "ollama-cloud",
+      { state: "quota" as const, until: 100, retryCount: 0 },
+    ],
+  ]);
+  const decision = findPreferredHealthyRoute(
+    ["ollama-cloud/glm-5.1"],
+    entries,
+    providerHealthMap,
+    new Map(),
+    50,
+  );
+  assert.deepEqual(decision, {
+    selectedModelRoute: "opencode-go/glm-5.1",
+    reasoning: "Preferred model from agent metadata, healthy fallback provider",
+  });
+});
+
+test("findPreferredHealthyRoute_whenNoPreferredRouteMatchesAnyEntry_returnsNull", () => {
+  const entries = [
+    buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5.1", priority: 1 },
+    ]),
+  ];
+  const decision = findPreferredHealthyRoute(
+    ["some-other/model-not-in-registry"],
+    entries,
+    new Map(),
+    new Map(),
+    0,
+  );
+  assert.equal(decision, null);
+});
+
+test("findPreferredHealthyRoute_whenAuthorOrderHasMultiplePreferences_honorsFirstHealthy", () => {
+  // Author-order pin: the caller lists preferences in priority order, so
+  // the helper must return the FIRST preference whose entry yields a
+  // healthy route, even when later preferences would also be healthy.
+  const entries = [
+    buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5.1", priority: 1 },
+    ]),
+    buildModelRegistryEntry("minimax-m2.5", ["architect"], "frontier", [
+      { provider: "minimax", model: "minimax/MiniMax-M2.5", priority: 1 },
+    ]),
+  ];
+  const decision = findPreferredHealthyRoute(
+    ["minimax/MiniMax-M2.5", "ollama-cloud/glm-5.1"],
+    entries,
+    new Map(),
+    new Map(),
+    0,
+  );
+  assert.equal(decision?.selectedModelRoute, "minimax/MiniMax-M2.5");
+});
+
+test("findPreferredHealthyRoute_whenCallerPassesOnlyTierFilteredEntriesAndPreferredTierExcluded_returnsNull", () => {
+  // Negative pin that documents the caller's contract: if the caller
+  // accidentally passes a tier-filtered candidate set (e.g. only
+  // ["tiny","fast","standard"] entries for a "small" complexity) and
+  // the agent's frontier-tier preference is NOT in that set, the helper
+  // correctly returns null — BUT the FIX in `recommendTaskModelRoute`
+  // must pass a role-only-filtered list so the preference is found.
+  // This pin proves the helper itself is not the place that respects
+  // tier; `recommendTaskModelRoute` is. It prevents a future refactor
+  // from quietly re-tightening the candidate set inside the helper.
+  const entries = [
+    buildModelRegistryEntry("kimi-k2.5", ["architect"], "fast", [
+      { provider: "ollama-cloud", model: "ollama-cloud/kimi-k2.5", priority: 1 },
+    ]),
+    // Deliberately NOT included in entries: a frontier-tier minimax
+    // registry entry, simulating the pre-fix bug where
+    // `roleMatchedEntries` filtered it out via allowedTiers.
+  ];
+  const decision = findPreferredHealthyRoute(
+    ["minimax/MiniMax-M2.5"],
+    entries,
+    new Map(),
+    new Map(),
+    0,
+  );
+  assert.equal(decision, null);
+});
+
+test("recommendTaskModelRoute_whenAgentModelPreferenceIsFrontierTierButPromptInfersSmallComplexity_honorsPreference", async () => {
+  // Headline M56 regression pin: an agent that declares a frontier-tier
+  // preferred model must NOT have that preference silently dropped when
+  // the task prompt triggers `inferTaskComplexity` to return "small".
+  // Pre-M56 the preferred-models lookup iterated `roleMatchedEntries`,
+  // which had ALREADY been narrowed by the complexity-tier filter, so
+  // the minimax/MiniMax-M2.5 entry (frontier) was absent from the scan
+  // and the preference was silently dropped. The task then routed to
+  // some tiny/fast model the agent never asked for. Fix: thread a
+  // role-only-filtered candidate set into `findPreferredHealthyRoute`
+  // so explicit author preference outranks inferred complexity.
+  const tempDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "aicoder-model-routing-m56-"),
+  );
+  await writeAgentMetadata(
+    tempDirectory,
+    "typo_fixer",
+    [
+      "---",
+      "model: minimax/MiniMax-M2.5",
+      "routing_role: architect",
+      // DELIBERATELY NO routing_complexity: so inferTaskComplexity runs.
+      "---",
+      "",
+      "Typo fixer agent.",
+      "",
+    ].join("\n"),
+  );
+
+  const modelRegistryEntries = [
+    // Frontier-tier entry the agent wants — the one that was silently
+    // dropped pre-M56 because its tier was outside the small-complexity
+    // allowedTiers.
+    buildModelRegistryEntry("minimax-m2.5", ["architect"], "frontier", [
+      { provider: "minimax", model: "minimax/MiniMax-M2.5", priority: 1 },
+    ]),
+    // A small-complexity-allowed alternative the pre-M56 path would
+    // have selected when the preference was dropped.
+    buildModelRegistryEntry("kimi-k2.5", ["architect"], "fast", [
+      { provider: "ollama-cloud", model: "ollama-cloud/kimi-k2.5", priority: 1 },
+    ]),
+  ];
+
+  const decision = await recommendTaskModelRoute(
+    tempDirectory,
+    {
+      subagent_type: "typo_fixer",
+      // Prompt engineered to trigger inferTaskComplexity → "small"
+      // (word "typo" is a SMALL_COMPLEXITY_KEYWORD_STEM).
+      prompt: "fix typo in README",
+      agent: "typo_fixer",
+    },
+    modelRegistryEntries,
+    new Map(),
+    new Map(),
+    0,
+  );
+
+  assert.equal(decision.selectedModelRoute, "minimax/MiniMax-M2.5");
+  assert.match(decision.reasoning, /Preferred model from agent metadata/);
 });
