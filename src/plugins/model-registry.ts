@@ -3677,6 +3677,72 @@ export function countHealthyVisibleRoutes(
  * Returns:
  *   `true` when both provider and route health checks pass, `false`
  *   otherwise.
+ *
+ * ## Drift surfaces (M134 PDD)
+ *
+ * The pre-existing six pins (empty-maps, provider-key-missing,
+ * provider-expired, route-active, route-expired, route-key-composed)
+ * exercise the big shape of the predicate but leave three independent
+ * failure modes with no structurally-unique pin. Each drift class has a
+ * concrete history and a plausible refactor path:
+ *
+ *  1. **`<= now` inclusive boundary on the route-level expiry
+ *     comparison.** The route branch treats `routeHealth.until === now`
+ *     as already expired — the penalty window closes the moment
+ *     wall-clock reaches the stamped deadline, not one tick later. A
+ *     refactor to `routeHealth.until < now` (an easy "strictly expired"
+ *     mis-read, mirroring the exact bug class M117 closed in
+ *     `expireHealthMaps`) would leak boundary-exact entries: a penalty
+ *     whose stored deadline is `now` would keep blocking the route for
+ *     one additional tick, and on a fast-retry loop the just-expired
+ *     entry would still look dead to `findFirstHealthyVisibleRoute`
+ *     (which routes every decision through this predicate). The
+ *     pre-existing `whenRouteLevelPenaltyExpired` pin uses
+ *     `until = now - 5000` so the `<` drift still expires that entry;
+ *     only an exact-boundary pin catches the inclusivity invariant.
+ *
+ *  2. **`composeRouteKey` normalization for already-composite model
+ *     ids.** Aggregator providers (openrouter, cloudflare-ai-gateway)
+ *     store model ids that already carry the provider prefix
+ *     (`openrouter/xiaomi/mimo-v2-pro`), and `composeRouteKey` is the
+ *     sole source of truth for the "don't double-nest" idempotence
+ *     invariant: when `model` already starts with `${provider}/`, the
+ *     composed key is the model string verbatim, not
+ *     `${provider}/${model}` (which would produce
+ *     `openrouter/openrouter/xiaomi/mimo-v2-pro` — the exact M30 bug
+ *     shape that motivated the helper). A refactor that inlines the
+ *     lookup as `` `${provider}/${model}` `` (the "obvious shortcut"
+ *     drift class) silently double-prefixes every aggregator key, so
+ *     every route-level penalty on an openrouter-composite model
+ *     quietly disappears from the read path — the reader queries a
+ *     key that was never written by M30-compliant writers. The
+ *     pre-existing `whenRouteKeyComposedFromPlainModelID` pin uses
+ *     `longcat/LongCat-Flash-Chat` (an UNPREFIXED model), which is
+ *     not affected by the double-prefix drift; only an
+ *     already-composite pin fires this surface alone.
+ *
+ *  3. **Provider-gate short-circuit ordering and short-circuit
+ *     polarity.** The provider-health check runs FIRST and returns
+ *     `false` immediately on a dead provider — the route branch is
+ *     never consulted in that case. A refactor that drops the
+ *     short-circuit (so the function always falls through to the
+ *     route check) turns the predicate into "route-map only", which
+ *     silently re-admits every route whose PROVIDER is penalized
+ *     (quota backoff, key_dead, no_credit, timeout, model_not_found)
+ *     as long as the specific composite-route entry is absent or
+ *     expired. `isProviderHealthy` is the only mechanism that
+ *     propagates provider-wide penalties down to per-route decisions,
+ *     so losing the short-circuit quietly collapses provider-level
+ *     health into "nothing". Pre-existing `whenProviderKeyMissing`
+ *     uses an EMPTY route map, so a sabotage that drops the provider
+ *     gate AND keeps the route check still returns the right answer
+ *     (absent route → healthy, but so is the whole function). The
+ *     unique pin for this surface must combine an ACTIVE
+ *     provider-level penalty with a ROUTE-level entry that is already
+ *     expired (so the route branch, if ever reached, would say
+ *     "healthy"). Only then does the short-circuit's presence
+ *     actually affect the return value, and only then is the
+ *     sabotage detectable.
  */
 export function isRouteCurrentlyHealthy(
   providerRoute: { provider: string; model: string },

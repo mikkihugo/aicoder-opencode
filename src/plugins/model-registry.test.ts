@@ -4102,6 +4102,105 @@ test("isRouteCurrentlyHealthy_whenRouteKeyComposedFromPlainModelID_matchesCompos
   );
 });
 
+// M134 pin A — `<= now` inclusive boundary on route-level expiry: a
+// route-health entry whose `until` equals `now` to the millisecond must
+// count as expired, so the function returns `true`. A refactor from
+// `<= now` to `< now` (the classic "strictly expired" mis-read, same
+// bug class M117 closed in expireHealthMaps) flips this exact-boundary
+// case while leaving `whenRouteLevelPenaltyExpired` (which uses
+// `now - 5000`) still passing. Provider map is empty so the provider
+// gate is irrelevant; the pin is disjoint from the provider short-
+// circuit surface (pin C). Model is plain-unprefixed so composeRouteKey
+// produces the same key either way, keeping the pin disjoint from
+// the double-prefix surface (pin B).
+test("isRouteCurrentlyHealthy_whenRouteUntilEqualsNowExactly_routeCountsAsExpiredAndHealthy", () => {
+  const now = Date.now();
+  const route = { provider: "iflowcn", model: "qwen3-coder-plus" };
+  const modelRouteHealthMap = new Map([
+    [
+      "iflowcn/qwen3-coder-plus",
+      { state: "timeout" as const, until: now, retryCount: 1 },
+    ],
+  ]);
+  assert.equal(
+    isRouteCurrentlyHealthy(route, new Map(), modelRouteHealthMap, now),
+    true,
+  );
+});
+
+// M134 pin B — `composeRouteKey` idempotence for already-composite
+// aggregator model ids: when the incoming `route.model` already starts
+// with `${provider}/` (openrouter/cloudflare-ai-gateway convention),
+// the lookup must NOT double-prefix. A refactor that inlines the
+// lookup as `` `${provider}/${model}` `` silently produces
+// `openrouter/openrouter/xiaomi/mimo-v2-pro:free` and misses the
+// penalty entry the M30-compliant writer stored at the canonical
+// single-prefix key, so an active route-level penalty on an
+// aggregator route quietly disappears from the read path. The
+// pre-existing `whenRouteKeyComposedFromPlainModelID` pin uses
+// `LongCat-Flash-Chat` (UNPREFIXED), which is unaffected by the
+// double-prefix drift; this already-composite pin is the only one
+// that fires the sabotage. Provider map is empty so pin C (provider
+// gate) is not touched. The route entry has a LIVE penalty (not at
+// boundary) so pin A's inclusivity surface is untouched.
+test("isRouteCurrentlyHealthy_whenModelAlreadyCarriesProviderPrefix_composeRouteKeyAvoidsDoublePrefix", () => {
+  const now = Date.now();
+  const route = {
+    provider: "openrouter",
+    model: "openrouter/xiaomi/mimo-v2-pro:free",
+  };
+  const modelRouteHealthMap = new Map([
+    [
+      "openrouter/xiaomi/mimo-v2-pro:free",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  assert.equal(
+    isRouteCurrentlyHealthy(route, new Map(), modelRouteHealthMap, now),
+    false,
+  );
+});
+
+// M134 pin C — provider-gate short-circuit ordering: when the provider
+// carries an ACTIVE provider-level penalty AND the route-level entry
+// for the same pair is already expired (so the route branch, if ever
+// reached, would return `true`), the function must still return
+// `false` via the early `isProviderHealthy` short-circuit. A refactor
+// that drops the provider gate (the "route map only" drift class,
+// where someone "simplifies" the predicate by only checking the route
+// map on the assumption that provider penalties propagate through
+// some other reader) would silently return `true` because the route
+// branch alone yields `!routeHealth || routeHealth.until <= now` ⇒
+// true on an expired entry. Pre-existing `whenProviderKeyMissing`
+// uses an EMPTY route map, so a sabotage that drops the provider
+// gate still returns `false` there (absent route → healthy, but so
+// is the whole function — the sabotage is undetectable). Only this
+// expired-route-with-active-provider-penalty composition forces the
+// provider gate to be load-bearing. Pin A's boundary surface is
+// untouched (route is expired at `now - 5000`, not at exactly `now`).
+// Pin B's already-composite surface is untouched (model is plain-
+// unprefixed).
+test("isRouteCurrentlyHealthy_whenProviderBlockedAndRouteEntryAlreadyExpired_providerGateShortCircuitsFirst", () => {
+  const now = Date.now();
+  const route = { provider: "opencode", model: "glm-5.1-free" };
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      { state: "key_dead" as const, until: now + 120_000, retryCount: 2 },
+    ],
+  ]);
+  const modelRouteHealthMap = new Map([
+    [
+      "opencode/glm-5.1-free",
+      { state: "timeout" as const, until: now - 5_000, retryCount: 1 },
+    ],
+  ]);
+  assert.equal(
+    isRouteCurrentlyHealthy(route, providerHealthMap, modelRouteHealthMap, now),
+    false,
+  );
+});
+
 test("findFirstHealthyRouteInEntry_whenNoVisibleRoutes_returnsNull", () => {
   // Entry with only hidden paid routes — filterVisibleProviderRoutes
   // removes them all, so the helper has nothing to scan.
