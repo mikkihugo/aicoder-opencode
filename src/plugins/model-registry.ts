@@ -1367,6 +1367,44 @@ const LARGE_COMPLEXITY_KEYWORD_STEMS = [
 const LARGE_COMPLEXITY_LITERAL_PHRASES = ["end-to-end"] as const;
 
 /**
+ * Keyword stems for `small` complexity — trivial, bounded, mechanical
+ * tasks where spending strong/frontier-tier capacity is overkill. Word-
+ * boundary rule is the same as the other tiers.
+ *
+ * Historically `inferTaskComplexity` never returned `"small"`: the
+ * function only tested LARGE then MEDIUM regexes, then defaulted to
+ * medium. The `TaskComplexity` type and the `tierMap` both declared a
+ * `"small"` row (mapping to `["tiny", "fast", "standard"]`) but the
+ * inference path could not produce it, so every trivial prompt —
+ * "fix typo in README", "rename foo to bar", "remove trailing
+ * whitespace" — got routed into the medium tier's standard+strong
+ * candidate set. The `small` row was dead code reachable only via
+ * explicit `task.complexity = "small"` or agent frontmatter
+ * `routing_complexity: small`, and the inference-path callers
+ * (`recommendTaskModelRoute` with neither override) could not reach
+ * it at all. Effect: trivial ops burned frontier/strong-tier capacity
+ * unnecessarily, and the tiny+fast tier rows in `models.jsonc` were
+ * never selected by any inferred-complexity session.
+ *
+ * Conservative stems: keep the vocabulary narrow so we don't flip a
+ * legitimate medium/large task into the tiny/fast tier. Stems chosen:
+ *   - `typo`: "fix typo", "typos in docs"
+ *   - `rename`: "rename foo to bar", "renames the field"
+ *   - `trivial`: explicit operator signal
+ *   - `minor`: "minor version bump", "minor doc tweak"
+ *   - `whitespace`: formatting-only changes
+ *
+ * Deliberately omitted: `simple`, `small`, `quick`, `easy` — too
+ * subjective and routinely used in prompts that are actually medium
+ * work ("simple implementation of the payments flow"). `comment` /
+ * `docstring` — collides with "implement comment parser" etc. The
+ * stems above are concrete mechanical operations, not adjectives.
+ */
+const SMALL_COMPLEXITY_KEYWORD_STEMS = [
+  "typo", "rename", "trivial", "minor", "whitespace",
+] as const;
+
+/**
  * Keyword stems for `medium` complexity. Same word-boundary rule: previously
  * `"add"`, `"fix"`, `"test"` matched "address", "prefix", "latest" as
  * substrings.
@@ -1385,16 +1423,26 @@ function buildLeadingBoundaryRegex(stems: readonly string[]): RegExp {
 }
 
 const LARGE_COMPLEXITY_REGEX = buildLeadingBoundaryRegex(LARGE_COMPLEXITY_KEYWORD_STEMS);
+const SMALL_COMPLEXITY_REGEX = buildLeadingBoundaryRegex(SMALL_COMPLEXITY_KEYWORD_STEMS);
 const MEDIUM_COMPLEXITY_REGEX = buildLeadingBoundaryRegex(MEDIUM_COMPLEXITY_KEYWORD_STEMS);
 
 function inferTaskComplexity(prompt: string, _explicitComplexity: TaskComplexity | null): TaskComplexity {
   const lowerPrompt = prompt.toLowerCase();
 
+  // Large wins over small: a prompt like "refactor and rename foo across
+  // modules" contains both signals but the refactor scope dominates the
+  // rename mechanic. Medium-vs-small is the interesting tie: "fix typo"
+  // matches both medium ("fix") and small ("typo"); small must win so
+  // trivial mechanical ops don't get routed to the standard+strong tier.
   if (
     LARGE_COMPLEXITY_REGEX.test(lowerPrompt) ||
     LARGE_COMPLEXITY_LITERAL_PHRASES.some((phrase) => lowerPrompt.includes(phrase))
   ) {
     return "large";
+  }
+
+  if (SMALL_COMPLEXITY_REGEX.test(lowerPrompt)) {
+    return "small";
   }
 
   if (MEDIUM_COMPLEXITY_REGEX.test(lowerPrompt)) {

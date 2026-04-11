@@ -1353,12 +1353,18 @@ test("inferTaskComplexity_whenPromptContainsCarefullyUnrelatedToFull_doesNotClas
   // matching, so "carefully" (which contains "full" as an inner substring)
   // flipped a trivial review task into the large/frontier tier, wasting
   // expensive routing on what should be medium or small.
+  // Post-M50: the prompt also mentions "typo", which is now a `small`
+  // signal (previously unreachable — the `small` row in the tierMap was
+  // dead code before M50 added the SMALL_COMPLEXITY regex path). The
+  // test intent is unchanged ("don't classify as large") so small is
+  // the more correct answer here — a typo fix is the canonical small
+  // task and the tiny/fast tier was specifically sized for this shape.
   assert.equal(
     inferTaskComplexity(
       "Please carefully review this one-line typo fix in the README.",
       null,
     ),
-    "medium",
+    "small",
   );
 });
 
@@ -1396,6 +1402,103 @@ test("inferTaskComplexity_whenPromptUsesEndToEndLiteralPhrase_classifiesAsLarge"
       null,
     ),
     "large",
+  );
+});
+
+test("inferTaskComplexity_whenPromptMentionsTypo_classifiesAsSmall", () => {
+  // Dead-row regression pin: the tierMap declared a `small` row but
+  // `inferTaskComplexity` never produced it. Trivial mechanical prompts
+  // like "fix typo" got routed into the medium tier (standard+strong)
+  // when they should land in the tiny+fast+standard tier. This pin
+  // fires if a future refactor drops the SMALL regex path entirely.
+  assert.equal(
+    inferTaskComplexity("Fix typo in README", null),
+    "small",
+  );
+});
+
+test("inferTaskComplexity_whenPromptMentionsRename_classifiesAsSmall", () => {
+  // Mechanical rename is a bounded local change — does not warrant
+  // frontier/strong-tier capacity.
+  assert.equal(
+    inferTaskComplexity("Rename foo to bar in the user module", null),
+    "small",
+  );
+});
+
+test("inferTaskComplexity_whenPromptMentionsRenamesInflection_stillClassifiesAsSmall", () => {
+  // Leading word boundary only — the regex must still match inflections
+  // like "renames" / "renaming" / "renamed". Mirrors the corresponding
+  // inflection regression pin for `refactoring`.
+  assert.equal(
+    inferTaskComplexity(
+      "This commit renames the config key and updates two call sites",
+      null,
+    ),
+    "small",
+  );
+});
+
+test("inferTaskComplexity_whenPromptMentionsTrivial_classifiesAsSmall", () => {
+  // Explicit operator signal — "trivial" as a hint from a human author
+  // should be honored.
+  assert.equal(
+    inferTaskComplexity("Trivial fix for the dead link in docs", null),
+    "small",
+  );
+});
+
+test("inferTaskComplexity_whenPromptMentionsWhitespace_classifiesAsSmall", () => {
+  // Deliberately avoid LARGE stems like "across" in the prompt so the
+  // SMALL path is the only one that trips. "Strip trailing whitespace
+  // across touched files" would land in `large` via the `across` stem.
+  assert.equal(
+    inferTaskComplexity("Strip trailing whitespace in config.yaml", null),
+    "small",
+  );
+});
+
+test("inferTaskComplexity_whenPromptMentionsMinor_classifiesAsSmall", () => {
+  // "minor" is a common author signal for bounded edits.
+  assert.equal(
+    inferTaskComplexity("Minor version bump in package.json", null),
+    "small",
+  );
+});
+
+test("inferTaskComplexity_whenPromptMentionsBothTypoAndFix_prefersSmallOverMedium", () => {
+  // Tie-break pin: "fix typo" matches BOTH medium ("fix") and small
+  // ("typo"). Small must win because the SMALL check runs before MEDIUM
+  // in the cascade — otherwise a trivial mechanical op would silently
+  // keep routing to standard+strong capacity.
+  assert.equal(
+    inferTaskComplexity("Fix typo in the error message", null),
+    "small",
+  );
+});
+
+test("inferTaskComplexity_whenPromptMentionsRefactorAndRename_prefersLargeOverSmall", () => {
+  // Scope-dominance pin: a prompt that mentions both a large-scope
+  // signal (`refactor`) and a small-scope mechanic (`rename`) must
+  // classify as large. The rename is the mechanic, the refactor is
+  // the scope — scope dominates.
+  assert.equal(
+    inferTaskComplexity(
+      "Refactor and rename the payments module across services",
+      null,
+    ),
+    "large",
+  );
+});
+
+test("inferTaskComplexity_whenPromptUnrelatedToAnyStem_defaultsToMedium", () => {
+  // Default-medium regression pin: prompts without any keyword signal
+  // still land in medium, not small. This ensures adding the SMALL
+  // path did not shift the default bucket to small (which would
+  // silently downgrade every unspecified task).
+  assert.equal(
+    inferTaskComplexity("Please proceed with the analysis", null),
+    "medium",
   );
 });
 
