@@ -11,6 +11,7 @@ import {
   buildRouteHealthEntry,
   buildModelNotFoundRouteHealth,
   classifyProviderApiError,
+  isFallbackBlocked,
   ROUTE_MODEL_NOT_FOUND_DURATION_MS,
   ROUTE_QUOTA_BACKOFF_DURATION_MS,
   shouldClassifyAsModelNotFound,
@@ -1488,6 +1489,127 @@ test("inferTaskComplexity_whenPromptMentionsRefactorAndRename_prefersLargeOverSm
       null,
     ),
     "large",
+  );
+});
+
+test("isFallbackBlocked_whenModelIsGptOssOpenWeights_returnsFalse", () => {
+  // Headline regression pin: the previous bare-substring list blocked
+  // any model id containing `"gpt"`, which over-matched the legitimate
+  // free open-weights models `gpt-oss:120b` and `gpt-oss:20b` hosted
+  // on ollama-cloud. The catalog explicitly recommends gpt-oss:120b for
+  // A/B cross-checks, so the old substring list silently collapsed one
+  // lineage of diversity. The regex form requires a digit after the
+  // `gpt-?` anchor, so `gpt-oss` (word suffix) is allowed through.
+  assert.equal(
+    isFallbackBlocked("ollama-cloud", "ollama-cloud/gpt-oss:120b"),
+    false,
+  );
+  assert.equal(
+    isFallbackBlocked("ollama-cloud", "ollama-cloud/gpt-oss:20b"),
+    false,
+  );
+});
+
+test("isFallbackBlocked_whenModelIsProprietaryOpenAIWithDigit_returnsTrue", () => {
+  // Negative of the regression pin: proprietary OpenAI versions
+  // (numbered suffixes) must still be blocked, even when reached
+  // through an aggregator whose provider id is not on the blocklist.
+  assert.equal(
+    isFallbackBlocked("openrouter", "openrouter/openai/gpt-4"),
+    true,
+  );
+  assert.equal(
+    isFallbackBlocked("openrouter", "openrouter/openai/gpt-5.3-codex-spark"),
+    true,
+  );
+  assert.equal(
+    isFallbackBlocked("openrouter", "openrouter/openai/gpt-5.4"),
+    true,
+  );
+});
+
+test("isFallbackBlocked_whenModelIsChatgptVariant_returnsTrue", () => {
+  // Separate `chatgpt` pattern — stays blocked regardless of digit.
+  assert.equal(
+    isFallbackBlocked("openrouter", "openrouter/openai/chatgpt-4o-latest"),
+    true,
+  );
+});
+
+test("isFallbackBlocked_whenModelIsClaude_returnsTrue", () => {
+  // `claude` is a single-brand name — no ambiguity, blocked on the
+  // plain anchored pattern.
+  assert.equal(
+    isFallbackBlocked("openrouter", "openrouter/anthropic/claude-opus-4-6"),
+    true,
+  );
+});
+
+test("isFallbackBlocked_whenModelIsProprietaryGrok_returnsTrue", () => {
+  // xAI's proprietary brand always uses numbered versions, mirrored
+  // shape to the gpt pattern.
+  assert.equal(
+    isFallbackBlocked("openrouter", "openrouter/xai/grok-4-fast"),
+    true,
+  );
+  assert.equal(
+    isFallbackBlocked("openrouter", "openrouter/xai/grok-4-heavy"),
+    true,
+  );
+});
+
+test("isFallbackBlocked_whenModelContainsGrokAsInnerWordWithoutDigit_returnsFalse", () => {
+  // Defensive pin: the regex requires a digit after `grok-?`, so
+  // hypothetical future open-weights releases using word suffixes
+  // (e.g. `grok-oss`) would not be collateral-blocked the way
+  // `gpt-oss` was. Not a currently-reachable model — this pins the
+  // word-boundary invariant so a future refactor that loosens the
+  // regex fires this test first.
+  assert.equal(
+    isFallbackBlocked("ollama-cloud", "ollama-cloud/grok-oss"),
+    false,
+  );
+});
+
+test("isFallbackBlocked_whenProviderIsLongcat_returnsTrueRegardlessOfModel", () => {
+  // Provider-id blocklist still takes precedence — the longcat direct
+  // endpoint is blocked even if the model id itself is mundane.
+  assert.equal(
+    isFallbackBlocked("longcat", "LongCat-Flash-Chat"),
+    true,
+  );
+  assert.equal(
+    isFallbackBlocked("longcat-openai", "whatever"),
+    true,
+  );
+});
+
+test("isFallbackBlocked_whenModelContainsLongcatViaAggregator_returnsTrue", () => {
+  // Aggregator path: provider id `openrouter` is permitted in general,
+  // but the specific model still routes to longcat and must be
+  // excluded from fallback. Pattern-list fires via the plain `longcat`
+  // anchor.
+  assert.equal(
+    isFallbackBlocked("openrouter", "openrouter/meituan/longcat-flash-chat"),
+    true,
+  );
+});
+
+test("isFallbackBlocked_whenModelIsUnrelated_returnsFalse", () => {
+  // Sanity: ordinary curated models must pass through. Guards against
+  // an over-eager pattern refactor that accidentally matches common
+  // characters.
+  assert.equal(
+    isFallbackBlocked("ollama-cloud", "ollama-cloud/glm-5"),
+    false,
+  );
+  assert.equal(
+    isFallbackBlocked("ollama-cloud", "ollama-cloud/kimi-k2-thinking"),
+    false,
+  );
+  assert.equal(
+    isFallbackBlocked("ollama-cloud", "ollama-cloud/qwen3-coder:480b"),
+    false,
   );
 });
 

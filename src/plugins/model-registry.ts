@@ -45,7 +45,39 @@ const FALLBACK_BLOCKED_PROVIDER_IDS = new Set([
   "xai",
   "github-copilot",
 ]);
-const FALLBACK_BLOCKED_MODEL_SUBSTRINGS = ["longcat", "claude", "gpt", "grok"];
+/**
+ * Regex patterns for proprietary model families that must never be used
+ * as a fallback route, even if they show up inside a permitted provider's
+ * `provider.models` catalog (e.g. an aggregator wrapping OpenAI).
+ *
+ * Why regex instead of the old bare-substring list `["longcat", "claude",
+ * "gpt", "grok"]`: `"gpt".includes(modelID)` over-matches `gpt-oss:120b`
+ * and `gpt-oss:20b`, which are legitimate FREE open-weights models hosted
+ * on ollama-cloud and explicitly recommended in the user's model catalog
+ * for A/B cross-checks. The substring check silently excluded them from
+ * every fallback cascade, collapsing A/B diversity to whatever other
+ * ollama-cloud models were healthy and quietly removing a lineage the
+ * catalog explicitly asks for. The same shape would regress again the
+ * moment any other `gpt-*` open-weights model (gpt-j, gpt-neo, gpt-oss
+ * successors) appeared in `models.jsonc`.
+ *
+ * The distinguishing feature of proprietary OpenAI models is the
+ * numbered version suffix (`gpt-4`, `gpt-5`, `gpt-5.3-codex-spark`,
+ * `chatgpt-4o`) — open-weights releases use word suffixes (`gpt-oss`,
+ * `gpt-j`, `gpt-neox`). Requiring a digit after the optional hyphen
+ * keeps the proprietary family blocked and the open-weights family
+ * reachable. Mirror the shape for `grok` (xAI's proprietary brand
+ * always uses numbered versions). `claude` and `longcat` are
+ * single-brand names with no ambiguity — they stay as plain anchored
+ * matches.
+ */
+const FALLBACK_BLOCKED_MODEL_PATTERNS: readonly RegExp[] = [
+  /longcat/i,
+  /claude/i,
+  /\bgpt-?\d/i,
+  /\bchatgpt/i,
+  /\bgrok-?\d/i,
+];
 
 const CAPABILITY_TIER_TO_TEMPERATURE: Record<CapabilityTier, number> = {
   frontier: 0.7,
@@ -412,14 +444,30 @@ export function composeRouteKey(providerRoute: { provider: string; model: string
   return `${providerRoute.provider}/${providerRoute.model}`;
 }
 
-function isFallbackBlocked(providerID: string, modelID: string): boolean {
+/**
+ * Return `true` when a provider+model pair must be excluded from fallback
+ * routing. Exported so the regex semantics can be unit-tested directly
+ * without constructing the plugin closure.
+ *
+ * Two layers:
+ *   1. Provider-id blocklist (`FALLBACK_BLOCKED_PROVIDER_IDS`) — direct
+ *      proprietary endpoints like `openai`, `anthropic`, `xai`,
+ *      `github-copilot`, `longcat`, `longcat-openai`. These are blocked
+ *      regardless of what model id the registry points at.
+ *   2. Model-id pattern blocklist (`FALLBACK_BLOCKED_MODEL_PATTERNS`) —
+ *      catches proprietary model families exposed via aggregator providers
+ *      (openrouter, cloudflare ai gateway, etc.) where the provider id
+ *      itself is permitted but a specific model within its catalog must
+ *      still be excluded. The patterns deliberately require a digit after
+ *      the brand prefix for `gpt` / `grok` so open-weights releases like
+ *      `gpt-oss:120b` (legitimate free ollama-cloud model) are NOT caught
+ *      by the proprietary-OpenAI guard.
+ */
+export function isFallbackBlocked(providerID: string, modelID: string): boolean {
   if (FALLBACK_BLOCKED_PROVIDER_IDS.has(providerID)) {
     return true;
   }
-  const lowerModelID = modelID.toLowerCase();
-  return FALLBACK_BLOCKED_MODEL_SUBSTRINGS.some((blocked) =>
-    lowerModelID.includes(blocked),
-  );
+  return FALLBACK_BLOCKED_MODEL_PATTERNS.some((pattern) => pattern.test(modelID));
 }
 
 /**
