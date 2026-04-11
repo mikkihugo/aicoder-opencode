@@ -55,6 +55,7 @@ import {
   expireHealthMaps,
   filterProviderModelsByRouteHealth,
   findCuratedFallbackRoute,
+  formatPenaltySectionPrefix,
   HANG_TIMEOUT_IMMEDIATE_THRESHOLD_MS,
   assembleHealthAwareSystemPrompts,
   classifyPersistedHealthKey,
@@ -1599,6 +1600,46 @@ test("hasAgentVisiblePenalty_whenKeyMissingAndLiveQuotaMixed_returnsTrue", () =>
     ["opencode", { state: "quota" as const, until: now + 60_000, retryCount: 1 }],
   ]);
   assert.equal(hasAgentVisiblePenalty(providerHealthMap, new Map(), now), true);
+});
+
+test("formatPenaltySectionPrefix_whenCalled_containsProviderQuotaStatusHeader", () => {
+  // Pin 1 (header constant): asserts the result contains the exact
+  // `## Provider health status` banner. A sabotage that drops the
+  // header from the return array fires this pin alone — pins 2 and 3
+  // check substrings within the synopsis line, which is not affected
+  // by the header's presence.
+  const health: ProviderHealth = { state: "quota", until: 1700000000000, retryCount: 0 };
+  const result = formatPenaltySectionPrefix("Provider openrouter", health);
+  assert.ok(result.includes("## Provider health status"));
+});
+
+test("formatPenaltySectionPrefix_whenStateIsQuota_synopsisContainsQuotaBackoffLabel", () => {
+  // Pin 2 (healthStateLabel call): asserts the synopsis contains
+  // `[QUOTA BACKOFF]` — the human-readable label for `state: "quota"`.
+  // A sabotage that interpolates raw `health.state` produces
+  // `[quota]` (lowercase) and fires this pin alone — pin 1 still
+  // finds the header, and pin 3 still finds the ISO string because
+  // the until field is untouched.
+  const health: ProviderHealth = { state: "quota", until: 1700000000000, retryCount: 0 };
+  const result = formatPenaltySectionPrefix("Provider openrouter", health);
+  const synopsis = result.find((line) => line.startsWith("Provider openrouter"));
+  assert.ok(synopsis !== undefined);
+  assert.ok(synopsis.includes("[QUOTA BACKOFF]"));
+});
+
+test("formatPenaltySectionPrefix_whenUntilIsFinite_synopsisContainsISO8601String", () => {
+  // Pin 3 (formatHealthExpiry call): asserts the synopsis contains
+  // the ISO-8601 string for `until: 1700000000000`, specifically
+  // `2023-11-14T22:13:20.000Z`. A sabotage that interpolates raw
+  // `health.until` produces the literal string `"1700000000000"`
+  // and fires this pin alone — pin 1 still finds the header, and
+  // pin 2 still finds `[QUOTA BACKOFF]` because the state label
+  // derivation is independent of the until formatter.
+  const health: ProviderHealth = { state: "quota", until: 1700000000000, retryCount: 0 };
+  const result = formatPenaltySectionPrefix("Provider openrouter", health);
+  const synopsis = result.find((line) => line.startsWith("Provider openrouter"));
+  assert.ok(synopsis !== undefined);
+  assert.ok(synopsis.includes(new Date(1700000000000).toISOString()));
 });
 
 test("collectAgentVisibleLivePenalties_whenOnlyProviderMapHasLiveEntry_returnsProvidersOnly", () => {

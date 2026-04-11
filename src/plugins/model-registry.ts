@@ -3455,6 +3455,111 @@ export function collectAgentVisibleLivePenalties(
   return { providers, routes };
 }
 
+/**
+ * Render the shared two-line header prefix for one penalty section
+ * — the `## Provider health status` banner followed by the
+ * `"${entityLabel} [${stateLabel}] until ${untilString}."` synopsis.
+ *
+ * ## Drift shape
+ *
+ * `buildProviderHealthSystemPrompt` previously built this two-line
+ * header twice — once in the provider-penalty loop and once in the
+ * route-penalty loop — with structurally-identical code:
+ *
+ *     const label = healthStateLabel(health.state);
+ *     const until = formatHealthExpiry(health.until);
+ *     sections.push([
+ *       PROVIDER_QUOTA_STATUS_HEADER,
+ *       `Provider ${providerID} [${label}] until ${until}.`,
+ *       // ...tail differs...
+ *     ].join("\n"));
+ *
+ * and the route loop had the identical `const label = ...; const
+ * until = ...;` preprocess followed by
+ *
+ *     const header = [
+ *       PROVIDER_QUOTA_STATUS_HEADER,
+ *       `Route ${routeKey} [${label}] until ${until}.`,
+ *     ];
+ *
+ * Three independent drift surfaces lived on that mirror pair:
+ *
+ *   1. The `PROVIDER_QUOTA_STATUS_HEADER` constant (`"## Provider
+ *      health status"`) is the section marker the agent uses to
+ *      locate the penalty block in the system prompt. A refactor
+ *      that drops or renames the constant in one branch but not
+ *      the other silently produces an asymmetric prompt where
+ *      provider penalties are under one header and route penalties
+ *      under another (or none) — the agent sees two banners and
+ *      may treat them as unrelated alerts.
+ *
+ *   2. The `healthStateLabel(health.state)` call is load-bearing:
+ *      it maps `"quota"` → `"QUOTA BACKOFF"`, `"key_dead"` →
+ *      `"KEY DEAD"`, etc. — a human-readable form the agent can
+ *      match against its "try another model" prompts. A refactor
+ *      that drops the call and interpolates raw `health.state`
+ *      silently produces lowercase snake_case labels
+ *      (`[quota]`) the agent does not recognize as "the thing that
+ *      tells me to back off," so the agent keeps retrying the
+ *      penalized route until it hits the backoff expiry by brute
+ *      force. Worse still: a refactor that drops the call in ONE
+ *      loop but not the other produces asymmetric labels for
+ *      provider vs route penalties — a classic copy-paste drift
+ *      where the two sections disagree about the same state.
+ *
+ *   3. The `formatHealthExpiry(health.until)` call is load-bearing
+ *      in the same way: it maps raw epoch ms into ISO-8601 strings
+ *      or the `"never"` sentinel for `Number.POSITIVE_INFINITY`. A
+ *      refactor that drops the call silently emits `"until
+ *      1700000000000"` or `"until Infinity"` — neither is human- or
+ *      agent-friendly, and the `Infinity` case is the most painful
+ *      (`JSON.stringify(Infinity) === "null"` is a separate bug
+ *      class; here the template literal renders it as the string
+ *      `"Infinity"` which the agent almost certainly parses as
+ *      "invalid date").
+ *
+ * ## Why a shared helper
+ *
+ * Collapsing the header construction into one exported helper
+ * makes the three drift surfaces properties of one function
+ * rather than conventions spread across two structurally-parallel
+ * loops with identical `const label = ...; const until = ...;`
+ * preprocess. The helper returns a `string[]` (not a
+ * newline-joined string) so the caller can extend it with
+ * section-specific body lines before the final `join("\n")` —
+ * this keeps the provider loop's "fallback list" tail and the
+ * route loop's "owning entry fallback" tail at the call sites
+ * where they belong, rather than forcing them into a more
+ * invasive helper signature.
+ *
+ * Args:
+ *   entityLabel: The `Provider <id>` or `Route <key>` prefix that
+ *     identifies which map the penalty is from. The caller is
+ *     responsible for choosing the right prefix — the helper does
+ *     not infer it from the health shape because
+ *     `ProviderHealth` and `ModelRouteHealth` are structurally
+ *     identical and indistinguishable at the type level.
+ *   health: The health entry for the penalty. Either a
+ *     `ProviderHealth` or a `ModelRouteHealth` — both have the
+ *     same three fields (`state`, `until`, `retryCount`) and the
+ *     helper only reads `state` and `until`.
+ *
+ * Returns:
+ *   A two-element string array ready for the caller to extend
+ *   with section-specific body lines. The first element is always
+ *   `PROVIDER_QUOTA_STATUS_HEADER`; the second is the formatted
+ *   synopsis.
+ */
+export function formatPenaltySectionPrefix(
+  entityLabel: string,
+  health: ProviderHealth | ModelRouteHealth,
+): string[] {
+  return [
+    PROVIDER_QUOTA_STATUS_HEADER,
+    `${entityLabel} [${healthStateLabel(health.state)}] until ${formatHealthExpiry(health.until)}.`,
+  ];
+}
+
 export function buildProviderHealthSystemPrompt(
   modelRegistryEntries: ModelRegistryEntry[],
   providerHealthMap: Map<string, ProviderHealth>,
@@ -3479,9 +3584,6 @@ export function buildProviderHealthSystemPrompt(
   const sections: string[] = [];
 
   for (const [providerID, health] of activeProviderPenalties) {
-    const label = healthStateLabel(health.state);
-    const until = formatHealthExpiry(health.until);
-
     const affectedEntries = modelRegistryEntries.filter(
       (entry) =>
         entry.enabled &&
@@ -3499,9 +3601,13 @@ export function buildProviderHealthSystemPrompt(
       return `- ${entry.id} → ${fallback}`;
     });
 
+    // M91: `formatPenaltySectionPrefix` replaces the inline
+    // `const label = ...; const until = ...;` preprocess and the
+    // two-element header construction. See the helper docstring
+    // for the three drift surfaces it closes (header constant,
+    // state label derivation, until formatter).
     sections.push([
-      PROVIDER_QUOTA_STATUS_HEADER,
-      `Provider ${providerID} [${label}] until ${until}.`,
+      ...formatPenaltySectionPrefix(`Provider ${providerID}`, health),
       `Curated fallbacks (longcat/claude/gpt/grok excluded):`,
       ...fallbackLines,
     ].join("\n"));
@@ -3517,19 +3623,14 @@ export function buildProviderHealthSystemPrompt(
   // this section an agent running on a just-killed route got no warning at
   // all from the system prompt.
   for (const [routeKey, health] of activeRoutePenalties) {
-    const label = healthStateLabel(health.state);
-    const until = formatHealthExpiry(health.until);
-
     const owningEntry = modelRegistryEntries.find(
       (entry) =>
         entry.enabled &&
         entry.provider_order.some((route) => composeRouteKey(route) === routeKey),
     );
 
-    const header = [
-      PROVIDER_QUOTA_STATUS_HEADER,
-      `Route ${routeKey} [${label}] until ${until}.`,
-    ];
+    // M91: see `formatPenaltySectionPrefix` docstring.
+    const header = formatPenaltySectionPrefix(`Route ${routeKey}`, health);
 
     if (owningEntry) {
       // `findCuratedFallbackRoute` already consults `modelRouteHealthMap`
