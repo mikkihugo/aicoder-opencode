@@ -197,10 +197,22 @@ function findRegistryEntryByModel(
   modelRegistryEntries: ModelRegistryEntry[],
   model: ModelIdentity,
 ): ModelRegistryEntry | undefined {
+  // Opencode's runtime `Model` shape is `{ id, providerID }` where `id`
+  // is the RAW short id (e.g. "glm-4.7") and providerID is the opencode
+  // provider id (e.g. "ollama-cloud"). The registry's
+  // `provider_order[].model` field is the COMPOSITE form ("ollama-cloud/glm-4.7")
+  // per models.jsonc convention. Compare composite-to-composite so the
+  // lookup actually matches — previously both branches of the OR reduced
+  // to `providerRoute.model === model.id` and always returned undefined,
+  // silently killing both the capability-tier temperature override and
+  // the `## Active model routing context` system-prompt injection.
+  const composite = `${model.providerID}/${model.id}`;
   return modelRegistryEntries.find((modelRegistryEntry) =>
     modelRegistryEntry.provider_order.some(
       (providerRoute) =>
-        providerRoute.model === model.id ||
+        providerRoute.model === composite ||
+        // Defensive: honor registry entries where `.model` is not prefixed
+        // with `.provider` (unusual but not schema-forbidden).
         (providerRoute.provider === model.providerID &&
           providerRoute.model === model.id),
     ),

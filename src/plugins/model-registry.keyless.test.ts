@@ -574,3 +574,52 @@ test("chat_params_when_route_hangs_classifies_route_timeout_backoff", async () =
     }
   });
 });
+
+test("chat_params_whenModelIsInRegistry_setsCapabilityTierTemperature", async () => {
+  // Regression: findRegistryEntryByModel used to compare
+  // `providerRoute.model === model.id` where providerRoute.model is the
+  // COMPOSITE form ("ollama-cloud/glm-4.7") from models.jsonc and
+  // opencode's runtime model.id is the RAW form ("glm-4.7"). The
+  // comparison never matched and the chat.params hook's temperature
+  // override silently never fired — every session ran at opencode's
+  // default temperature instead of the curated capability-tier value.
+  // Same bug killed the `## Active model routing context` system-prompt
+  // injection in experimental.chat.system.transform. This test pins the
+  // composite-vs-raw contract by asserting chat.params DOES set the
+  // temperature when a real registry model is passed in.
+  await withIsolatedHome(async (homeDirectory) => {
+    await writeAuthFile(homeDirectory, {
+      "ollama-cloud": "token-value",
+    });
+    // Use a large hang timeout so chat.params takes the production branch
+    // and not the test-only fast-timeout branch.
+    const originalTimeoutValue = process.env.AICODER_ROUTE_HANG_TIMEOUT_MS;
+    process.env.AICODER_ROUTE_HANG_TIMEOUT_MS = "900000";
+    try {
+      await withFreshHealthState(async () => {
+        const { ModelRegistryPlugin } = await import("./model-registry.js");
+        const plugin = await (ModelRegistryPlugin as any)({ directory: process.cwd() });
+
+        const output: Record<string, unknown> = {};
+        await (plugin["chat.params"] as any)(
+          {
+            sessionID: "session-temperature-override",
+            provider: { info: { id: "ollama-cloud" } },
+            // glm-4.7 is `capability_tier: strong` in config/models.jsonc
+            // → CAPABILITY_TIER_TO_TEMPERATURE.strong === 0.6.
+            model: { id: "glm-4.7", providerID: "ollama-cloud" },
+          },
+          output,
+        );
+
+        assert.equal(output.temperature, 0.6);
+      });
+    } finally {
+      if (originalTimeoutValue === undefined) {
+        delete process.env.AICODER_ROUTE_HANG_TIMEOUT_MS;
+      } else {
+        process.env.AICODER_ROUTE_HANG_TIMEOUT_MS = originalTimeoutValue;
+      }
+    }
+  });
+});

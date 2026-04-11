@@ -172,6 +172,19 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M21: `findRegistryEntryByModel` never matched — capability-tier temperature override AND routing-context system prompt silently dead `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `findRegistryEntryByModel` compared `providerRoute.model === model.id`. But `providerRoute.model` in `config/models.jsonc` is the COMPOSITE form (`"ollama-cloud/glm-4.7"`) while opencode's runtime `Model.id` is the RAW form (`"glm-4.7"`). The two never matched. The function's OR had two clauses both reducing to the same equality check — dead code. Verified against the live on-disk state `.opencode/state/plugin/provider-health.json` which stores routes as `"ollama-cloud/glm-4.7"`, confirming opencode emits the raw id separately and the composite is constructed by the plugin.
+- **Consequences** (both features silently dead in production):
+  1. `chat.params` hook's `output.temperature = CAPABILITY_TIER_TO_TEMPERATURE[tier]` — never fired. Every session ran at opencode's default temperature instead of the curated per-tier value (frontier 0.7, strong 0.6, standard 0.5, fast/tiny 0.3).
+  2. `experimental.chat.system.transform` hook's `## Active model routing context` system-prompt section — never injected. Agents never saw their own curated role/best_for/not_for/concurrency context.
+- **Why no tests caught it**: existing chat.params tests only assert route-level health side effects, never the `output.temperature` value. The second caller's effect is only visible in live system prompts.
+- **Fix**: compose `composite = \`${model.providerID}/${model.id}\`` and compare `providerRoute.model === composite`. Keep a defensive secondary check for registry entries where `.model` is not prefixed with `.provider` (unusual but not schema-forbidden).
+- **Test**: new `chat_params_whenModelIsInRegistry_setsCapabilityTierTemperature` invokes the real plugin against the real `config/models.jsonc`, sets `AICODER_ROUTE_HANG_TIMEOUT_MS=900000` so chat.params takes the production branch, and asserts `output.temperature === 0.6` (glm-4.7 is `strong` tier). Before the fix this test fails with `temperature undefined`.
+- **Verification**: 126/126 tests pass (125 + 1 new), `tsc --noEmit` clean, dist rebuilt.
+- **Files**: `src/plugins/model-registry.ts`, `src/plugins/model-registry.keyless.test.ts`.
+
 ### M20: Route-level health lost on every plugin restart (provider+route keys merged in one flat map) `✅ COMPLETED`
 
 Completion Notes (2026-04-11):
