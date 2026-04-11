@@ -1682,6 +1682,100 @@ export function hasAgentVisiblePenalty(
   return false;
 }
 
+/**
+ * Build the payload returned by the `get_quota_backoff_status`
+ * agent-facing tool: one entry per *agent-visible* live penalty across
+ * both the provider and route health maps.
+ *
+ * The tool's name and description both advertise it as a "quota backoff
+ * status" — its contract is "return the providers and routes that are
+ * currently penalized with a transient backoff state the agent might
+ * plausibly retry through". Pre-M63 the handler iterated
+ * `providerHealthMap.entries()` directly and emitted every entry whose
+ * `until > now`. That was correct pre-M58 when the only way a
+ * provider landed in `providerHealthMap` was via a live transient
+ * failure event. M58 (commit `9b125b5`) changed the invariant:
+ * `initializeProviderHealthState` now installs a `key_missing` entry
+ * with `until: Number.POSITIVE_INFINITY` for every uncredentialed
+ * curated provider at boot (typically 15–25 entries on a default
+ * install). `until > now` is permanently true for those entries, so
+ * every call to `get_quota_backoff_status` post-M58 dumped the entire
+ * key_missing roster into the tool output labeled as "currently
+ * penalized" providers — even on a freshly-booted plugin with nothing
+ * actually wrong. Agents calling the tool to answer "what's broken
+ * that I should avoid right now?" got handed a noisy permanent
+ * plumbing report indistinguishable from a genuine outage, and had
+ * no way to tell which entries represented real transient backoffs
+ * versus structural "operator hasn't run oauth yet" state.
+ *
+ * Same bug class as M59 (`buildProviderHealthSystemPrompt`) and M60
+ * (`buildAvailableModelsSystemPrompt` +
+ * `experimental.chat.system.transform`) at the tool-output layer:
+ * a narrow predicate (`until > now`) silently misbehaves under the
+ * post-M58 map invariant, and the correct behavior is explicit
+ * agent-visible-vs-plumbing filtering at the rendering boundary via
+ * `isAgentVisibleHealthState`. This helper composes with
+ * `hasAgentVisiblePenalty` / `isAgentVisibleHealthState` so the
+ * "agent-visible" semantic lives in a single named place and every
+ * agent-facing output channel goes through the same filter.
+ *
+ * Expired entries are skipped but NOT deleted from the maps — the
+ * pre-M63 handler did inline `.delete()` calls while iterating, which
+ * is safe in JS Map semantics but mixed presentation and
+ * bookkeeping in a single pass. Map cleanup is the job of
+ * `expireHealthMaps`; the caller should invoke that separately if it
+ * wants the maps trimmed. Keeping this helper pure means it has no
+ * side effects on the maps and is trivially testable.
+ *
+ * Args:
+ *   providerHealthMap: Live provider-keyed health map.
+ *   modelRouteHealthMap: Live composite-route-keyed health map.
+ *   now: Wall-clock ms.
+ *
+ * Returns:
+ *   A `Record<string, {state, until, type, retryCount}>` with one
+ *   entry per agent-visible live penalty. Keys are provider IDs for
+ *   `type: "provider"` entries and composite route keys for
+ *   `type: "model_route"` entries. Returns an empty object when no
+ *   agent-visible penalties are live in either map (including the
+ *   post-M58 fresh-boot case where the provider map contains only
+ *   `key_missing` entries).
+ */
+export function buildAgentVisibleBackoffStatus(
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  now: number,
+): Record<string, { state: string; until: string; type: string; retryCount: number }> {
+  const status: Record<
+    string,
+    { state: string; until: string; type: string; retryCount: number }
+  > = {};
+
+  for (const [providerID, health] of providerHealthMap.entries()) {
+    if (health.until <= now) continue;
+    if (!isAgentVisibleHealthState(health.state)) continue;
+    status[providerID] = {
+      state: health.state,
+      until: formatHealthExpiry(health.until),
+      type: "provider",
+      retryCount: health.retryCount,
+    };
+  }
+
+  for (const [routeKey, health] of modelRouteHealthMap.entries()) {
+    if (health.until <= now) continue;
+    if (!isAgentVisibleHealthState(health.state)) continue;
+    status[routeKey] = {
+      state: health.state,
+      until: formatHealthExpiry(health.until),
+      type: "model_route",
+      retryCount: health.retryCount,
+    };
+  }
+
+  return status;
+}
+
 function healthStateLabel(state: ProviderHealthState): string {
   switch (state) {
     case "quota": return "QUOTA BACKOFF";
@@ -2969,36 +3063,23 @@ export const ModelRegistryPlugin: Plugin = async () => {
         args: {},
         async execute() {
           const now = Date.now();
-          const status: Record<string, { state: string; until: string; type: string; retryCount: number } | null> = {};
-
-          // Include provider health
-          for (const [providerID, health] of providerHealthMap.entries()) {
-            if (health.until <= now) {
-              providerHealthMap.delete(providerID);
-              continue;
-            }
-            status[providerID] = {
-              state: health.state,
-              until: formatHealthExpiry(health.until),
-              type: "provider",
-              retryCount: health.retryCount,
-            };
-          }
-
-          // Include model route health
-          for (const [routeKey, health] of modelRouteHealthMap.entries()) {
-            if (health.until <= now) {
-              modelRouteHealthMap.delete(routeKey);
-              continue;
-            }
-            status[routeKey] = {
-              state: health.state,
-              until: formatHealthExpiry(health.until),
-              type: "model_route",
-              retryCount: health.retryCount,
-            };
-          }
-
+          // M63: expire stale entries via the dedicated helper (keeps
+          // map cleanup in one place and out of the rendering path),
+          // then filter out `key_missing` permanent plumbing state via
+          // `buildAgentVisibleBackoffStatus`. Pre-M63 this handler
+          // iterated the maps inline without filtering, so post-M58 it
+          // dumped the entire boot-time key_missing roster (15–25
+          // entries on a default install) into the tool output labeled
+          // as "currently penalized" providers on every single call,
+          // making the tool useless for answering "what's broken right
+          // now?" — which is the ONE question the tool is named for.
+          // See `buildAgentVisibleBackoffStatus` for the full rationale.
+          expireHealthMaps(providerHealthMap, modelRouteHealthMap, now);
+          const status = buildAgentVisibleBackoffStatus(
+            providerHealthMap,
+            modelRouteHealthMap,
+            now,
+          );
           return JSON.stringify(status, null, 2);
         },
       }),

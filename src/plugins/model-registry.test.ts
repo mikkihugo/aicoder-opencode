@@ -6,6 +6,7 @@ import test from "node:test";
 
 import type { ModelRegistryEntry } from "../model-registry.js";
 import {
+  buildAgentVisibleBackoffStatus,
   buildAvailableModelsSystemPrompt,
   buildProviderHealthSystemPrompt,
   buildRoleRecommendationRoutes,
@@ -950,6 +951,142 @@ test("hasAgentVisiblePenalty_whenKeyMissingAndLiveQuotaMixed_returnsTrue", () =>
     ["opencode", { state: "quota" as const, until: now + 60_000, retryCount: 1 }],
   ]);
   assert.equal(hasAgentVisiblePenalty(providerHealthMap, new Map(), now), true);
+});
+
+test("buildAgentVisibleBackoffStatus_whenBothMapsEmpty_returnsEmpty", () => {
+  // Baseline: nothing in either map returns an empty object.
+  const result = buildAgentVisibleBackoffStatus(new Map(), new Map(), Date.now());
+  assert.deepEqual(result, {});
+});
+
+test("buildAgentVisibleBackoffStatus_whenOnlyKeyMissingEntries_returnsEmpty", () => {
+  // Headline integration pin for M63. Post-M58 shape: a freshly-booted
+  // plugin with no credentials has `providerHealthMap` pre-populated
+  // with key_missing entries for every uncredentialed curated provider.
+  // The tool's contract is "return CURRENTLY PENALIZED providers" —
+  // key_missing is permanent plumbing state, not a transient penalty,
+  // and the agent has nothing to retry through. Pre-M63 the handler
+  // emitted the full roster labeled as "currently penalized", making
+  // the tool output useless for answering "what's broken right now".
+  // Post-M63, filter via `isAgentVisibleHealthState` → empty object.
+  const providerHealthMap = new Map([
+    [
+      "iflowcn",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+    [
+      "opencode",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+    [
+      "kimi-for-coding",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+  ]);
+  const result = buildAgentVisibleBackoffStatus(
+    providerHealthMap,
+    new Map(),
+    Date.now(),
+  );
+  assert.deepEqual(
+    result,
+    {},
+    "post-M58 fresh-boot key_missing roster must not be emitted as 'currently penalized'",
+  );
+});
+
+test("buildAgentVisibleBackoffStatus_whenLiveQuotaPenalty_includesProviderEntry", () => {
+  // Transient provider-level quota must be emitted with type:"provider"
+  // and the full state/until/retryCount shape the agent expects.
+  const now = Date.now();
+  const providerHealthMap = new Map([
+    ["opencode", { state: "quota" as const, until: now + 60_000, retryCount: 2 }],
+  ]);
+  const result = buildAgentVisibleBackoffStatus(
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+  assert.equal(Object.keys(result).length, 1);
+  const entry = result["opencode"]!;
+  assert.equal(entry.state, "quota");
+  assert.equal(entry.type, "provider");
+  assert.equal(entry.retryCount, 2);
+  assert.ok(entry.until && entry.until !== "never");
+});
+
+test("buildAgentVisibleBackoffStatus_whenMixedKeyMissingAndLiveQuota_filtersKeyMissingOnly", () => {
+  // Sibling pin for the headline: when a real transient quota is live
+  // AND the permanent key_missing roster is present, the tool must
+  // emit ONLY the quota entry. Prevents regressing the M63 filter into
+  // "suppress everything when key_missing is present" — the quota is
+  // actionable, the key_missing is not, and the agent needs the
+  // actionable entry on its own with no noise.
+  const now = Date.now();
+  const providerHealthMap = new Map([
+    [
+      "iflowcn",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+    ["opencode", { state: "quota" as const, until: now + 60_000, retryCount: 1 }],
+    [
+      "kimi-for-coding",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+  ]);
+  const result = buildAgentVisibleBackoffStatus(
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+  assert.equal(Object.keys(result).length, 1);
+  assert.ok(result["opencode"]);
+  assert.equal(result["opencode"]!.state, "quota");
+  assert.equal(result["iflowcn"], undefined);
+  assert.equal(result["kimi-for-coding"], undefined);
+});
+
+test("buildAgentVisibleBackoffStatus_whenRouteLevelPenaltyLive_includesRouteEntry", () => {
+  // Route-level penalties (model_not_found, zero-token quota, hang
+  // timeout) must surface in the output with type:"model_route". The
+  // pre-M63 handler covered route entries too; this pin ensures the
+  // M63 refactor preserved that coverage.
+  const now = Date.now();
+  const modelRouteHealthMap = new Map([
+    [
+      "openrouter/xiaomi/dead-model",
+      { state: "model_not_found" as const, until: now + 6 * 60 * 60_000, retryCount: 1 },
+    ],
+  ]);
+  const result = buildAgentVisibleBackoffStatus(
+    new Map(),
+    modelRouteHealthMap,
+    now,
+  );
+  assert.equal(Object.keys(result).length, 1);
+  const entry = result["openrouter/xiaomi/dead-model"]!;
+  assert.equal(entry.state, "model_not_found");
+  assert.equal(entry.type, "model_route");
+});
+
+test("buildAgentVisibleBackoffStatus_whenEntriesExpired_excludesExpired", () => {
+  // Defensive pin: even if the caller forgot to call
+  // `expireHealthMaps` first, the helper must not emit entries whose
+  // `until <= now`. The tool description says "currently penalized" —
+  // expired is not current.
+  const now = Date.now();
+  const providerHealthMap = new Map([
+    ["opencode", { state: "quota" as const, until: now - 1000, retryCount: 1 }],
+    ["iflowcn", { state: "key_dead" as const, until: now + 60_000, retryCount: 1 }],
+  ]);
+  const result = buildAgentVisibleBackoffStatus(
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+  assert.equal(Object.keys(result).length, 1);
+  assert.ok(result["iflowcn"]);
+  assert.equal(result["opencode"], undefined);
 });
 
 test("buildAvailableModelsSystemPrompt_whenOnlyKeyMissingPenaltiesExist_returnsNull", () => {
