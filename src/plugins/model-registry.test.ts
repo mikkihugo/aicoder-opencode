@@ -33,6 +33,7 @@ import {
   clearSessionHangState,
   countHealthyVisibleRoutes,
   composeRouteKey,
+  findLiveProviderPenalty,
   findLiveRoutePenalty,
   lookupRouteHealthByIdentifiers,
   isAgentVisibleLivePenalty,
@@ -1677,6 +1678,54 @@ test("findLiveRoutePenalty_whenModelIsAlreadyCompositePrefixed_doesNotDoubleNest
     1_000_000,
   );
   assert.deepEqual(result, { state: "model_not_found", until: 9_000_000, retryCount: 1 });
+});
+
+test("findLiveProviderPenalty_whenMapEmpty_returnsNull", () => {
+  // M71 boundary pin: no entry → null regardless of `now`.
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  const result = findLiveProviderPenalty(providerHealthMap, "openrouter", 1_000_000);
+  assert.equal(result, null);
+});
+
+test("findLiveProviderPenalty_whenEntryExpired_returnsNull", () => {
+  // M71 boundary pin: `until <= now` counts as expired (matches the
+  // `findLiveRoutePenalty` M70 boundary and the rest of the expiry
+  // machinery). The boundary tick `until === now` MUST return null.
+  const providerHealthMap = new Map<string, ProviderHealth>([
+    ["openrouter", { state: "quota", until: 1_000_000, retryCount: 2 }],
+  ]);
+  const result = findLiveProviderPenalty(providerHealthMap, "openrouter", 1_000_000);
+  assert.equal(result, null);
+});
+
+test("findLiveProviderPenalty_whenEntryLive_returnsEntry", () => {
+  // M71: live entry is returned verbatim so `computeRegistryEntryHealthReport`
+  // can read `state` and `until` for scope reporting.
+  const providerHealthMap = new Map<string, ProviderHealth>([
+    ["openrouter", { state: "no_credit", until: 2_000_000, retryCount: 4 }],
+  ]);
+  const result = findLiveProviderPenalty(providerHealthMap, "openrouter", 1_000_000);
+  assert.deepEqual(result, { state: "no_credit", until: 2_000_000, retryCount: 4 });
+});
+
+test("findLiveProviderPenalty_whenKeyMissingEntry_returnsEntryForAnyNow", () => {
+  // M71 structural pin: key_missing state uses `until: Number.POSITIVE_INFINITY`
+  // per `initializeProviderHealthState` (M58). The helper must treat it as
+  // perpetually live so `isProviderHealthy` (which delegates to this helper)
+  // returns false for uncredentialed providers — the whole reason M58
+  // installs key_missing entries at boot. A regression that flipped the
+  // boundary to `until < now` would still catch this (Infinity is not less
+  // than any finite `now`), but a regression that swapped the condition to
+  // `until > 0` or similar would break this pin.
+  const providerHealthMap = new Map<string, ProviderHealth>([
+    ["iflowcn", { state: "key_missing", until: Number.POSITIVE_INFINITY, retryCount: 0 }],
+  ]);
+  const result = findLiveProviderPenalty(providerHealthMap, "iflowcn", 9_999_999_999_999);
+  assert.deepEqual(result, {
+    state: "key_missing",
+    until: Number.POSITIVE_INFINITY,
+    retryCount: 0,
+  });
 });
 
 test("findRegistryEntryByModel_whenRuntimeIdIsRawAndRegistryIsComposite_returnsEntry", () => {

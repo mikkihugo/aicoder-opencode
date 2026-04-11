@@ -595,6 +595,54 @@ export function findLiveRoutePenalty(
 }
 
 /**
+ * Return the `ProviderHealth` entry for `providerID` iff it is currently
+ * active (not expired), otherwise `null`.
+ *
+ * Exists because three readers inlined the same two-line sequence:
+ *
+ *   const health = providerHealthMap.get(providerID);
+ *   if (health && health.until > now) { ... use health.state / health.until ... }
+ *
+ * — the `computeRegistryEntryHealthReport` tool reader that surfaces
+ * provider-scope blocks to the agent, the `provider.models` openrouter
+ * hook that short-circuits the model map to `{}` when openrouter is
+ * unhealthy, and the internal `isProviderHealthy` boolean predicate. Each
+ * one encoded the SAME `until > now` boundary convention in a slightly
+ * different shape: one returned the entry, one returned empty, one
+ * returned a bool. Any future change to expiry semantics (a grace window,
+ * a new permanent state, a boundary flip from `>` to `>=`) would need to
+ * be replicated in every site, with nothing forcing the update — the
+ * classic drift setup that M67/M68/M70 fixed at the route layer.
+ *
+ * This helper is the provider-level analog of `findLiveRoutePenalty`
+ * (M70): same "return entry or null" shape, same `until <= now`
+ * expiry boundary. Callers that need the entry (for scope reporting,
+ * for short-circuit) read it directly. `isProviderHealthy` delegates
+ * as the boolean negation "no live penalty" so the predicate and the
+ * entry-returning readers cannot drift.
+ *
+ * Args:
+ *   providerHealthMap: Runtime provider-keyed health map.
+ *   providerID: Provider identifier (e.g. `"openrouter"`, `"ollama-cloud"`).
+ *   now: Wall-clock timestamp in ms used for the expiry comparison.
+ *
+ * Returns:
+ *   The `ProviderHealth` entry when one exists AND `until > now`
+ *   (penalty still active — including `key_missing` whose `until` is
+ *   `Number.POSITIVE_INFINITY`). `null` when the entry is absent or its
+ *   penalty window has already elapsed.
+ */
+export function findLiveProviderPenalty(
+  providerHealthMap: Map<string, ProviderHealth>,
+  providerID: string,
+  now: number,
+): ProviderHealth | null {
+  const health = providerHealthMap.get(providerID);
+  if (!health || health.until <= now) return null;
+  return health;
+}
+
+/**
  * Type of the persistence side-effect function injected into
  * `recordRouteHealthPenalty`. Matches the signature of the factory-local
  * `persistProviderHealth` helper.
@@ -1785,11 +1833,15 @@ export function computeRegistryEntryHealthReport(
     return null;
   }
 
-  const providerHealth = providerHealthMap.get(primaryRoute.provider);
-  if (providerHealth && providerHealth.until > now) {
+  const liveProviderPenalty = findLiveProviderPenalty(
+    providerHealthMap,
+    primaryRoute.provider,
+    now,
+  );
+  if (liveProviderPenalty) {
     return {
-      state: providerHealth.state,
-      until: formatHealthExpiry(providerHealth.until),
+      state: liveProviderPenalty.state,
+      until: formatHealthExpiry(liveProviderPenalty.until),
       scope: "provider",
     };
   }
@@ -1814,10 +1866,12 @@ function isProviderHealthy(
   providerID: string,
   now: number,
 ): boolean {
-  const health = providerHealthMap.get(providerID);
-  if (!health) return true;
-  // key_missing state never expires (until: Number.POSITIVE_INFINITY)
-  return health.until <= now;
+  // M71: delegate to `findLiveProviderPenalty` so the boolean predicate
+  // and the entry-returning readers share a single expiry boundary.
+  // key_missing state never expires (until: Number.POSITIVE_INFINITY) so
+  // the delegate keeps returning an entry and this predicate keeps
+  // returning false — same semantics as the pre-M71 inline form.
+  return findLiveProviderPenalty(providerHealthMap, providerID, now) === null;
 }
 
 /**
@@ -3381,8 +3435,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
       async models(provider) {
         try {
           const now = Date.now();
-          const health = providerHealthMap.get(OPENROUTER_PROVIDER_ID);
-          if (health && health.until > now) {
+          if (findLiveProviderPenalty(providerHealthMap, OPENROUTER_PROVIDER_ID, now)) {
             return {};
           }
 
