@@ -236,6 +236,61 @@ test("initializeProviderHealthState preserves key_missing across persisted reloa
   });
 });
 
+test("initializeProviderHealthState_whenPersistedFileContainsRouteKeys_loadsThemIntoModelRouteHealthMap", async () => {
+  // Regression: persistProviderHealth writes BOTH provider entries
+  // (`"iflowcn"`) and route entries (`"iflowcn/qwen3-coder-plus"`) into
+  // a single flat JSON. The loader used to dump everything into a single
+  // Map and route-level health was stranded in providerHealthMap, so
+  // (a) route-level backoffs silently evaporated on every plugin restart
+  // and (b) zombie route keys accumulated in the provider map forever.
+  // This test seeds a mixed-shape file, reinitializes, and asserts the
+  // loader splits the keys into the correct maps based on the `/` sep.
+  await withIsolatedHome(async (homeDirectory) => {
+    await writeAuthFile(homeDirectory, {
+      iflowcn: { type: "api", key: "real-key" },
+    });
+
+    const farFuture = Date.now() + 10 * 60 * 1000;
+
+    await withFreshHealthState(async () => {
+      // Pre-seed the persisted file with a mixed provider+route payload.
+      await writeFile(
+        providerHealthStatePath(),
+        JSON.stringify({
+          iflowcn: {
+            state: "quota",
+            until: farFuture,
+            retryCount: 2,
+          },
+          "iflowcn/qwen3-coder-plus": {
+            state: "timeout",
+            until: farFuture,
+            retryCount: 1,
+          },
+        }),
+        "utf8",
+      );
+
+      const { initializeProviderHealthState } = await import("./model-registry.js");
+
+      const runtime = await initializeProviderHealthState([
+        buildModelRegistryEntry("qwen3-coder-plus", ["implementation_worker"], [
+          { provider: "iflowcn", model: "iflowcn/qwen3-coder-plus", priority: 1 },
+        ]),
+      ]);
+
+      // Provider key went to providerHealthMap.
+      assert.equal(runtime.providerHealthMap.get("iflowcn")?.state, "quota");
+      // Route key went to modelRouteHealthMap — not to providerHealthMap.
+      assert.equal(
+        runtime.modelRouteHealthMap.get("iflowcn/qwen3-coder-plus")?.state,
+        "timeout",
+      );
+      assert.equal(runtime.providerHealthMap.get("iflowcn/qwen3-coder-plus"), undefined);
+    });
+  });
+});
+
 test("selectBestModelForRoleAndTask skips routes to keyless providers", async () => {
   await withIsolatedHome(async (homeDirectory) => {
     await writeAuthFile(homeDirectory, {

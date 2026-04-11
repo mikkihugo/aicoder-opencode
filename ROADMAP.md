@@ -172,6 +172,16 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M20: Route-level health lost on every plugin restart (provider+route keys merged in one flat map) `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `persistProviderHealth` serializes both provider entries (`"iflowcn"`) and route entries (`"iflowcn/qwen3-coder-plus"`) into a single flat JSON object. `loadPersistedProviderHealth` then dumped every key into a single `providerHealthMap`, while `modelRouteHealthMap` was re-initialized empty at every call site (`initializeProviderHealthState` line 585, `ModelRegistryPlugin` plugin entrypoint line 886). Result: route-level backoffs silently evaporated on every plugin restart. Simultaneously, route keys loaded into `providerHealthMap` accumulated as zombies — the next write persisted them back under their route-shaped names as if they were provider IDs, and they never got cleaned up.
+- **Why it matters**: aicoder-opencode, dr-repo, and letta-workspace all share this plugin and restart repeatedly (autopilot cycles, session cleanup). Every restart dropped the route-specific timeout/quota backoffs M14–M18 rely on. A model route that was just 15-min-timeout'd got immediately retried, repeat-poisoning the same route until the next restart.
+- **Fix**: `loadPersistedProviderHealth` now returns `{ providerHealthMap, modelRouteHealthMap }` and splits keys on `/` during load — route keys go to `modelRouteHealthMap`, provider keys to `providerHealthMap`. Both call sites updated to destructure. `initializeProviderHealthState` now passes both maps to `persistProviderHealth` when it updates, so restored route health survives subsequent writes instead of dropping out.
+- **Test**: new `initializeProviderHealthState_whenPersistedFileContainsRouteKeys_loadsThemIntoModelRouteHealthMap` seeds a mixed provider+route persisted file and asserts (a) `"iflowcn"` lands in providerHealthMap, (b) `"iflowcn/qwen3-coder-plus"` lands in modelRouteHealthMap, (c) the route key does NOT also appear in providerHealthMap.
+- **Verification**: 125/125 tests pass (124 + 1 new), `tsc --noEmit` clean, dist rebuilt.
+- **Files**: `src/plugins/model-registry.ts`, `src/plugins/model-registry.keyless.test.ts`.
+
 ### M19: Composite route double-prefix bug — `${provider}/${route.model}` produced `ollama-cloud/ollama-cloud/glm-5.1` `✅ COMPLETED`
 
 Completion Notes (2026-04-11):

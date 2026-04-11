@@ -97,25 +97,37 @@ function logRegistryLoadError(error: unknown): void {
   console.error(MODEL_REGISTRY_LOAD_ERROR_MESSAGE, error);
 }
 
-async function loadPersistedProviderHealth(): Promise<Map<string, ProviderHealth>> {
+async function loadPersistedProviderHealth(): Promise<{
+  providerHealthMap: Map<string, ProviderHealth>;
+  modelRouteHealthMap: Map<string, ModelRouteHealth>;
+}> {
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
   try {
     const raw = await readFile(PROVIDER_HEALTH_STATE_FILE, "utf8");
     const parsed: PersistedHealthMap = JSON.parse(raw);
     const now = Date.now();
-    const map = new Map<string, ProviderHealth>();
-    for (const [providerID, health] of Object.entries(parsed)) {
+    for (const [key, health] of Object.entries(parsed)) {
       const until = health.until === "never" ? Number.POSITIVE_INFINITY : (health.until as number);
-      if (until > now) {
-        map.set(providerID, {
-          ...health,
-          until,
-        });
+      if (until <= now) continue;
+
+      // persistProviderHealth writes BOTH provider entries (`"iflowcn"`)
+      // and route entries (`"iflowcn/qwen3-coder-plus"`) into one flat
+      // JSON. Route keys always contain `/`; provider IDs never do.
+      // Split them back into the correct maps so route-level backoffs
+      // survive plugin restart and do not zombie-accumulate in the
+      // provider map.
+      const isRouteKey = key.includes("/");
+      if (isRouteKey) {
+        modelRouteHealthMap.set(key, { ...health, until });
+      } else {
+        providerHealthMap.set(key, { ...health, until });
       }
     }
-    return map;
   } catch {
-    return new Map();
+    // Missing / unreadable file → start fresh.
   }
+  return { providerHealthMap, modelRouteHealthMap };
 }
 
 async function persistProviderHealth(
@@ -569,8 +581,7 @@ async function initializeProviderHealthState(
   providerHealthMap: Map<string, ProviderHealth>;
   modelRouteHealthMap: Map<string, ModelRouteHealth>;
 }> {
-  const providerHealthMap = await loadPersistedProviderHealth();
-  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const { providerHealthMap, modelRouteHealthMap } = await loadPersistedProviderHealth();
 
   const authKeys = await loadAuthKeys();
   const knownProviders = new Set<string>();
@@ -602,7 +613,11 @@ async function initializeProviderHealthState(
   }
 
   if (hasChanges) {
-    await persistProviderHealth(providerHealthMap);
+    // Pass both maps so the restored route-level health (loaded above
+    // via loadPersistedProviderHealth) is re-persisted alongside the
+    // provider map. Without this, any key_missing update would drop
+    // route entries from the next on-disk snapshot.
+    await persistProviderHealth(providerHealthMap, modelRouteHealthMap);
   }
 
   return { providerHealthMap, modelRouteHealthMap };
@@ -867,8 +882,7 @@ async function listCuratedModels(
 export { inferTaskComplexity, recommendTaskModelRoute, initializeProviderHealthState };
 
 export const ModelRegistryPlugin: Plugin = async () => {
-  const providerHealthMap = await loadPersistedProviderHealth();
-  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const { providerHealthMap, modelRouteHealthMap } = await loadPersistedProviderHealth();
   const sessionActiveProviderMap = new Map<string, string>();
   const sessionActiveModelMap = new Map<string, { id: string; providerID: string }>();
   const sessionStartTimeMap = new Map<string, number>();
