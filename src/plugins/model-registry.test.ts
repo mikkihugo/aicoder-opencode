@@ -9,6 +9,7 @@ import type { ModelRouteHealth, ProviderHealth } from "./model-registry.js";
 import {
   buildAgentVisibleBackoffStatus,
   buildAvailableModelsSystemPrompt,
+  buildProviderHealthSummaryForTool,
   buildProviderHealthSystemPrompt,
   buildRoleRecommendationRoutes,
   buildRouteHealthEntry,
@@ -1597,6 +1598,44 @@ test("hasAgentVisiblePenalty_whenKeyMissingAndLiveQuotaMixed_returnsTrue", () =>
     ["opencode", { state: "quota" as const, until: now + 60_000, retryCount: 1 }],
   ]);
   assert.equal(hasAgentVisiblePenalty(providerHealthMap, new Map(), now), true);
+});
+
+test("buildProviderHealthSummaryForTool_whenEntryPresent_preservesStateField", () => {
+  // Pin 1 (state field): the `state` key is the "what's broken" signal
+  // the agent reads in the no-recommendation branch. A sabotage that
+  // drops the field silently produces a summary without WHY each
+  // provider is penalized. Uses a single-entry map so sabotages that
+  // filter entries still leave this entry present.
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  providerHealthMap.set("provA", { state: "quota", until: 1700000000000, retryCount: 2 });
+  const result = buildProviderHealthSummaryForTool(providerHealthMap);
+  assert.equal(result.provA?.state, "quota");
+});
+
+test("buildProviderHealthSummaryForTool_whenEntryPresent_formatsUntilViaFormatHealthExpiry", () => {
+  // Pin 2 (formatter call): the `formatHealthExpiry(h.until)` call is
+  // load-bearing — passing raw `h.until` emits unix epoch ms (and
+  // Infinity encodes as JSON null, hiding key_missing). Uses a
+  // single-entry map so sabotages that filter entries still leave
+  // this entry present.
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  providerHealthMap.set("provA", { state: "quota", until: 1700000000000, retryCount: 2 });
+  const result = buildProviderHealthSummaryForTool(providerHealthMap);
+  assert.equal(result.provA?.until, new Date(1700000000000).toISOString());
+});
+
+test("buildProviderHealthSummaryForTool_whenMapHasTwoEntries_preservesAllKeys", () => {
+  // Pin 3 (no-filter policy): the summary is an UNFILTERED pass-through,
+  // unlike `buildAgentVisibleBackoffStatus`. A sabotage that copies a
+  // filter from the sibling helper silently drops key_missing entries
+  // — EXACTLY the entries the agent needs in the no-recommendation
+  // case. Uses a two-entry map with one live and one key_missing so
+  // ANY filter drop surfaces as a missing key.
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  providerHealthMap.set("provA", { state: "quota", until: 1700000000000, retryCount: 0 });
+  providerHealthMap.set("provB", { state: "key_missing", until: Number.POSITIVE_INFINITY, retryCount: 0 });
+  const result = buildProviderHealthSummaryForTool(providerHealthMap);
+  assert.deepEqual(Object.keys(result).sort(), ["provA", "provB"]);
 });
 
 test("buildAgentVisibleBackoffStatus_whenBothMapsEmpty_returnsEmpty", () => {

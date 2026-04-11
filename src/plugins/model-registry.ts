@@ -3273,6 +3273,85 @@ export function buildAgentVisibleBackoffStatus(
   return status;
 }
 
+/**
+ * Render `providerHealthMap` as a `{state, until}` tool-output dict with
+ * NO filter — every entry passes through, including `key_missing` plumbing.
+ *
+ * ## Drift shape
+ *
+ * The `recommend_model_for_role` tool handler's no-recommendation branch
+ * previously inlined a five-line `Object.fromEntries(Array.from(
+ * providerHealthMap.entries()).map(([id, h]) => [id, { state: h.state,
+ * until: formatHealthExpiry(h.until) }]))` expression at the call site.
+ * Three independent drift surfaces lived on that fragment:
+ *
+ *   1. The `state: h.state` field is the entire "what's broken" signal
+ *      the agent reads when the tool reports no recommendation. A
+ *      refactor that renames the key or drops the field silently
+ *      produces a summary where every entry is `{ until: "..." }` with
+ *      no indication of WHY each provider is penalized — the agent
+ *      then has no basis for deciding which alternative to try next.
+ *
+ *   2. The `formatHealthExpiry(h.until)` call is load-bearing: the
+ *      helper converts the raw epoch-ms `number` into either the
+ *      ISO-8601 string `"2026-04-11T18:24:00.000Z"` or the sentinel
+ *      `"never"` for `Number.POSITIVE_INFINITY` (the `key_missing`
+ *      permanent-plumbing marker). A refactor that passes `h.until`
+ *      directly to `JSON.stringify` silently emits raw unix epoch
+ *      numbers for transient penalties and the machine-incompatible
+ *      float `Infinity` for permanent ones, which JSON encodes as
+ *      `null` — the agent then sees `"until": null` for every
+ *      key_missing entry and cannot distinguish "permanently dead"
+ *      from "unknown expiry".
+ *
+ *   3. The summary is an UNFILTERED pass-through — unlike
+ *      `buildAgentVisibleBackoffStatus` (which filters through
+ *      `isAgentVisibleLivePenalty`), this one is a diagnostic "here is
+ *      everything in the map" dump intended to let the agent debug
+ *      why no candidate model scored. A refactor that accidentally
+ *      adds a filter — perhaps copying from `buildAgentVisibleBackoffStatus`
+ *      — silently drops `key_missing` entries, which are EXACTLY the
+ *      entries the agent most needs to see in the no-recommendation
+ *      case (they explain "no credentials configured for this
+ *      provider" far better than "backoff lifted, try again" would).
+ *
+ * ## Why a thin pure helper
+ *
+ * Extracted as a pure input-output helper so the three drift surfaces
+ * — the state field, the formatter call, the no-filter policy — are
+ * each pinnable by one regression unit test rather than by reading
+ * the tool handler's full JSON.stringify body. The helper is
+ * deliberately NOT collapsed with `buildAgentVisibleBackoffStatus`:
+ * that helper is for the `get_quota_backoff_status` tool (agent
+ * wants "what is LIVE right now?") and this helper is for the
+ * `recommend_model_for_role` no-recommendation branch (agent wants
+ * "what does the plugin currently know about every provider?"). The
+ * two have opposite filter semantics and collapsing them would
+ * require a boolean parameter, which would itself be a new drift
+ * surface.
+ *
+ * Args:
+ *   providerHealthMap: The plugin's live provider health map. Every
+ *     entry (agent-visible or not) is rendered.
+ *
+ * Returns:
+ *   A plain object keyed by provider ID with `{state, until}` where
+ *   `until` is the formatted ISO-8601 string or `"never"`. Returns
+ *   `{}` when the map is empty.
+ */
+export function buildProviderHealthSummaryForTool(
+  providerHealthMap: Map<string, ProviderHealth>,
+): Record<string, { state: ProviderHealthState; until: string }> {
+  const summary: Record<string, { state: ProviderHealthState; until: string }> = {};
+  for (const [providerID, health] of providerHealthMap.entries()) {
+    summary[providerID] = {
+      state: health.state,
+      until: formatHealthExpiry(health.until),
+    };
+  }
+  return summary;
+}
+
 function healthStateLabel(state: ProviderHealthState): string {
   switch (state) {
     case "quota": return "QUOTA BACKOFF";
@@ -4521,15 +4600,14 @@ export const ModelRegistryPlugin: Plugin = async () => {
           );
 
           if (!best) {
+            // M89: `buildProviderHealthSummaryForTool` replaces the
+            // five-line inline `Object.fromEntries` expression. See the
+            // helper docstring for the three drift surfaces it closes
+            // (state field, formatter call, no-filter policy).
             return JSON.stringify({
               recommendation: null,
               reason: "No model found matching role/task/tier filters",
-              providerHealthSummary: Object.fromEntries(
-                Array.from(providerHealthMap.entries()).map(([id, h]) => [
-                  id,
-                  { state: h.state, until: formatHealthExpiry(h.until) },
-                ]),
-              ),
+              providerHealthSummary: buildProviderHealthSummaryForTool(providerHealthMap),
             }, null, 2);
           }
 
