@@ -34,6 +34,9 @@ export const BACKUP_FILE_EXTENSION = ".sqlite3";
 export const TARGET_OPENCODE_DATABASE_RELATIVE_PATH = path.join(
   ".opencode", "xdg-data", "opencode", "opencode.db",
 );
+export const TARGET_OPENCODE_BACKUP_RELATIVE_PATH = path.join(
+  ".opencode", "xdg-data", "opencode", "backups",
+);
 
 const HOURLY_CHECKPOINT_MODE = "checkpoint";
 const DAILY_BACKUP_MODE = "backup";
@@ -84,6 +87,19 @@ type BackupArtifact = {
  */
 export function deriveTargetDatabasePath(targetRoot: string): string {
   return path.join(targetRoot, TARGET_OPENCODE_DATABASE_RELATIVE_PATH);
+}
+
+/**
+ * Derive the backup directory for a target repository root.
+ *
+ * Args:
+ *   targetRoot: Absolute path to the target repository root.
+ *
+ * Returns:
+ *   Absolute path to the target's backup directory under its XDG data directory.
+ */
+export function deriveTargetBackupDirectory(targetRoot: string): string {
+  return path.join(targetRoot, TARGET_OPENCODE_BACKUP_RELATIVE_PATH);
 }
 
 /**

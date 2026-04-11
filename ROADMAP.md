@@ -94,11 +94,16 @@ Completion Notes (2026-04-11):
 - Current behavior: always uses `~/.local/share/opencode/opencode.db`
 - Risk: could discover wrong database in multi-install setups
 
-### M6: Backup directory target-awareness `⬜ PENDING`
+### M6: Backup directory target-awareness `✅ COMPLETED`
 
-- Backup directory is always `~/.local/state/opencode/backups` regardless of `--target`
-- Target-specific backups should go to `<root>/.opencode/xdg-data/opencode/backups/`
-- Or at minimum, include target name in backup filename
+Completion Notes (2026-04-11):
+- Added `TARGET_OPENCODE_BACKUP_RELATIVE_PATH` constant pointing to `.opencode/xdg-data/opencode/backups`
+- Added `deriveTargetBackupDirectory(targetRoot)` function parallel to `deriveTargetDatabasePath`
+- Updated CLI handler to pass `backupDirectory` derived from target root in both single-target and all-targets paths
+- Backward compatible: no `--target` = global backup dir, `--target <name>` = co-located target backup dir
+- Added 2 unit tests for `deriveTargetBackupDirectory`
+- Type check clean, all tests pass
+- Files changed: `src/opencode-database-maintenance.ts`, `src/cli.ts`, `src/opencode-database-maintenance.test.ts`
 
 ### M8: Letta-workspace overlay — make agent files durable `✅ COMPLETED`
 

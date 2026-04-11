@@ -13,10 +13,12 @@ import path from "node:path";
 import {
   BACKUP_FILE_EXTENSION,
   BACKUP_FILE_PREFIX,
+  TARGET_OPENCODE_BACKUP_RELATIVE_PATH,
   TARGET_OPENCODE_DATABASE_RELATIVE_PATH,
   backupOpencodeDatabase,
   buildOpencodeDatabaseBackupPath,
   checkpointOpencodeDatabase,
+  deriveTargetBackupDirectory,
   deriveTargetDatabasePath,
   parseOpencodeDatabaseMaintenanceMode,
   pruneStaleOpencodeDatabaseBackups,
@@ -107,6 +109,24 @@ test("deriveTargetDatabasePath_whenRootHasTrailingSlash_stillProducesCleanPath",
   assert.equal(
     databasePath,
     path.join("/home/user/my-repo", TARGET_OPENCODE_DATABASE_RELATIVE_PATH),
+  );
+});
+
+test("deriveTargetBackupDirectory_whenTargetRootProvided_joinsRootWithRelativePath", () => {
+  const backupDirectory = deriveTargetBackupDirectory("/home/user/my-repo");
+
+  assert.equal(
+    backupDirectory,
+    path.join("/home/user/my-repo", TARGET_OPENCODE_BACKUP_RELATIVE_PATH),
+  );
+});
+
+test("deriveTargetBackupDirectory_whenRootHasTrailingSlash_stillProducesCleanPath", () => {
+  const backupDirectory = deriveTargetBackupDirectory("/home/user/my-repo/");
+
+  assert.equal(
+    backupDirectory,
+    path.join("/home/user/my-repo", TARGET_OPENCODE_BACKUP_RELATIVE_PATH),
   );
 });
 
