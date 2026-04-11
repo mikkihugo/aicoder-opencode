@@ -5,9 +5,8 @@ node_modules/
 .claude/worktrees/
 .opencode/node_modules/
 .opencode/state/
-targets/dr-repo/overlay/.opencode/xdg-/
-targets/dr-repo/overlay/.opencode/state/autopilot/run.lock
-targets/dr-repo/overlay/.opencode/state/autopilot/status.json
+targets/dr-repo/overlay/.opencode/xdg-*/
+targets/dr-repo/overlay/.opencode/state/
 
 # External repos cloned locally (not our code)
 .specify/

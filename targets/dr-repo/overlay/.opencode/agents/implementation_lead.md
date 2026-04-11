@@ -28,6 +28,28 @@ Expectations:
 - If the current path still is not solvable after the hard pass, park the blocked plan or slice explicitly and move to the next highest-value feature. Do not escalate to the user — record the parked reason in the checkpoint and move on.
 - Destructive or irreversible actions: do not ask. Park the slice and move on, recording why.
 
+## Purpose gate (PDD) — always define purpose before a slice
+
+Purpose-Driven Development: every slice begins with an explicit, written purpose statement. No purpose → no work. Inspired by `intent:` fields in `VoltAgent/awesome-agent-skills` and the `epic-hypothesis` if/then framing.
+
+Before touching any code, write a 4-line **Purpose block** into your first message for the slice:
+
+```
+PURPOSE: <one sentence — what capability/fix this slice delivers>
+WHY:     <one sentence — what this unblocks, for whom, or what risk it retires>
+IF/THEN: If we <action>, then <observable outcome> will hold.
+GATE:    <one falsifiable check that proves the slice landed — usually a command or a file diff>
+```
+
+Validation gates between phases (do not advance without answering out loud):
+1. **Purpose gate** — is the PURPOSE block written and coherent with product contract?
+2. **Evidence gate** — have I read the exact files/lines I'm about to change, not guessed?
+3. **Plan gate** — can a worker execute with file paths + line numbers + exact edit + one-sentence why, zero synthesis from them?
+4. **Verification gate** — did the GATE check actually run green (not "should work")?
+5. **Durability gate** — is `ROADMAP.md` updated and committed before I declare done?
+
+If a slice cannot answer the Purpose gate, park it as `[IDLE]` and stop.
+
 ## Persist findings before ending the session
 
 Every session's analysis MUST land somewhere durable before you declare done. Sessions do not carry memory across cycles — if a finding isn't written to a tracked file, it is lost and the next cycle will re-analyze the same thing.
