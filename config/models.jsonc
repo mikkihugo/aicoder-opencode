@@ -22,7 +22,7 @@
   "models": [
     {
       "id": "glm-5.1",
-      "description": "Heavy reasoning and architecture lane for high-value decisions.",
+      "description": "Heavy reasoning and architecture lane for high-value decisions when cheaper GLM lanes are not enough.",
       "capability_tier": "frontier",
       "cost_tier": "expensive",
       "billing_mode": "quota",
@@ -47,19 +47,26 @@
       ],
       "provider_order": [
         {
+          "provider": "zai-coding-plan",
+          "model": "zai-coding-plan/glm-5.1",
+          "priority": 1,
+          "status": "disfavored"
+        },
+        {
           "provider": "ollama-cloud",
           "model": "ollama-cloud/glm-5.1",
-          "priority": 1
+          "priority": 2
         },
         {
           "provider": "opencode-go",
           "model": "opencode-go/glm-5.1",
-          "priority": 2,
+          "priority": 3,
           "status": "disfavored"
         }
       ],
       "notes": [
-        "Treat GLM-5, GLM-5.1, and GLM-5-Turbo as the same expensive family for routing."
+        "Treat GLM-5, GLM-5.1, and GLM-5-Turbo as the same expensive family for routing.",
+        "Keep behind GLM-4.7 and GLM-4.7-Flash because GLM-5.1 costs materially more."
       ]
     },
     {
@@ -88,13 +95,19 @@
       ],
       "provider_order": [
         {
+          "provider": "zai-coding-plan",
+          "model": "zai-coding-plan/glm-4.7",
+          "priority": 1
+        },
+        {
           "provider": "ollama-cloud",
           "model": "ollama-cloud/glm-4.7",
-          "priority": 1
+          "priority": 2
         }
       ],
       "notes": [
-        "Preferred over flash variants for main execution."
+        "Preferred over GLM-5.1 for routine execution because the cost is much lower.",
+        "Use Z.AI first when available."
       ]
     },
     {
@@ -122,8 +135,8 @@
       ],
       "provider_order": [
         {
-          "provider": "z-ai",
-          "model": "glm-4.7-flash",
+          "provider": "zai-coding-plan",
+          "model": "zai-coding-plan/glm-4.7-flash",
           "priority": 1
         },
         {
@@ -160,8 +173,8 @@
       ],
       "provider_order": [
         {
-          "provider": "z-ai",
-          "model": "glm-4.5-air",
+          "provider": "zai-coding-plan",
+          "model": "zai-coding-plan/glm-4.5-air",
           "priority": 1
         }
       ],
@@ -194,13 +207,14 @@
       ],
       "provider_order": [
         {
-          "provider": "iflowcn",
-          "model": "iflowcn/qwen3-235b-a22b-thinking-2507",
+          "provider": "zai-coding-plan",
+          "model": "zai-coding-plan/glm-4.5-flash",
           "priority": 1
         }
       ],
       "notes": [
-        "Free large-model pressure lane when you want depth without spending frontier paid quota."
+        "Keep this ahead of paid GLM-5.1 paths for cheap parallel pressure.",
+        "Use Z.AI first while the flash tier is free."
       ]
     },
     {
@@ -225,6 +239,7 @@
       "default_roles": [
         "coder",
         "fixer",
+        "implementation_worker",
         "code_reviewer"
       ],
       "provider_order": [
@@ -336,6 +351,7 @@
         "broad_architecture"
       ],
       "default_roles": [
+        "implementation_worker",
         "code_reviewer",
         "alternate_coder"
       ],
@@ -353,6 +369,41 @@
       ],
       "notes": [
         "Use as a free code-focused alternate before burning expensive review lanes."
+      ]
+    },
+    {
+      "id": "qwen-3.5-coder",
+      "description": "OAuth-backed Qwen coding lane for implementation and review work.",
+      "capability_tier": "strong",
+      "cost_tier": "free",
+      "billing_mode": "subscription",
+      "latency_tier": "medium",
+      "concurrency": 1,
+      "quota_visibility": "manual",
+      "best_for": [
+        "normal_coding",
+        "code_review",
+        "implementation_pressure",
+        "test_fixes"
+      ],
+      "not_for": [
+        "vision",
+        "broad_architecture"
+      ],
+      "default_roles": [
+        "implementation_worker",
+        "code_reviewer",
+        "alternate_coder"
+      ],
+      "provider_order": [
+        {
+          "provider": "qwen",
+          "model": "qwen/qwen-3.5-coder",
+          "priority": 1
+        }
+      ],
+      "notes": [
+        "Use when Qwen OAuth is connected and you want a code-focused alternate without per-token billing."
       ]
     },
     {
@@ -481,23 +532,17 @@
       ],
       "provider_order": [
         {
-          "provider": "longcat-openai",
+          "provider": "longcat",
           "model": "LongCat-Flash-Chat",
           "priority": 1
-        },
-        {
-          "provider": "longcat-anthropic",
-          "model": "LongCat-Flash-Chat",
-          "priority": 2,
-          "status": "compatibility"
         }
       ],
       "notes": [
-        "OpenAI wire format first; Anthropic format only when client compatibility matters."
+        "OpenAI-compatible endpoint only."
       ]
     },
     {
-      "id": "longcat-flash-thinking-2601",
+      "id": "longcat-flash-thinking",
       "description": "Free LongCat deep-thinking lane.",
       "capability_tier": "strong",
       "cost_tier": "free",
@@ -520,19 +565,13 @@
       ],
       "provider_order": [
         {
-          "provider": "longcat-openai",
-          "model": "LongCat-Flash-Thinking-2601",
+          "provider": "longcat",
+          "model": "LongCat-Flash-Thinking",
           "priority": 1
-        },
-        {
-          "provider": "longcat-anthropic",
-          "model": "LongCat-Flash-Thinking-2601",
-          "priority": 2,
-          "status": "compatibility"
         }
       ],
       "notes": [
-        "Docs say both OpenAI and Anthropic formats support thinking models; prefer OpenAI format first."
+        "OpenAI-compatible endpoint only."
       ]
     },
     {
@@ -560,19 +599,14 @@
       ],
       "provider_order": [
         {
-          "provider": "longcat-openai",
+          "provider": "longcat",
           "model": "LongCat-Flash-Lite",
           "priority": 1
-        },
-        {
-          "provider": "longcat-anthropic",
-          "model": "LongCat-Flash-Lite",
-          "priority": 2,
-          "status": "compatibility"
         }
       ],
       "notes": [
-        "LongCat docs advertise a much larger daily free quota for Lite than the other models."
+        "LongCat docs advertise a much larger daily free quota for Lite than the other models.",
+        "OpenAI-compatible endpoint only."
       ]
     },
     {
