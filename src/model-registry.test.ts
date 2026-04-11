@@ -209,7 +209,6 @@ test("filterVisibleProviderRoutes_whenOpenRouterRoutesAreMixed_keepsOnlyAllowedO
   assert.deepEqual(visibleRoutes.map((route) => route.model), [
     "opencode/minimax-m2.5-free",
     "opencode-go/mimo-v2-pro",
-    "xai/grok-4.20-0309-reasoning",
     "minimax/MiniMax-M2.5",
     "minimax-coding-plan/MiniMax-M2.5",
     "openrouter/stepfun/step-3.5-flash:free",
