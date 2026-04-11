@@ -872,6 +872,55 @@ test("extractAssistantMessageCompletedPayload_whenTokensIsMissing_returnsUndefin
   assert.equal(result, undefined);
 });
 
+test("extractAssistantMessageCompletedPayload_whenTypeTagIsWrong_returnsUndefined", () => {
+  // M105 drift pin: the `type` field check is load-bearing, not
+  // redundant. A sabotage that drops the check would leak off-type
+  // events (keepalive frames, lifecycle events that share the
+  // properties shape) into `isZeroTokenQuotaSignal` and silently
+  // fire false quota penalties. The M85 pins all use the correct
+  // type tag so none of them exercise this path.
+  const result = extractAssistantMessageCompletedPayload({
+    type: "session.keepalive",
+    properties: { sessionID: "sess-1", tokens: { input: 0, output: 0 } },
+  });
+  assert.equal(result, undefined);
+});
+
+test("extractAssistantMessageCompletedPayload_whenSessionIDIsEmptyString_returnsUndefined", () => {
+  // M105 drift pin: empty-string sessionID is rejected even though
+  // `typeof "" === "string"`. The `.length === 0` clause is the only
+  // guard preventing empty keys from reaching
+  // `readAndClearSessionHangState`'s Map<string, ...> lookups, where
+  // an empty string would silently collide across every session map.
+  // The M85 "missing sessionID" pin passes `undefined` and never
+  // reaches the length clause.
+  const result = extractAssistantMessageCompletedPayload({
+    type: "assistant.message.completed",
+    properties: { sessionID: "", tokens: { input: 0, output: 0 } },
+  });
+  assert.equal(result, undefined);
+});
+
+test("extractAssistantMessageCompletedPayload_whenShapeIsValid_returnsTokensByStrictReferenceNotCopy", () => {
+  // M105 drift pin: the returned `tokens` must be the exact input
+  // object by reference. Downstream consumers (notably
+  // `isZeroTokenQuotaSignal`) walk nested values, and a future
+  // defensive `{ ...tokens }` wrap would break reference-stability
+  // callers rely on for diffing/caching. The M85 deepEqual pin
+  // cannot distinguish identity from structural equality.
+  const tokens = { input: 0, output: 0, cache: { read: 0, write: 0 } };
+  const result = extractAssistantMessageCompletedPayload({
+    type: "assistant.message.completed",
+    properties: { sessionID: "sess-1", tokens },
+  });
+  assert.ok(result, "result must be defined for a well-formed payload");
+  assert.strictEqual(
+    result.tokens,
+    tokens,
+    "tokens must be returned by strict reference, not as a defensive copy",
+  );
+});
+
 test("extractSessionErrorApiErrorContext_whenShapeIsValid_returnsNarrowedTuple", () => {
   // M88 pin: a well-formed `session.error` envelope with APIError,
   // sessionID, statusCode, and a mixed-case message must return the

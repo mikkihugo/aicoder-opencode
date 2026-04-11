@@ -2140,6 +2140,59 @@ export function extractSessionErrorApiErrorContext(
  * M84 used on `extractSessionErrorExplicitModel`. The helper is kept
  * minimal so the `?? {}` vs skip-pass policy stays at the call site.
  *
+ * ## Drift surfaces (M105 PDD)
+ *
+ * The three pre-existing M85 pins (valid shape, missing sessionID,
+ * missing tokens) each target ONE narrowing step in isolation so a
+ * sabotage that drops a single check fires exactly one pin — a clean
+ * per-step partition. But the narrowing body encodes three further
+ * orthogonal invariants that the M85 pins do not exercise, each of
+ * which is a silent-drift vector the `assistant.message.completed`
+ * hook depends on:
+ *
+ * 1. **The `type` tag check is LOAD-BEARING, not redundant.** The
+ *    opencode event bus dispatches by event name and every handler is
+ *    registered under `"assistant.message.completed"`, so the `type`
+ *    check *looks* redundant at the dispatch site. It is not: the
+ *    opencode runtime also forwards a consolidated event stream
+ *    through `assistant.message.completed` handlers for out-of-band
+ *    lifecycle events (partial flushes, provider-side keepalive
+ *    frames) whose `properties` happens to include a `sessionID` and
+ *    may or may not include a `tokens` shape. A future simplification
+ *    that drops the `type` check "because the event hook already
+ *    filters" would pass through those off-type events into
+ *    `isZeroTokenQuotaSignal`, which would then fire zero-token
+ *    quota penalties for every keepalive — a silent cascade that
+ *    quarantines healthy providers. All three M85 pins use the
+ *    correct `type` tag so none of them exercise this drift. Pin:
+ *    wrong `type` with otherwise-valid shape returns undefined.
+ *
+ * 2. **Empty-string sessionID is rejected even though it is a
+ *    string.** The `typeof propertiesObj.sessionID !== "string"` check
+ *    is followed by an AND clause `|| propertiesObj.sessionID.length
+ *    === 0`. The M85 "missing sessionID" pin passes `undefined`,
+ *    which fails at `typeof !== "string"` and never reaches the
+ *    length clause. A refactor that "simplified" the check to just
+ *    `typeof === "string"` would pass empty-string sessionIDs through
+ *    to `readAndClearSessionHangState`, which is a `Map<string, ...>`
+ *    keyed lookup — an empty string key silently collides with any
+ *    other empty-string binding across every session map in the
+ *    plugin. Pin: `sessionID: ""` with valid tokens returns undefined.
+ *
+ * 3. **The returned `tokens` must be the exact input reference.** The
+ *    hook pipes `tokens` directly into `isZeroTokenQuotaSignal`, which
+ *    reads nested objects via `Object.values(value as Record<string,
+ *    unknown>)`. If this helper spread `{ ...tokens }` for "safety",
+ *    the top-level numeric counters would be preserved but the nested
+ *    cache object reference would still be aliased — a half-copy that
+ *    looks identical for shallow reads but could mask a future
+ *    freeze / clone / normalization step downstream. More importantly,
+ *    reference stability is the contract downstream consumers rely on
+ *    when they capture `tokens` for later comparison or diffing.
+ *    M85's deepEqual pin cannot distinguish identity from equality.
+ *    Pin: strict `===` identity check between the returned `tokens`
+ *    and the input object.
+ *
  * Args:
  *   event: The opencode event value — type `unknown` because the host
  *     does not currently export a stable TypeScript shape for
