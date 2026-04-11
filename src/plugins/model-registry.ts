@@ -562,6 +562,103 @@ export function buildRouteHealthEntry(
   };
 }
 
+// HTTP status codes that are authoritative signals for specific penalty
+// classes. When the upstream returns one of these, the status code wins
+// over any keyword heuristic — a 402 is a 402 no matter what text the
+// provider puts in the body.
+const QUOTA_HTTP_STATUS_CODE = 429;
+const NO_CREDIT_HTTP_STATUS_CODE = 402;
+const KEY_DEAD_HTTP_STATUS_CODES: ReadonlySet<number> = new Set([401, 403]);
+
+// Lowercased substring sets for the keyword-fallback path (used only
+// when statusCode is 0 or unrecognized — e.g. network errors, proxies
+// that strip status, providers that return 500 with a structured body).
+// Kept narrow on purpose; broadening them produces false positives that
+// quarantine healthy providers.
+const QUOTA_KEYWORDS: readonly string[] = [
+  "quota",
+  "rate limit",
+  "rate_limit",
+  "too many requests",
+];
+const KEY_DEAD_KEYWORDS: readonly string[] = [
+  "user not found",
+  "invalid api key",
+  "invalid key",
+  "unauthorized",
+  "authentication",
+];
+const NO_CREDIT_KEYWORDS: readonly string[] = [
+  "insufficient credits",
+  "no credit",
+  "payment",
+  "billing",
+];
+
+export type ProviderApiErrorClass =
+  | "quota"
+  | "no_credit"
+  | "key_dead"
+  | "unclassified";
+
+/**
+ * Classify a provider API error into its penalty class, giving HTTP
+ * status codes authoritative priority over message-keyword heuristics.
+ *
+ * Previously the cascade was four parallel `(statusCode === X || KEYWORDS.some(...))`
+ * checks evaluated top-down. Because of the `||`, a keyword match in the
+ * EARLIER bucket pre-empted an authoritative status code in a LATER bucket:
+ *
+ *   - HTTP 402 + message `"rate limit exceeded: insufficient credits"` →
+ *     the quota bucket matched `"rate limit"`, returned `quota` (1h),
+ *     the provider was retried after an hour, failed again with the
+ *     same 402, and the cycle repeated. Correct class: `no_credit` (2h).
+ *   - HTTP 401 + message `"rate limit on unauthenticated requests"` →
+ *     same pattern. Returned `quota` (1h) instead of `key_dead` (2h).
+ *     A dead API key was silently retried every hour instead of being
+ *     quarantined for the full key_dead window.
+ *
+ * Correct priority:
+ *   1. Recognized HTTP status code (authoritative). 429 → quota;
+ *      402 → no_credit; 401/403 → key_dead.
+ *   2. Only when statusCode is 0 or unrecognized, fall back to message
+ *      keywords in the same quota → no_credit → key_dead order.
+ *
+ * The helper is pure so it is unit-testable in isolation without any
+ * live health maps or opencode runtime event payloads.
+ *
+ * Args:
+ *   statusCode: The HTTP status code pulled from the opencode APIError
+ *     payload, or 0 when absent / stripped by a proxy.
+ *   lowerMessage: The error message, already lowercased at the call site
+ *     (matches the existing convention for case-insensitive contains).
+ *
+ * Returns:
+ *   The penalty class, or `"unclassified"` when neither the status nor
+ *   any keyword identifies the error (e.g. a bare 500 with no body).
+ *   Callers should skip applying any penalty on `"unclassified"` so
+ *   transient upstream errors do not quarantine healthy providers.
+ */
+export function classifyProviderApiError(
+  statusCode: number,
+  lowerMessage: string,
+): ProviderApiErrorClass {
+  // Status codes win over keywords. If the upstream gave us an authoritative
+  // signal, trust it and ignore whatever narrative the message contains.
+  if (statusCode === QUOTA_HTTP_STATUS_CODE) return "quota";
+  if (statusCode === NO_CREDIT_HTTP_STATUS_CODE) return "no_credit";
+  if (KEY_DEAD_HTTP_STATUS_CODES.has(statusCode)) return "key_dead";
+
+  // Keyword fallback — only reached when no recognized status was present.
+  // Order here is priority, not short-circuit-precedence, because the
+  // keyword sets are disjoint by design.
+  if (QUOTA_KEYWORDS.some((kw) => lowerMessage.includes(kw))) return "quota";
+  if (NO_CREDIT_KEYWORDS.some((kw) => lowerMessage.includes(kw))) return "no_credit";
+  if (KEY_DEAD_KEYWORDS.some((kw) => lowerMessage.includes(kw))) return "key_dead";
+
+  return "unclassified";
+}
+
 export function clearSessionHangState(
   sessionID: string,
   sessionStartTimeMap: Map<string, number>,
@@ -1447,12 +1544,6 @@ export const ModelRegistryPlugin: Plugin = async () => {
   const QUOTA_BACKOFF_DURATION_MS = 60 * 60 * 1000;        // 1h — recovers automatically
   const KEY_DEAD_DURATION_MS = 2 * 60 * 60 * 1000;         // 2h — may be transient token refresh
   const NO_CREDIT_DURATION_MS = 2 * 60 * 60 * 1000;        // 2h — may be replenished
-  const QUOTA_HTTP_STATUS_CODE = 429;
-  const KEY_DEAD_HTTP_STATUS_CODES = new Set([401, 403]);
-  const NO_CREDIT_HTTP_STATUS_CODE = 402;
-  const QUOTA_KEYWORDS = ["quota", "rate limit", "rate_limit", "too many requests"];
-  const KEY_DEAD_KEYWORDS = ["user not found", "invalid api key", "invalid key", "unauthorized", "authentication"];
-  const NO_CREDIT_KEYWORDS = ["insufficient credits", "no credit", "payment", "billing"];
 
   function recordProviderHealth(
     providerID: string,
@@ -1697,32 +1788,21 @@ export const ModelRegistryPlugin: Plugin = async () => {
           return;
         }
 
-        // 429 or quota keywords → quota backoff (1h, auto-recovers).
-        const isQuota =
-          statusCode === QUOTA_HTTP_STATUS_CODE ||
-          QUOTA_KEYWORDS.some((kw) => message.includes(kw));
-        if (isQuota) {
+        // Authoritative-priority classification: status codes win over
+        // keyword heuristics. See `classifyProviderApiError` docstring for
+        // the bugs the previous `||` cascade produced (402+rate-limit and
+        // 401+rate-limit both misclassified as quota, dead keys retried
+        // every hour forever).
+        const errorClass = classifyProviderApiError(statusCode, message);
+        if (errorClass === "quota") {
           recordProviderHealth(providerID, "quota", QUOTA_BACKOFF_DURATION_MS);
-          return;
-        }
-
-        // 402 or no-credit keywords → no credit (2h).
-        const isNoCredit =
-          statusCode === NO_CREDIT_HTTP_STATUS_CODE ||
-          NO_CREDIT_KEYWORDS.some((kw) => message.includes(kw));
-        if (isNoCredit) {
+        } else if (errorClass === "no_credit") {
           recordProviderHealth(providerID, "no_credit", NO_CREDIT_DURATION_MS);
-          return;
-        }
-
-        // 401/403 or key-dead keywords → key dead (2h, may be transient token refresh).
-        const isKeyDead =
-          KEY_DEAD_HTTP_STATUS_CODES.has(statusCode) ||
-          KEY_DEAD_KEYWORDS.some((kw) => message.includes(kw));
-        if (isKeyDead) {
+        } else if (errorClass === "key_dead") {
           recordProviderHealth(providerID, "key_dead", KEY_DEAD_DURATION_MS);
-          return;
         }
+        // "unclassified" → no penalty. Transient upstream errors must not
+        // quarantine healthy providers.
         return;
       }
 

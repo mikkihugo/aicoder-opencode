@@ -9,6 +9,7 @@ import {
   buildAvailableModelsSystemPrompt,
   buildProviderHealthSystemPrompt,
   buildRouteHealthEntry,
+  classifyProviderApiError,
   clearSessionHangState,
   composeRouteKey,
   computeProviderHealthUpdate,
@@ -1466,4 +1467,63 @@ test("buildRouteHealthEntry_whenExistingEntryHasRetryCount_incrementsIt", () => 
   );
 
   assert.equal(health.retryCount, 5, "repeat failures must remain observable");
+});
+
+test("classifyProviderApiError_when402WithRateLimitKeyword_returnsNoCreditNotQuota", () => {
+  // Regression: the old `||` cascade matched "rate limit" in the earlier
+  // quota bucket and returned "quota" (1h), pre-empting the authoritative
+  // 402 (no_credit, 2h). The provider was retried an hour early, failed
+  // with the same 402, and burned compute on a guaranteed-fail route.
+  const result = classifyProviderApiError(402, "rate limit exceeded: insufficient credits");
+  assert.equal(result, "no_credit");
+});
+
+test("classifyProviderApiError_when401WithRateLimitKeyword_returnsKeyDeadNotQuota", () => {
+  // Regression: a dead key returning 401 with "rate limit" in the body
+  // (e.g. "rate limit on unauthenticated requests") used to be classified
+  // as quota (1h). The dead key was retried every hour forever instead
+  // of being quarantined for the full key_dead window.
+  const result = classifyProviderApiError(401, "rate limit on unauthenticated requests: token invalid");
+  assert.equal(result, "key_dead");
+});
+
+test("classifyProviderApiError_when403WithQuotaKeyword_returnsKeyDeadNotQuota", () => {
+  // Same priority bug for the 403 branch of key_dead.
+  const result = classifyProviderApiError(403, "quota exceeded for this api key");
+  assert.equal(result, "key_dead");
+});
+
+test("classifyProviderApiError_when429WithNoCreditKeyword_returnsQuota", () => {
+  // Symmetric check: authoritative 429 dominates even when the message
+  // mentions billing / payment. Pins that the priority flows the other
+  // direction too.
+  const result = classifyProviderApiError(429, "rate limited: upgrade your billing plan for higher throughput");
+  assert.equal(result, "quota");
+});
+
+test("classifyProviderApiError_whenStatusIsZeroAndQuotaKeyword_returnsQuotaFromFallback", () => {
+  // Keyword fallback path: status 0 (e.g. proxy stripped it) falls
+  // through to keyword checks in priority order. quota > no_credit > key_dead.
+  const result = classifyProviderApiError(0, "provider reported quota exhaustion");
+  assert.equal(result, "quota");
+});
+
+test("classifyProviderApiError_whenStatusIsZeroAndNoCreditKeyword_returnsNoCredit", () => {
+  const result = classifyProviderApiError(0, "insufficient credits on this account");
+  assert.equal(result, "no_credit");
+});
+
+test("classifyProviderApiError_whenStatusIsZeroAndUnrelatedMessage_returnsUnclassified", () => {
+  // Critical invariant: random transient errors ("connection reset",
+  // bare 500s with no body) must NOT quarantine a healthy provider.
+  // Callers skip penalty application on "unclassified".
+  const result = classifyProviderApiError(0, "upstream connection reset by peer");
+  assert.equal(result, "unclassified");
+});
+
+test("classifyProviderApiError_whenStatusIs500AndNoKeywords_returnsUnclassified", () => {
+  // 500 is explicitly not recognized — a bare upstream error must not
+  // trigger a provider penalty.
+  const result = classifyProviderApiError(500, "");
+  assert.equal(result, "unclassified");
 });

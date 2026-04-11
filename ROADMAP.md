@@ -172,6 +172,27 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M39: `session.error` classification cascade used `||` between status and keywords, letting an earlier-bucket keyword pre-empt a later-bucket authoritative status code `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: the `session.error` event handler classified provider errors with three parallel `(statusCode === X) || (KEYWORDS.some(...))` checks evaluated top-down in the order `quota → no_credit → key_dead`. Because `||` short-circuits on the first truthy branch, a **keyword match in an earlier bucket pre-empted an authoritative status code in a later bucket**. Two concrete regressions:
+  - **HTTP 402 + `"rate limit exceeded: insufficient credits"`** → matched `"rate limit"` in the quota bucket, returned `quota` (1h), the provider was retried an hour early, the upstream returned the same 402, the loop repeated. Correct class: `no_credit` (2h).
+  - **HTTP 401 + `"rate limit on unauthenticated requests"`** → same pattern. Returned `quota` (1h) instead of `key_dead` (2h). A dead API key was silently re-tried every hour forever because it never got the full key_dead quarantine. openrouter's 401 response format was a real victim here — several of its error paths pack status-plus-humanized-narrative together, and the narrative often mentions rate limiting.
+- **Reachability**: production-reachable. Any provider that returns 401/402/403 with a body containing any of the four quota substrings (`"quota"`, `"rate limit"`, `"rate_limit"`, `"too many requests"`) — which are common in humanized error messages — was misclassified. The quota keywords are deliberately narrow, but the symmetric bug across all three status buckets makes it broad in practice.
+- **Fix**: extracted pure exported `classifyProviderApiError(statusCode, lowerMessage)` (model-registry.ts:584) with explicit priority: (1) recognized HTTP status code wins authoritatively — `429 → quota`, `402 → no_credit`, `401/403 → key_dead`; (2) only fall back to keyword heuristics when no status is recognized; (3) return `"unclassified"` for truly ambiguous errors so the caller skips the penalty entirely. Hoisted `QUOTA_KEYWORDS`, `NO_CREDIT_KEYWORDS`, `KEY_DEAD_KEYWORDS`, `QUOTA_HTTP_STATUS_CODE`, `NO_CREDIT_HTTP_STATUS_CODE`, `KEY_DEAD_HTTP_STATUS_CODES` from the plugin closure to module scope so the pure helper can reference them. Rewired the `session.error` handler to call the classifier once and dispatch via a cheap `if/else if` instead of three redundant checks.
+- **Tests**: eight new tests in `model-registry.test.ts`:
+  - `classifyProviderApiError_when402WithRateLimitKeyword_returnsNoCreditNotQuota` — headline regression.
+  - `classifyProviderApiError_when401WithRateLimitKeyword_returnsKeyDeadNotQuota` — second regression.
+  - `classifyProviderApiError_when403WithQuotaKeyword_returnsKeyDeadNotQuota` — symmetric 403 branch.
+  - `classifyProviderApiError_when429WithNoCreditKeyword_returnsQuota` — pins that authoritative 429 dominates in the other direction too (billing-plan message shouldn't flip to no_credit).
+  - `classifyProviderApiError_whenStatusIsZeroAndQuotaKeyword_returnsQuotaFromFallback` — keyword fallback path works when status is absent (proxy stripped).
+  - `classifyProviderApiError_whenStatusIsZeroAndNoCreditKeyword_returnsNoCredit` — same for no_credit.
+  - `classifyProviderApiError_whenStatusIsZeroAndUnrelatedMessage_returnsUnclassified` — critical invariant: random transient errors ("connection reset", bare 500s) must NOT quarantine a healthy provider.
+  - `classifyProviderApiError_whenStatusIs500AndNoKeywords_returnsUnclassified` — explicit 500 non-recognition.
+- **Verification**: verified-on-HEAD by stubbing the helper body to the old `||` cascade. Ran the test file: exactly **3 expected failures** (402, 401, and 403 with pre-empting keyword) and **5 passes** (429 case, fallback paths, unclassified paths — all uninvolved in the pre-emption bug). Restored the fix. 175/175 green (167 + 8 new). `npm run build` clean.
+- **Files**: `src/plugins/model-registry.ts` (hoisted constants, new `classifyProviderApiError` helper, rewired session.error handler), `src/plugins/model-registry.test.ts` (import + 8 new tests).
+- **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
+
 ### M38: the four `modelRouteHealthMap` write sites built naive `${providerID}/${modelID}` keys, producing unlookupable double-prefixed entries for already-composite model ids `✅ COMPLETED`
 
 Completion Notes (2026-04-11):
