@@ -3845,10 +3845,56 @@ const MEDIUM_COMPLEXITY_KEYWORD_STEMS = [
   "improve", "enhance", "optimize", "integrate", "connect",
 ] as const;
 
-function buildLeadingBoundaryRegex(stems: readonly string[]): RegExp {
-  // Leading `\b` only, not trailing, so inflections (updates, refactoring,
-  // completed, systemic) still match. A trailing boundary would force an
-  // exact-word match and silently miss common variants.
+/**
+ * Compile a leading-word-boundary alternation regex from a list of keyword
+ * stems — the single source of truth for the three complexity-classification
+ * regexes (`LARGE_COMPLEXITY_REGEX`, `SMALL_COMPLEXITY_REGEX`,
+ * `MEDIUM_COMPLEXITY_REGEX`).
+ *
+ * Three independent drift surfaces live inside this builder. Each has a
+ * concrete failure history behind it, so the helper body must preserve
+ * every one of them in lockstep:
+ *
+ *  1. **Leading word boundary only.** The pattern is `\b(?:<alt>)` — a
+ *     leading `\b` with NO trailing boundary. This is deliberate: stems
+ *     like `"refactor"` must match inflections `"refactoring"` /
+ *     `"refactored"` / `"refactors"`, stems like `"update"` must match
+ *     `"updates"` / `"updated"`, and stems like `"system"` must match
+ *     `"systems"` / `"systemic"`. A refactor that adds a trailing `\b`
+ *     produces exact-word matches that silently drop every inflection —
+ *     the complexity classifier then under-tiers a "refactoring the
+ *     architecture" prompt to `medium` because `refactor` no longer
+ *     matches `refactoring`, and the agent gets a standard-tier model
+ *     on a frontier-tier task.
+ *  2. **Regex metacharacter escape.** The stem list is user-data from
+ *     the module-level constants, which may legitimately contain `.` /
+ *     `+` / `(` / `)` / `?` / etc. (e.g. a future stem like `"c++"` or
+ *     `"node.js"`). The `.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")` step
+ *     escapes every regex metachar in each stem before joining them
+ *     with `|`, so the stem is matched literally. A refactor that drops
+ *     the escape silently turns `.` into "any character" and matches
+ *     nonsense — a stem `"node.js"` would match `"nodeXjs"` or
+ *     `"node js"`, and the classifier would fire on prompts that
+ *     contain a completely unrelated substring.
+ *  3. **Case-insensitive flag.** The `"i"` flag on `new RegExp(...)` is
+ *     what lets the classifier match `"REFACTOR THIS"` against a lower-
+ *     case stem `"refactor"`. A refactor that drops the flag produces a
+ *     case-sensitive regex that misses every capitalized prompt — the
+ *     classifier silently under-tiers any prompt the user types in
+ *     mixed case, and the bug is especially pernicious because the
+ *     unit tests (which all use lowercase) still pass while production
+ *     traffic (human-typed prompts with leading caps) silently mis-routes.
+ *
+ * Args:
+ *   stems: Keyword stems to alternate. Each stem is escaped for regex
+ *     metachars and joined with `|` inside a non-capturing group.
+ *
+ * Returns:
+ *   A compiled `RegExp` with the leading boundary + case-insensitive
+ *   flag; feed it `prompt.toLowerCase()` (or rely on the `i` flag for
+ *   mixed-case input).
+ */
+export function buildLeadingBoundaryRegex(stems: readonly string[]): RegExp {
   const alternation = stems.map((stem) => stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
   return new RegExp(`\\b(?:${alternation})`, "i");
 }

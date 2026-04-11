@@ -9,6 +9,7 @@ import type { ModelRouteHealth, ProviderHealth } from "./model-registry.js";
 import {
   buildAgentVisibleBackoffStatus,
   buildAvailableModelsSystemPrompt,
+  buildLeadingBoundaryRegex,
   buildProviderHealthSummaryForTool,
   buildProviderHealthSystemPrompt,
   buildRoleRecommendationRoutes,
@@ -6014,6 +6015,40 @@ test("filterEnabledEntriesByOptionalRole_whenRoleIsNull_passesAllEnabledEntriesR
 // `.includes(role)` check (always-pass) would lift the architect entry
 // into the coding result set. Pin A also uses concrete role but its
 // assertion partitions on disabled-vs-enabled; pin B uses null role.
+// M94 pin A — leading-boundary-only semantics: the regex must match
+// inflections like "refactoring" from a stem "refactor". A refactor
+// that adds a trailing `\b` turns this into exact-word match and
+// silently fails. Uses lowercase + single-word stem so neither the
+// escape pin nor the case-fold pin can fire here.
+test("buildLeadingBoundaryRegex_whenStemIsRefactor_matchesInflectionRefactoring", () => {
+  const regex = buildLeadingBoundaryRegex(["refactor"]);
+
+  assert.equal(regex.test("refactoring this module"), true);
+});
+
+// M94 pin B — metacharacter escape: a stem containing `.` must only
+// match that literal `.`, not any character. Uses a lowercase stem so
+// pin C (case-fold) cannot fire; uses a two-assertion pair so any
+// drift in the escape behavior (dropped entirely, or narrowed to the
+// wrong charset) flips the second assertion without touching pin A.
+test("buildLeadingBoundaryRegex_whenStemContainsDot_escapesDotAsLiteral", () => {
+  const regex = buildLeadingBoundaryRegex(["node.js"]);
+
+  assert.equal(regex.test("node.js runtime"), true);
+  assert.equal(regex.test("nodeXjs runtime"), false);
+});
+
+// M94 pin C — case-insensitive flag: a lowercase stem must match an
+// uppercase prompt. A refactor that drops the `"i"` flag silently
+// under-tiers every mixed-case prompt. Uses a no-metachar single-word
+// stem so pin B cannot fire; uses the full capitalized form (no
+// inflection) so pin A cannot fire.
+test("buildLeadingBoundaryRegex_whenStemIsLowerCaseButPromptIsUpperCase_matches", () => {
+  const regex = buildLeadingBoundaryRegex(["refactor"]);
+
+  assert.equal(regex.test("REFACTOR"), true);
+});
+
 test("filterEnabledEntriesByOptionalRole_whenRoleIsCoding_excludesArchitectEntry", () => {
   const codingEntry = buildModelRegistryEntry("m-coding", ["coding"], "standard", [
     { provider: "opencode", model: "opencode/free-e", priority: 1 },
