@@ -16,6 +16,10 @@ import {
   runModelRegistryEditor,
 } from "./cli/model-commands.js";
 import {
+  quoteShellArgument,
+  renderShellCommand,
+} from "./cli/arg-parser.js";
+import {
   backupOpencodeDatabase,
   checkpointOpencodeDatabase,
   deriveTargetDatabasePath,
@@ -107,12 +111,7 @@ function hashText(inputText: string): string {
   return createHash("sha256").update(inputText).digest("hex");
 }
 
-function quoteShellArgument(argumentValue: string): string {
-  if (argumentValue === "") {
-    return "''";
-  }
-  return `'${argumentValue.replaceAll("'", `'\"'\"'`)}'`;
-}
+
 
 async function listTargetNames(): Promise<string[]> {
   const directoryEntries = await readdir(TARGET_CONFIGURATION_DIRECTORY, {
@@ -494,10 +493,6 @@ async function buildProductLaunchCommand(
     launcherExecutablePath,
     launcherArguments,
   );
-}
-
-function renderShellCommand(commandParts: string[]): string {
-  return commandParts.map((commandPart) => quoteShellArgument(commandPart)).join(" ");
 }
 
 async function runCommand(commandParts: string[]): Promise<number> {

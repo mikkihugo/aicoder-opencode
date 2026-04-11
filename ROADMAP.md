@@ -66,11 +66,14 @@ Completion Notes (2026-04-11):
 - Created ROADMAP.md with maintenance backlog and status tracking
 - Established maintenance iteration workflow for future cycles
 
-### M3: CLI unit tests for `cli.ts` main() `⬜ PENDING`
+### M3: CLI unit tests for `cli.ts` main() `✅ COMPLETED`
 
-- `src/cli.ts` has 746 lines but no unit tests for the CLI handler
-- The `main()` function covers target loading, validation, launch, doom-loop, model registry, and DB maintenance
-- Test at least: argument parsing, target resolution, error paths
+Completion Notes (2026-04-11):
+- Extracted pure argument parsing from cli.ts into `src/cli/arg-parser.ts` (10 exported functions)
+- Created `src/cli.test.ts` with 51 tests: 38 unit tests (argument parsing, shell quoting, threshold validation, DB maintenance arg parsing, command routing) + 13 integration tests (spawning CLI as child process)
+- Removed duplicate `quoteShellArgument` and `renderShellCommand` from cli.ts; now imports from `cli/arg-parser.ts`
+- Type check clean, all 110 tests pass (51 new + 59 existing)
+- Key test coverage: argument parsing edge cases, missing target names, invalid thresholds, --target flag handling, error exit codes, all 3 target validations, DB maintenance with/without --target
 
 ### M4: Batch database maintenance across all targets `⬜ PENDING`
 
