@@ -7856,6 +7856,100 @@ test("filterEnabledEntriesByOptionalRole_whenRoleIsCoding_excludesArchitectEntry
   assert.equal(result[0]?.id, "m-coding");
 });
 
+// M128 pin A — return-value identity: even on the "everything passes"
+// fast-path (all entries enabled, role is null so the role predicate
+// is skipped) the helper MUST return a fresh array, not the input
+// reference. Pins against a short-circuit refactor like
+// `if (role === null && all-enabled) return modelRegistryEntries;`
+// that would silently hand the shared registry reference to callers
+// who then do `.sort()` in place. Pre-M128 pins all force at least
+// one drop so none exercises this fast-path shape.
+test("filterEnabledEntriesByOptionalRole_whenAllEntriesPassWithNullRole_returnsFreshArrayNotInputReference", () => {
+  const inputEntries = [
+    buildModelRegistryEntry("m-1", ["coding"], "standard", [
+      { provider: "opencode", model: "opencode/free-a", priority: 1 },
+    ]),
+    buildModelRegistryEntry("m-2", ["architect"], "strong", [
+      { provider: "opencode", model: "opencode/free-b", priority: 1 },
+    ]),
+  ];
+
+  const result = filterEnabledEntriesByOptionalRole(inputEntries, null);
+
+  assert.equal(result.length, 2);
+  assert.notStrictEqual(
+    result,
+    inputEntries,
+    "expected a fresh array, got the input reference back",
+  );
+});
+
+// M128 pin B — input-order preservation: survivors come out in the
+// same order they were authored in the input. Uses three entries
+// authored in a non-alphabetical sequence [z-entry, a-entry, m-entry]
+// so any post-filter `.sort()` by id silently reorders them to [a,
+// m, z] and fails this pin. Pin A still passes (sort creates a new
+// array), pin C still passes (sort doesn't touch the input). All
+// three entries are enabled and match the role so the three M95
+// pre-existing pins are unaffected by this fixture.
+test("filterEnabledEntriesByOptionalRole_whenMultipleSurvivors_preservesAuthorInputOrder", () => {
+  const zEntry = buildModelRegistryEntry("z-entry", ["coding"], "standard", [
+    { provider: "opencode", model: "opencode/free-z", priority: 1 },
+  ]);
+  const aEntry = buildModelRegistryEntry("a-entry", ["coding"], "standard", [
+    { provider: "opencode", model: "opencode/free-a", priority: 1 },
+  ]);
+  const mEntry = buildModelRegistryEntry("m-entry", ["coding"], "standard", [
+    { provider: "opencode", model: "opencode/free-m", priority: 1 },
+  ]);
+
+  const result = filterEnabledEntriesByOptionalRole(
+    [zEntry, aEntry, mEntry],
+    "coding",
+  );
+
+  assert.deepEqual(
+    result.map((entry) => entry.id),
+    ["z-entry", "a-entry", "m-entry"],
+  );
+});
+
+// M128 pin C — input non-mutation: the helper must not touch the
+// input array. Snapshots the input length and its id sequence
+// BEFORE the call, asserts both are unchanged AFTER. Pins against
+// an in-place refactor that rewrites the input storage via
+// `.splice()` or `.length = n`. Pin A passes (the refactor can
+// still build and return a fresh array alongside the mutation),
+// pin B passes (survivor order in the returned array can be
+// preserved independently of input mutation). The input mix
+// includes one disabled entry so the filter has a clear "drop"
+// to fire — any in-place removal strategy is observable.
+test("filterEnabledEntriesByOptionalRole_whenCalled_doesNotMutateInputArray", () => {
+  const enabled1 = buildModelRegistryEntry("keep-1", ["coding"], "standard", [
+    { provider: "opencode", model: "opencode/free-k1", priority: 1 },
+  ]);
+  const disabled: ModelRegistryEntry = {
+    ...buildModelRegistryEntry("drop-1", ["coding"], "standard", [
+      { provider: "opencode", model: "opencode/free-d1", priority: 1 },
+    ]),
+    enabled: false,
+  };
+  const enabled2 = buildModelRegistryEntry("keep-2", ["coding"], "standard", [
+    { provider: "opencode", model: "opencode/free-k2", priority: 1 },
+  ]);
+  const inputEntries = [enabled1, disabled, enabled2];
+  const inputLengthBefore = inputEntries.length;
+  const inputIdsBefore = inputEntries.map((entry) => entry.id);
+
+  filterEnabledEntriesByOptionalRole(inputEntries, "coding");
+
+  assert.equal(inputEntries.length, inputLengthBefore);
+  assert.deepEqual(
+    inputEntries.map((entry) => entry.id),
+    inputIdsBefore,
+  );
+});
+
 // M95 pin A — enabled gate: a disabled registry entry must NOT
 // contribute to the visible set. Uses UNPREFIXED raw model ids
 // (LongCat-style) so pin C's strip is a no-op here and a strip-off

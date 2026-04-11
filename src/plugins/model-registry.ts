@@ -6469,6 +6469,70 @@ async function initializeProviderHealthState(
  *
  * Returns:
  *   A new array of entries satisfying both predicates, in input order.
+ *
+ * ## Drift surfaces (M128 PDD)
+ *
+ * Three pre-existing M95 pins cover the three filter-predicate surfaces
+ * (enabled gate, null-role passthrough, exact role-membership). Every
+ * one of those pins asserts *which entries survive* the filter and
+ * none of them asserts anything about the SHAPE of the return value —
+ * its identity, its ordering, or its non-mutation of the input. Three
+ * orthogonal return-shape invariants live here that a plausible
+ * optimization refactor could erode silently beneath the existing
+ * coverage:
+ *
+ *   1. **Return value is a fresh array, not the input reference.** The
+ *      docstring above promises: "callers can safely chain `.sort()` /
+ *      `.filter()` without mutating the input array." A "fast-path"
+ *      refactor (`if (every entry is enabled && role is null) return
+ *      modelRegistryEntries;`) would silently return the input reference
+ *      when nothing needs filtering — the three existing pins all force
+ *      something to be dropped so they never exercise the identity-
+ *      preservation path. A downstream caller that then does
+ *      `result.sort((a, b) => ...)` sorts the registry entries array in
+ *      place, and every other consumer of the shared registry then sees
+ *      a reordered `provider_order`-bearing array — capability-tier
+ *      selection, role-recommendation rendering, and the registry-entry
+ *      health report all use entry order as a stable author-intent
+ *      hint. The pin exercises the "all entries pass, role is null"
+ *      fast-path and asserts strict identity inequality, so any such
+ *      short-circuit fires this pin alone.
+ *
+ *   2. **Input order is preserved across survivors.** The docstring
+ *      promises "in input order", because every downstream ranking
+ *      (preferred-models, recommendation routes, capability-tier
+ *      walks) treats position in `registry.models` as the canonical
+ *      author-intent tiebreaker. A refactor that slips a `.sort()`
+ *      step in (even one as innocuous as "sort by id so the test
+ *      snapshot stabilizes") silently reorders the survivors and the
+ *      downstream ranking follows the sort key instead of the author
+ *      key. The three existing pins use at most one or two entries or
+ *      use .has()-style assertions that don't pin order, so a
+ *      post-filter sort ships green. The pin uses three entries
+ *      authored as `[Z, A, M]` (letters chosen to be sort-unstable
+ *      relative to both input order and alphabetical order) and
+ *      asserts the result's .id array equals `["Z", "A", "M"]`.
+ *      Asymmetric wrt pin 1: the sort still creates a fresh array so
+ *      pin 1 (identity) passes; asymmetric wrt pin 3: the sort does
+ *      not mutate the input so pin 3 (input non-mutation) passes.
+ *
+ *   3. **Input array is not mutated in place.** A refactor that
+ *      "reuses" the input storage (`modelRegistryEntries.length = ...`
+ *      or an in-place `.splice()` loop that rewrites the array to
+ *      contain only survivors) breaks every other consumer of the
+ *      same registry reference, and the M95 filter pins can't detect
+ *      this at all because they only check the RETURN value. The pin
+ *      holds a reference to the input array, the `.length` before
+ *      the call, and a snapshot of the input's ids; after the call
+ *      the pin asserts the input length is unchanged and the input
+ *      id sequence is unchanged — isolating any in-place mutation
+ *      strategy. Asymmetric wrt pin 1: an in-place mutation
+ *      implementation could still return a fresh array (e.g. `const
+ *      out = [...survivors]; input.length = 0; input.push(...out);
+ *      return out;`) and pin 1 would pass while pin 3 fires.
+ *      Asymmetric wrt pin 2: the input-mutation path could still
+ *      keep survivor order in the returned array, so pin 2 passes
+ *      while pin 3 fires.
  */
 export function filterEnabledEntriesByOptionalRole(
   modelRegistryEntries: ModelRegistryEntry[],
