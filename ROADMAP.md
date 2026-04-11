@@ -15,7 +15,7 @@
 Control plane is functional with passing build and tests:
 
 - `npx tsc -p tsconfig.json --noEmit` — clean
-- `node --import tsx --test 'src/**/*.test.ts'` — 45/45 pass
+- `node --import tsx --test 'src/**/*.test.ts'` — 118/118 pass
 - Three targets configured: `aicoder-opencode`, `dr-repo`, `letta-workspace`
 - Model registry plugin operational
 - OpenCode database maintenance module operational (829MB production DB)
