@@ -172,6 +172,22 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M17: Agent frontmatter `models:` block-list silently dropped (per-agent preferences ignored fleet-wide) `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `readAgentMetadata()` in `src/plugins/model-registry.ts` parsed agent frontmatter line-by-line and only understood `key: value` entries. YAML block-list syntax (the standard way to write multi-item `models:` preferences) —
+  ```yaml
+  models:
+    - iflowcn/qwen3-coder-plus
+    - opencode-go/glm-4.7
+  ```
+  — silently produced `metadata.models = []` because the list rows have no `:` and were skipped. Every agent in the fleet using this format had its preferred-model ordering completely ignored. `recommendTaskModelRoute` fell through to `selectBestModelForRoleAndTask` or its last-resort loop, masking the bug.
+- **Why tests didn't catch it**: fixtures used the same block-list syntax, but the test assertions happened to match what the fallback path returned, so the surface-level behavior looked correct. The preferredModels-path was never actually exercised.
+- **Fix**: rewrite the parser as an indexed walk instead of a `for…of` so that when we see `models:` with an empty scalar value we can peek ahead and collect subsequent indented `- item` lines until we hit a non-list row. Also strip surrounding quotes (`"..."` / `'...'`), support flow-style `models: [a, b]`, and keep the existing inline comma form for backward-compat.
+- **Test**: `recommendTaskModelRoute_whenAgentFrontmatterUsesBlockStyleModelsList_parsesAllItems` — agent declares `models: [iflowcn/qwen3-coder-plus, opencode-go/glm-4.7]` as a block list; iflowcn is unhealthy; asserts the second preferred entry (`opencode-go/glm-4.7`) is selected AND the reasoning string mentions the preferred-model path (proving it wasn't the fallback path).
+- **Verification**: 123/123 tests pass (122 + 1 new), dist rebuilt, overlay shims auto-pick up on fleet restart.
+- **Files**: `src/plugins/model-registry.ts`, `src/plugins/model-registry.test.ts`.
+
 ### M16: Long successful reasoning turns silently marked `timeout` (ROOT CAUSE of strong-model starvation) `✅ COMPLETED`
 
 Completion Notes (2026-04-11):

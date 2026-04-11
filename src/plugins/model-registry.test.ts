@@ -191,6 +191,69 @@ test("recommendTaskModelRoute_whenPreferredModelFamilyIsUnhealthy_usesNextMatchi
   assert.equal(decision.selectedModelRoute, "iflowcn/qwen3-coder-plus");
 });
 
+test("recommendTaskModelRoute_whenAgentFrontmatterUsesBlockStyleModelsList_parsesAllItems", async () => {
+  // Regression: the agent frontmatter parser used to silently drop
+  // multi-line YAML list items under `models:` because the list rows
+  // (e.g. `  - provider/model`) have no `:` and were skipped. The
+  // recommendTaskModelRoute fallback path masked this in earlier tests,
+  // but per-agent preference ordering was completely ignored fleet-wide.
+  // This test locks in that the block-style list IS parsed and the
+  // preferredModels path honors the declared order.
+  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "aicoder-model-routing-"));
+  await writeAgentMetadata(
+    tempDirectory,
+    "block_list_agent",
+    [
+      "---",
+      "models:",
+      "  - iflowcn/qwen3-coder-plus",
+      "  - opencode-go/glm-4.7",
+      "routing_role: implementation_worker",
+      "routing_complexity: medium",
+      "---",
+      "",
+      "Block-style list agent.",
+      "",
+    ].join("\n"),
+  );
+
+  // Make iflowcn unhealthy so the second entry in the preference list
+  // is the one chosen — this distinguishes the fallback path from the
+  // preferred-list path.
+  const providerHealthMap = new Map([
+    [
+      "iflowcn",
+      {
+        state: "quota" as const,
+        until: Date.now() + 60_000,
+        retryCount: 1,
+      },
+    ],
+  ]);
+
+  const decision = await recommendTaskModelRoute(
+    tempDirectory,
+    {
+      subagent_type: "block_list_agent",
+      prompt: "Apply a small fix.",
+    },
+    [
+      buildModelRegistryEntry("qwen3-coder-plus", ["implementation_worker"], "strong", [
+        { provider: "iflowcn", model: "iflowcn/qwen3-coder-plus", priority: 1 },
+      ]),
+      buildModelRegistryEntry("glm-4.7", ["implementation_worker"], "strong", [
+        { provider: "opencode-go", model: "opencode-go/glm-4.7", priority: 1 },
+      ]),
+    ],
+    providerHealthMap,
+    new Map(),
+    Date.now(),
+  );
+
+  assert.equal(decision.selectedModelRoute, "opencode-go/glm-4.7");
+  assert.match(decision.reasoning, /Preferred model from agent metadata/);
+});
+
 test("recommendTaskModelRoute_whenPreferredRouteIsFiltered_usesNextVisibleMatchingRegistryModel", async () => {
   const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "aicoder-model-routing-"));
   await writeAgentMetadata(

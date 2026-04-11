@@ -393,7 +393,18 @@ async function readAgentMetadata(
       return null;
     }
 
-    for (const line of frontmatter.split("\n")) {
+    // Line-oriented parser that also understands YAML block lists:
+    //   models:
+    //     - provider/model-a
+    //     - provider/model-b
+    // When a `key:` has an empty scalar value, peek the next lines and
+    // collect indented `- item` entries until we hit a non-list line.
+    const frontmatterLines = frontmatter.split("\n");
+    let lineIndex = 0;
+    while (lineIndex < frontmatterLines.length) {
+      const line = frontmatterLines[lineIndex] ?? "";
+      lineIndex += 1;
+
       const colonIndex = line.indexOf(":");
       if (colonIndex < 1) continue;
 
@@ -403,10 +414,25 @@ async function readAgentMetadata(
       if (key === "model") {
         metadata.model = value;
       } else if (key === "models") {
-        metadata.models = value
-          .split(/\s*,\s*/)
-          .map((s) => s.trim())
-          .filter((s) => s.length > 0);
+        const inlineItems = value.length > 0
+          ? value
+              .replace(/^\[|\]$/g, "") // strip flow-style brackets if present
+              .split(/\s*,\s*/)
+              .map((item) => item.trim())
+              .filter((item) => item.length > 0)
+          : [];
+
+        const blockItems: string[] = [];
+        while (lineIndex < frontmatterLines.length) {
+          const peekLine = frontmatterLines[lineIndex] ?? "";
+          const blockMatch = peekLine.match(/^\s+-\s+(.*)$/);
+          if (!blockMatch) break;
+          const item = (blockMatch[1] ?? "").trim().replace(/^["']|["']$/g, "");
+          if (item.length > 0) blockItems.push(item);
+          lineIndex += 1;
+        }
+
+        metadata.models = [...inlineItems, ...blockItems];
       } else if (key === "routing_role") {
         metadata.routing_role = value;
       } else if (key === "routing_complexity") {
