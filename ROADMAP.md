@@ -172,6 +172,16 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M15: `session.error` bare 500 over-classified as `model_not_found` `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `session.error` handler classified `isModelNotFound = statusCode === 500 || (modelID && message.includes("model not found"))`. The `statusCode === 500` clause alone was enough to permanently mark a route `model_not_found` for 1 hour — regardless of error text. Any transient 500 (upstream maintenance, gateway burp, openrouter rate-limit-as-500, database hiccup) poisoned otherwise-healthy routes for an hour.
+- **Why it mattered**: with three services sharing this plugin and dozens of agent invocations per minute, random 500s were routinely silencing whole routes. Partial-quota cascades masked as "model gone" would lock out the shared routes under load.
+- **Fix**: require `message.includes("model not found")` — drop the standalone statusCode gate. Existing model-not-found path still matches (openrouter's 500+"Model not found" fixture; direct-provider 404+"model not found"). Transient 500s fall through to quota/key_dead/no_credit classification or are ignored.
+- **Test**: `session_error_bare_500_without_model_not_found_message_does_not_poison_route` — fires a session.error with `statusCode:500, message:"Internal server error"` against a healthy-model route and asserts the route stays out of the health map.
+- **Verification**: `npx tsc -p tsconfig.json --noEmit` clean, 121/121 tests pass (120 + 1 new), dist rebuilt.
+- **Files**: `src/plugins/model-registry.ts`, `src/plugins/model-registry.keyless.test.ts`.
+
 ### M14: `chat.params` setTimeout route-timeout never persisted `✅ COMPLETED`
 
 Completion Notes (2026-04-11):

@@ -1036,10 +1036,13 @@ export const ModelRegistryPlugin: Plugin = async () => {
         const modelID = model?.id;
         const routeKey = modelID ? `${providerID}/${modelID}` : null;
 
-        // 500 or "Model not found" message → model_not_found backoff (1h).
+        // "Model not found" message → model_not_found backoff (1h).
+        // Note: we require the message match — a bare 500 is routinely a
+        // transient upstream error and must not poison an otherwise-working
+        // route. Tested statusCode/message combinations: 500+"Model not found"
+        // (openrouter synthesized), 404+"model not found" (direct providers).
         const isModelNotFound =
-          statusCode === 500 ||
-          (modelID && message.toLowerCase().includes("model not found"));
+          modelID !== undefined && message.includes("model not found");
         if (isModelNotFound && routeKey) {
           const existing = modelRouteHealthMap.get(routeKey);
           modelRouteHealthMap.set(routeKey, {

@@ -320,6 +320,54 @@ test("session_error_model_not_found_classifies_route_specific_backoff", async ()
   });
 });
 
+test("session_error_bare_500_without_model_not_found_message_does_not_poison_route", async () => {
+  // A transient 500 (upstream hiccup, maintenance, gateway burp) with no
+  // "model not found" in the message must NOT classify the route as
+  // model_not_found. Previously the plugin treated any 500 as permanent
+  // route death and backed off for an hour, poisoning working routes on
+  // every transient upstream blip.
+  await withIsolatedHome(async (homeDirectory) => {
+    await writeAuthFile(homeDirectory, {
+      openrouter: "token-value",
+    });
+
+    await withFreshHealthState(async () => {
+      const { ModelRegistryPlugin } = await import("./model-registry.js");
+      const plugin = await (ModelRegistryPlugin as any)({ directory: process.cwd() });
+
+      await (plugin["chat.params"] as any)(
+        {
+          sessionID: "session-with-transient-500",
+          provider: { info: { id: "openrouter" } },
+          model: { id: "healthy-model", providerID: "openrouter" },
+        },
+        {},
+      );
+
+      await (plugin.event as any)({
+        event: {
+          type: "session.error",
+          properties: {
+            sessionID: "session-with-transient-500",
+            error: {
+              name: "APIError",
+              data: {
+                statusCode: 500,
+                message: "Internal server error",
+              },
+            },
+          },
+        },
+      });
+
+      const rawStatus = await (plugin.tool as any).get_quota_backoff_status.execute({});
+      const status = JSON.parse(rawStatus as string);
+
+      assert.equal(status["openrouter/healthy-model"], undefined);
+    });
+  });
+});
+
 test("assistant_message_completed_with_zero_tokens_classifies_route_quota_backoff", async () => {
   await withIsolatedHome(async (homeDirectory) => {
     await writeAuthFile(homeDirectory, {
