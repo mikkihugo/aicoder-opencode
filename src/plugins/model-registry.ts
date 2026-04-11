@@ -439,6 +439,49 @@ async function persistProviderHealth(
  * invisible to opencode's routing layer even though every other reader in
  * this plugin honors them.
  *
+ * Three independent drift surfaces in this tiny body that are NOT covered
+ * by the pre-existing enabled-gate and route-penalty pins:
+ *
+ *  1. **Iteration source is `providerModels`, never `enabledRawModelIDs`.**
+ *     The loop walks `Object.entries(providerModels)` and uses the enabled
+ *     set only as a positive-filter `.has` probe. A refactor that inverts
+ *     this — iterating the enabled set and reading `providerModels[id]`
+ *     back — silently fabricates entries for enabled-but-absent models.
+ *     Opencode's runtime `provider.models` map only lists the raw models
+ *     the provider's own discovery call returned; a registry row whose
+ *     primary route was DROPPED by the provider (model renamed, retired,
+ *     or hidden behind a feature flag) will be present in
+ *     `enabledRawModelIDs` but absent from `providerModels`. Iterating
+ *     the enabled set writes `filtered[ghostModel] = undefined` and
+ *     opencode's downstream router interprets the key as a live model,
+ *     dispatches to it, and the provider returns "model not found" — a
+ *     penalty cascade fully attributable to the drift. The current
+ *     iteration source bounds the output domain to keys opencode
+ *     actually expects to route.
+ *
+ *  2. **Original `modelValue` is passed through byte-identical.** The
+ *     assignment is `filtered[modelID] = modelValue`, not `= true`, `=
+ *     {}`, or `= { id: modelID }`. Downstream opencode readers consume
+ *     `modelValue.id`, `modelValue.label`, provider-specific capability
+ *     hints, context-window metadata, and tool-support flags directly
+ *     from these objects. Replacing the stored value with a stub or
+ *     boolean silently strips all metadata while still presenting the
+ *     key as advertised — the router sees the model as available and
+ *     dispatches without knowing the context window, tool support, or
+ *     pricing band. A refactor that "normalises" the value to a minimal
+ *     shape is the exact drift class this pin catches.
+ *
+ *  3. **`providerModels` is read-only — the helper never mutates its
+ *     input.** The `provider.models` hook hands us the opencode-owned
+ *     map by reference; the same reference may flow to other hooks in
+ *     the same turn or be cached across turns inside opencode. A
+ *     refactor that `delete`s excluded keys from `providerModels`
+ *     in-place (a tempting micro-optimisation that "avoids building a
+ *     new object") would mutate the caller's map, corrupting every
+ *     downstream reader. The helper signals non-mutation by building a
+ *     fresh `filtered` object and returning that instead — the input
+ *     map leaves the function with the exact key set it entered with.
+ *
  * Args:
  *   providerModels: The opencode-supplied raw models map (typed unknown-value
  *     because the opencode runtime shape is provider-specific and not worth

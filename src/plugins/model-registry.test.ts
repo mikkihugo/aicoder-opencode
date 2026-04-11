@@ -6676,3 +6676,102 @@ test("buildProviderHealthSystemPrompt_whenBothProviderAndRoutePenaltiesExist_joi
     "route section must be one of the blank-line-separated chunks",
   );
 });
+
+// M102: drift pins for `filterProviderModelsByRouteHealth` — the pre-existing
+// pins cover the enabled gate and the route-penalty gate, but leave three
+// independent drift surfaces unprotected. Each new pin below is fired
+// uniquely by exactly one sabotage on a distinct surface of the helper
+// body, verified on-HEAD via the standard three-way cascade.
+
+test("filterProviderModelsByRouteHealth_whenEnabledModelIsMissingFromProviderModels_doesNotFabricateKey", () => {
+  // Pins: iteration source MUST be `providerModels`, never
+  // `enabledRawModelIDs`. A registry row whose primary route was
+  // retired / renamed / hidden upstream is still present in the
+  // enabled set but absent from opencode's runtime provider map. The
+  // current code walks `Object.entries(providerModels)` so absent
+  // entries simply don't appear. A refactor that iterates the
+  // enabled set (and reads `providerModels[id]` back) would fabricate
+  // `filtered["ghost-model"] = undefined`, which opencode's router
+  // interprets as a real advertised model and dispatches to — a
+  // plugin-level phantom-model bug fully attributable to the drift.
+  const enabledRawModelIDs = new Set(["ghost-model"]);
+  const providerModels = {}; // Empty — provider discovery returned nothing for this id.
+  const filtered = filterProviderModelsByRouteHealth(
+    providerModels,
+    enabledRawModelIDs,
+    "openrouter",
+    new Map(),
+    Date.now(),
+  );
+  assert.deepEqual(
+    Object.keys(filtered),
+    [],
+    "enabled-but-absent models must NOT be fabricated as keys in filtered",
+  );
+  assert.equal(
+    Object.hasOwn(filtered, "ghost-model"),
+    false,
+    "filtered must not own the ghost-model key even with an undefined value",
+  );
+});
+
+test("filterProviderModelsByRouteHealth_whenEntryPasses_preservesOriginalModelValueByIdentity", () => {
+  // Pins: the filtered output writes the ORIGINAL `modelValue` by
+  // reference, not a stub / boolean / synthesised object. Opencode's
+  // downstream readers extract capability hints, context window,
+  // tool-support flags, etc. directly from these values; replacing
+  // them with `true` or `{}` silently strips all metadata while still
+  // advertising the model as available. Identity check (`===` on the
+  // retained object reference) is the cheapest way to pin "we did not
+  // rebuild the value" without asserting every field shape by hand.
+  const stepfunValue = { id: "stepfun/step-3.5-flash:free", label: "free", contextWindow: 128_000 };
+  const enabledRawModelIDs = new Set(["stepfun/step-3.5-flash:free"]);
+  const providerModels = {
+    "stepfun/step-3.5-flash:free": stepfunValue,
+  };
+  const filtered = filterProviderModelsByRouteHealth(
+    providerModels,
+    enabledRawModelIDs,
+    "openrouter",
+    new Map(),
+    Date.now(),
+  );
+  assert.equal(
+    filtered["stepfun/step-3.5-flash:free"],
+    stepfunValue,
+    "filtered value must be byte-identical (===) to the original provider model value",
+  );
+});
+
+test("filterProviderModelsByRouteHealth_whenCalled_doesNotMutateInputProviderModels", () => {
+  // Pins: `providerModels` is read-only. The `provider.models` hook
+  // hands us the opencode-owned map by reference; a refactor that
+  // `delete`s excluded keys in-place (a tempting "avoid building a
+  // new object" micro-optimisation) would corrupt the caller's view
+  // of the provider map and cascade into every downstream reader in
+  // the same turn. The helper builds a fresh `filtered` object and
+  // leaves `providerModels` byte-identical to its entry state.
+  const enabledRawModelIDs = new Set(["stepfun/step-3.5-flash:free"]);
+  const providerModels: Record<string, unknown> = {
+    "stepfun/step-3.5-flash:free": { id: "stepfun/step-3.5-flash:free" },
+    "never-enabled-model": { id: "never-enabled-model" },
+    "another-absent-model": { id: "another-absent-model" },
+  };
+  const originalKeys = Object.keys(providerModels).sort();
+  filterProviderModelsByRouteHealth(
+    providerModels,
+    enabledRawModelIDs,
+    "openrouter",
+    new Map(),
+    Date.now(),
+  );
+  assert.deepEqual(
+    Object.keys(providerModels).sort(),
+    originalKeys,
+    "input providerModels must NOT be mutated — all original keys must still be present",
+  );
+  assert.ok(
+    Object.hasOwn(providerModels, "never-enabled-model"),
+    "excluded keys must remain in the INPUT map (non-mutation invariant)",
+  );
+});
