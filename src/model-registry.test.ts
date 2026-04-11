@@ -215,6 +215,80 @@ test("filterVisibleProviderRoutes_whenOpenRouterRoutesAreMixed_keepsOnlyAllowedO
   ]);
 });
 
+test("filterVisibleProviderRoutes_whenInputArrayOrderDivergesFromPriority_returnsPrioritySorted", () => {
+  // Pin the invariant that `filterVisibleProviderRoutes` returns routes
+  // in ascending-priority order regardless of the array order in which
+  // the config authored them. Several plugin call sites treat the result's
+  // `[0]` as the "primary route" (computeRegistryEntryHealthReport, the
+  // `provider.models` active-route resolution, findHealthyRouteForFallback),
+  // so a models.jsonc entry with out-of-order `provider_order` would have
+  // silently poisoned every primary-route decision if the filter preserved
+  // insertion order. Deliberately feed the input in reverse priority to
+  // prove the sort is authoritative.
+  const visibleRoutes = filterVisibleProviderRoutes([
+    {
+      provider: "openrouter",
+      model: "openrouter/stepfun/step-3.5-flash:free",
+      priority: 3,
+    },
+    {
+      provider: "ollama-cloud",
+      model: "ollama-cloud/glm-5",
+      priority: 1,
+    },
+    {
+      provider: "opencode-go",
+      model: "opencode-go/glm-5",
+      priority: 2,
+    },
+  ]);
+
+  assert.deepEqual(
+    visibleRoutes.map((route) => ({
+      provider: route.provider,
+      priority: route.priority,
+    })),
+    [
+      { provider: "ollama-cloud", priority: 1 },
+      { provider: "opencode-go", priority: 2 },
+      { provider: "openrouter", priority: 3 },
+    ],
+  );
+});
+
+test("filterVisibleProviderRoutes_whenHiddenRoutesInterleavedWithOutOfOrderVisibleRoutes_sortsOnlyTheSurvivors", () => {
+  // Regression case: hidden routes (togetherai, xai) are interleaved
+  // with visible survivors whose authored order is REVERSED from their
+  // priority. A naive implementation that either (a) preserved insertion
+  // order or (b) sorted BEFORE filtering could land the wrong survivor at
+  // `[0]`. The contract: priority order across the surviving subset.
+  const visibleRoutes = filterVisibleProviderRoutes([
+    {
+      provider: "ollama-cloud",
+      model: "ollama-cloud/glm-5",
+      priority: 7,
+    },
+    {
+      provider: "togetherai",
+      model: "togetherai/zai-org/GLM-5.1",
+      priority: 1,
+    },
+    {
+      provider: "opencode",
+      model: "opencode/minimax-m2.5-free",
+      priority: 5,
+    },
+    {
+      provider: "xai",
+      model: "xai/grok-4-fast",
+      priority: 2,
+    },
+  ]);
+
+  assert.deepEqual(visibleRoutes.map((route) => route.priority), [5, 7]);
+  assert.equal(visibleRoutes[0]?.provider, "opencode");
+});
+
 test("getPreferredVisibleProviderRoute_whenTopOpenRouterRoutesAreFiltered_returnsNextAllowedRoute", () => {
   const preferredRoute = getPreferredVisibleProviderRoute([
     {

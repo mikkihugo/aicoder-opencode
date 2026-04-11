@@ -341,16 +341,32 @@ export function renderInteractiveModelRow(
 }
 
 /**
- * Hide OpenRouter paid routes from default model-list views.
+ * Hide OpenRouter paid routes from default model-list views and return
+ * the remaining routes sorted by ascending `priority`.
+ *
+ * Sorting is done HERE (not left to each caller) because downstream
+ * consumers in `src/plugins/model-registry.ts` treat `result[0]` as the
+ * "primary route" and iterate with `.find` expecting priority order — see
+ * `computeRegistryEntryHealthReport`, the `findHealthyRouteForFallback`
+ * scans, and the `provider.models` active-route resolution. If
+ * `models.jsonc` ever ships a `provider_order` whose array order diverges
+ * from its `priority` field (which the schema permits), every `[0]`
+ * consumer would silently pick a non-primary route. Centralizing the
+ * priority sort here makes the invariant a property of the helper
+ * instead of a property-of-the-config the authors must preserve by hand.
+ *
+ * The sort is stable (V8's `Array.prototype.sort` is stable since Node
+ * 12) so routes with identical priorities keep their authored order.
  *
  * Args:
- *   providerRoutes: Ordered provider routes from the registry.
+ *   providerRoutes: Provider routes from the registry — any order.
  *
  * Returns:
- *   Only routes that should appear in default views.
+ *   Visible routes in ascending-priority order. Empty when all routes
+ *   are hidden.
  */
 export function filterVisibleProviderRoutes(providerRoutes: ProviderRoute[]): ProviderRoute[] {
-  return providerRoutes.filter((providerRoute) => {
+  const visibleRoutes = providerRoutes.filter((providerRoute) => {
     if (providerRoute.provider === CLOUDFLARE_AI_GATEWAY_PROVIDER_NAME) {
       return false;
     }
@@ -404,6 +420,9 @@ export function filterVisibleProviderRoutes(providerRoutes: ProviderRoute[]): Pr
 
     return providerRoute.model.endsWith(OPENROUTER_FREE_MODEL_SUFFIX);
   });
+  return [...visibleRoutes].sort(
+    (leftRoute, rightRoute) => leftRoute.priority - rightRoute.priority,
+  );
 }
 
 /**
@@ -418,9 +437,9 @@ export function filterVisibleProviderRoutes(providerRoutes: ProviderRoute[]): Pr
 export function getPreferredVisibleProviderRoute(
   providerRoutes: ProviderRoute[],
 ): ProviderRoute | undefined {
-  return [...filterVisibleProviderRoutes(providerRoutes)].sort(
-    (leftRoute, rightRoute) => leftRoute.priority - rightRoute.priority,
-  )[0];
+  // `filterVisibleProviderRoutes` already returns routes in
+  // ascending-priority order, so `[0]` is authoritative.
+  return filterVisibleProviderRoutes(providerRoutes)[0];
 }
 
 /**
