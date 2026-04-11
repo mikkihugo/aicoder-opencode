@@ -244,6 +244,30 @@ function buildRoutingContextSystemPrompt(modelRegistryEntry: ModelRegistryEntry)
   ].join("\n");
 }
 
+/**
+ * Canonicalize a registry route to the composite `provider/model-id` form
+ * used by `modelRouteHealthMap` keys.
+ *
+ * Write-side keys are always built as `${providerID}/${model.id}` from the
+ * opencode runtime event payloads (see session.error, assistant.message.completed,
+ * chat.params hang timer). Read-side lookups, however, have historically
+ * passed `providerRoute.model` verbatim — which for most registry entries is
+ * already composite (e.g. `ollama-cloud/glm-5`) but for a handful of entries
+ * is UNPREFIXED (longcat's `LongCat-Flash-Chat`, `LongCat-Flash-Thinking`,
+ * `LongCat-Flash-Lite` — see models.jsonc). That meant any route-level
+ * penalty recorded for longcat models was silently undetectable by readers,
+ * and the agent was told those dead routes were still healthy.
+ *
+ * This helper normalizes in one place so the write-vs-read key shape can
+ * never drift again. Kept as a pure function for direct unit testing.
+ */
+export function composeRouteKey(providerRoute: { provider: string; model: string }): string {
+  if (providerRoute.model.startsWith(`${providerRoute.provider}/`)) {
+    return providerRoute.model;
+  }
+  return `${providerRoute.provider}/${providerRoute.model}`;
+}
+
 function isFallbackBlocked(providerID: string, modelID: string): boolean {
   if (FALLBACK_BLOCKED_PROVIDER_IDS.has(providerID)) {
     return true;
@@ -337,7 +361,7 @@ export function findCuratedFallbackRoute(
       if (providerRoute.provider === blockedProviderID) return false;
       if (isFallbackBlocked(providerRoute.provider, providerRoute.model)) return false;
       if (!isProviderHealthy(providerHealthMap, providerRoute.provider, now)) return false;
-      const routeHealth = modelRouteHealthMap.get(providerRoute.model);
+      const routeHealth = modelRouteHealthMap.get(composeRouteKey(providerRoute));
       if (routeHealth && routeHealth.until > now) return false;
       return true;
     },
@@ -382,7 +406,7 @@ export function computeRegistryEntryHealthReport(
       scope: "provider",
     };
   }
-  const routeHealth = modelRouteHealthMap.get(primaryRoute.model);
+  const routeHealth = modelRouteHealthMap.get(composeRouteKey(primaryRoute));
   if (routeHealth && routeHealth.until > now) {
     return {
       state: routeHealth.state,
@@ -479,7 +503,7 @@ export function buildProviderHealthSystemPrompt(
     const owningEntry = modelRegistryEntries.find(
       (entry) =>
         entry.enabled &&
-        entry.provider_order.some((route) => route.model === routeKey),
+        entry.provider_order.some((route) => composeRouteKey(route) === routeKey),
     );
 
     const header = [
@@ -546,7 +570,7 @@ export function buildAvailableModelsSystemPrompt(
     const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
     const firstHealthyVisibleRoute = visibleRoutes.find((route) => {
       if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
-      const routeHealth = modelRouteHealthMap.get(route.model);
+      const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
       if (routeHealth && routeHealth.until > now) return false;
       return true;
     });
@@ -908,7 +932,7 @@ async function recommendTaskModelRoute(
   if (preferredModels.length > 0) {
     const isRouteHealthy = (route: { provider: string; model: string }): boolean => {
       if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
-      const routeHealth = modelRouteHealthMap.get(route.model);
+      const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
       return !routeHealth || routeHealth.until <= now;
     };
 
@@ -971,7 +995,7 @@ async function recommendTaskModelRoute(
     const visibleRoutes = filterVisibleProviderRoutes(best.provider_order);
     const bestRouteIsHealthy = (route: { provider: string; model: string }): boolean => {
       if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
-      const routeHealth = modelRouteHealthMap.get(route.model);
+      const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
       return !routeHealth || routeHealth.until <= now;
     };
     const primaryRoute = visibleRoutes.find(bestRouteIsHealthy);
@@ -1231,7 +1255,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
           const primaryRoute = visibleRoutes[0] ?? null;
           const isRouteHealthy = (route: { provider: string; model: string }): boolean => {
             if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
-            const routeHealth = modelRouteHealthMap.get(route.model);
+            const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
             if (routeHealth && routeHealth.until > now) return false;
             return true;
           };

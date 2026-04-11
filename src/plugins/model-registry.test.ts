@@ -9,6 +9,7 @@ import {
   buildAvailableModelsSystemPrompt,
   buildProviderHealthSystemPrompt,
   clearSessionHangState,
+  composeRouteKey,
   computeRegistryEntryHealthReport,
   expireHealthMaps,
   findCuratedFallbackRoute,
@@ -885,4 +886,85 @@ test("computeRegistryEntryHealthReport_whenPrimaryRouteIsHiddenPaid_walksToVisib
 
   // Visible primary (opencode-go/mimo-v2-pro) is healthy → null report.
   assert.equal(report, null);
+});
+
+test("composeRouteKey_whenRegistryEntryIsUnprefixed_producesCompositeKey", () => {
+  // Regression (M30): three longcat entries in models.jsonc store
+  // provider_order[].model without the `longcat/` prefix
+  // (LongCat-Flash-Chat, LongCat-Flash-Thinking, LongCat-Flash-Lite).
+  // Session event handlers (session.error, assistant.message.completed,
+  // chat.params hang timer) all key modelRouteHealthMap on the COMPOSITE
+  // form `${providerID}/${model.id}` = "longcat/LongCat-Flash-Chat", but
+  // read sites historically used `providerRoute.model` verbatim —
+  // looking up "LongCat-Flash-Chat" (undefined). Route-level penalties
+  // on longcat models were silently invisible. This helper normalizes.
+  assert.equal(
+    composeRouteKey({ provider: "longcat", model: "LongCat-Flash-Chat" }),
+    "longcat/LongCat-Flash-Chat",
+  );
+  // Already-composite entries pass through unchanged.
+  assert.equal(
+    composeRouteKey({ provider: "ollama-cloud", model: "ollama-cloud/glm-5" }),
+    "ollama-cloud/glm-5",
+  );
+  // Nested composites (openrouter/xiaomi/mimo-v2-pro) also pass through.
+  assert.equal(
+    composeRouteKey({ provider: "openrouter", model: "openrouter/xiaomi/mimo-v2-pro" }),
+    "openrouter/xiaomi/mimo-v2-pro",
+  );
+});
+
+test("computeRegistryEntryHealthReport_whenLongcatEntryIsUnprefixed_detectsRouteLevelPenaltyFromCompositeKey", () => {
+  // Regression (M30): the longcat-flash-chat registry entry stores
+  // `provider_order[0].model = "LongCat-Flash-Chat"` (unprefixed per
+  // models.jsonc). The write path records penalties as the COMPOSITE
+  // `"longcat/LongCat-Flash-Chat"` (session.error and
+  // assistant.message.completed use `${providerID}/${model.id}`). The
+  // read path used `.model` directly, so `modelRouteHealthMap.get(...)`
+  // looked up "LongCat-Flash-Chat" and found nothing — agent-facing
+  // health reports lied about longcat models being live when they were
+  // provably dead. Post-fix: composeRouteKey normalizes reads.
+  //
+  // `computeRegistryEntryHealthReport` is the cleanest exported read
+  // site to anchor this regression: `findCuratedFallbackRoute` can't
+  // be used because longcat is also a substring-blocked fallback (see
+  // `isFallbackBlocked`), which would filter the route for a different
+  // reason and mask the regression.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = {
+    id: "longcat-flash-chat",
+    enabled: true,
+    description: "longcat-flash-chat",
+    capability_tier: "strong",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: [],
+    not_for: [],
+    default_roles: ["implementation_worker"],
+    provider_order: [
+      { provider: "longcat", model: "LongCat-Flash-Chat", priority: 1 },
+    ],
+    notes: [],
+  };
+  // Write-side composite key — exactly what session.error would set.
+  const modelRouteHealthMap = new Map([
+    [
+      "longcat/LongCat-Flash-Chat",
+      { state: "model_not_found" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  const report = computeRegistryEntryHealthReport(
+    entry,
+    new Map(),
+    modelRouteHealthMap,
+    now,
+  );
+
+  assert.ok(report);
+  assert.equal(report.state, "model_not_found");
+  assert.equal(report.scope, "route");
 });
