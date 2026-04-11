@@ -172,6 +172,22 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M35: `inferTaskComplexity` used substring matching, flipping trivial tasks to large tier on false positives like `"carefully"` containing `"full"` `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `inferTaskComplexity` classified task complexity by `largeKeywords.some((kw) => lowerPrompt.includes(kw))` and the analogous medium check. `includes` is a raw substring match, so any prompt containing `"carefully"` matched `"full"` and was classified `large` → routed to the `strong`/`frontier` tier. Same false-positive pattern for other `-fully` adverbs (`beautifully`, `thoughtfully`, `prayerfully`, `respectfully`) and other inner substrings. A one-line typo fix phrased "please carefully review..." would burn frontier-tier compute. Reverse false positives in the medium list (`add` in `address`, `fix` in `prefix`, `test` in `latest`) flipped default-medium tasks to medium deterministically — less costly since medium is the default fallback anyway, but still wrong.
+- **Reachability**: production-reachable. The function is called from `recommendTaskModelRoute` when `task.complexity` and `agent_metadata.routing_complexity` are both absent, which is the common case for ad-hoc tool calls and tests. Any prompt containing an `-fully` adverb (a very common English construction in polite requests) was misclassified as `large`.
+- **Fix**: extracted `LARGE_COMPLEXITY_KEYWORD_STEMS`, `LARGE_COMPLEXITY_LITERAL_PHRASES` (for `end-to-end`, which has a non-word-char hyphen), and `MEDIUM_COMPLEXITY_KEYWORD_STEMS` to module-level constants. Built two precompiled `RegExp` instances with leading word boundaries only (`\b(?:stem1|stem2|...)`, escaping regex metacharacters). Leading-only (not trailing) deliberately, so inflections like `refactoring`, `systems`, `completed`, `updates` still match — a trailing boundary would silently miss common variants. `end-to-end` stays on a literal substring check because `-` is not a word char in JS regex. Default-medium fallback preserved.
+- **Tests**: four new tests in `model-registry.test.ts`:
+  - `inferTaskComplexity_whenPromptContainsCarefullyUnrelatedToFull_doesNotClassifyAsLarge` — the headline regression.
+  - `inferTaskComplexity_whenPromptContainsBeautifullyUnrelatedToFull_doesNotClassifyAsLarge` — word-boundary coverage for another `-fully` adverb. (Note: initial draft used `wonderful`/`successful`, but those words only contain `ful` with one L, not the literal 4-char `full`, so they are NOT substrings and do not actually exercise the bug. Replaced with `beautifully`, which does contain `full`.)
+  - `inferTaskComplexity_whenPromptUsesRefactoringInflection_stillClassifiesAsLarge` — asserts the leading-only boundary still catches inflected forms.
+  - `inferTaskComplexity_whenPromptUsesEndToEndLiteralPhrase_classifiesAsLarge` — pins the hyphenated-phrase escape hatch.
+  - Existing test `inferTaskComplexity_whenPromptSystemWorkIsNamed_returnsLarge` still passes: `"Rework the prompt system across..."` matches `\brework`, `\bsystem`, `\bacross` as whole-word starts.
+- **Verification**: verified-on-HEAD by reverting the check to the `.includes()` substring form with the new constants; exactly 2 new tests failed (carefully, beautifully), the inflection and end-to-end tests still passed as expected, restored fix. 150/150 green (146 + 4 new). `npm run build` clean.
+- **Files**: `src/plugins/model-registry.ts` (constants + regexes + inferTaskComplexity rewire), `src/plugins/model-registry.test.ts` (4 new tests).
+- **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
+
 ### M34: openrouter `provider.models` hook advertised route-level-dead models to opencode's router `✅ COMPLETED`
 
 Completion Notes (2026-04-11):

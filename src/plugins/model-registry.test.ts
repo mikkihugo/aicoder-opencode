@@ -1146,3 +1146,54 @@ test("filterProviderModelsByRouteHealth_whenRouteLevelPenaltyHasExpired_keepsMod
 
   assert.deepEqual(Object.keys(filtered), ["stepfun/step-3.5-flash:free"]);
 });
+
+test("inferTaskComplexity_whenPromptContainsCarefullyUnrelatedToFull_doesNotClassifyAsLarge", () => {
+  // Regression: the previous implementation used `.includes()` substring
+  // matching, so "carefully" (which contains "full" as an inner substring)
+  // flipped a trivial review task into the large/frontier tier, wasting
+  // expensive routing on what should be medium or small.
+  assert.equal(
+    inferTaskComplexity(
+      "Please carefully review this one-line typo fix in the README.",
+      null,
+    ),
+    "medium",
+  );
+});
+
+test("inferTaskComplexity_whenPromptContainsBeautifullyUnrelatedToFull_doesNotClassifyAsLarge", () => {
+  // Additional word-boundary coverage: "beautifully" contains the literal
+  // 4-char "full" as an inner substring. The old `.includes("full")` check
+  // flipped this to large; the leading-boundary regex must not.
+  assert.equal(
+    inferTaskComplexity(
+      "beautifully format this one-liner",
+      null,
+    ),
+    "medium",
+  );
+});
+
+test("inferTaskComplexity_whenPromptUsesRefactoringInflection_stillClassifiesAsLarge", () => {
+  // Word-boundary is LEADING only so inflections still match: "refactoring",
+  // "refactored", "systems", "completed" should all count as large signals.
+  assert.equal(
+    inferTaskComplexity(
+      "I'm refactoring the authentication module",
+      null,
+    ),
+    "large",
+  );
+});
+
+test("inferTaskComplexity_whenPromptUsesEndToEndLiteralPhrase_classifiesAsLarge", () => {
+  // `end-to-end` contains a hyphen which is not a JS word char; it is
+  // matched via a literal substring check, not the regex path.
+  assert.equal(
+    inferTaskComplexity(
+      "Write an end-to-end test for the checkout flow",
+      null,
+    ),
+    "large",
+  );
+});

@@ -648,24 +648,55 @@ export function buildAvailableModelsSystemPrompt(
 /**
  * Infer task complexity from a prompt description.
  */
+/**
+ * Keyword stems that signal a `large` complexity task. The match uses a
+ * leading word boundary (`\b<stem>`) so inflections like "refactoring",
+ * "systems", "completed" still count, but coincidental substrings inside
+ * unrelated words (the classic false positive: "carefully" containing
+ * "full") do not flip a trivial task into the strong/frontier tier.
+ *
+ * Note: the `-` in `end-to-end` is not a word char in the JS regex sense,
+ * so a literal match is safer than building a regex for it — it's handled
+ * as a separate substring check below.
+ */
+const LARGE_COMPLEXITY_KEYWORD_STEMS = [
+  "rework", "refactor", "redesign", "architecture", "system", "across",
+  "multiple", "comprehensive", "complete", "full", "entire",
+] as const;
+const LARGE_COMPLEXITY_LITERAL_PHRASES = ["end-to-end"] as const;
+
+/**
+ * Keyword stems for `medium` complexity. Same word-boundary rule: previously
+ * `"add"`, `"fix"`, `"test"` matched "address", "prefix", "latest" as
+ * substrings.
+ */
+const MEDIUM_COMPLEXITY_KEYWORD_STEMS = [
+  "implement", "add", "update", "fix", "debug", "test", "verify",
+  "improve", "enhance", "optimize", "integrate", "connect",
+] as const;
+
+function buildLeadingBoundaryRegex(stems: readonly string[]): RegExp {
+  // Leading `\b` only, not trailing, so inflections (updates, refactoring,
+  // completed, systemic) still match. A trailing boundary would force an
+  // exact-word match and silently miss common variants.
+  const alternation = stems.map((stem) => stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  return new RegExp(`\\b(?:${alternation})`, "i");
+}
+
+const LARGE_COMPLEXITY_REGEX = buildLeadingBoundaryRegex(LARGE_COMPLEXITY_KEYWORD_STEMS);
+const MEDIUM_COMPLEXITY_REGEX = buildLeadingBoundaryRegex(MEDIUM_COMPLEXITY_KEYWORD_STEMS);
+
 function inferTaskComplexity(prompt: string, _explicitComplexity: TaskComplexity | null): TaskComplexity {
   const lowerPrompt = prompt.toLowerCase();
 
-  // Large complexity indicators
-  const largeKeywords = [
-    "rework", "refactor", "redesign", "architecture", "system", "across",
-    "multiple", "comprehensive", "complete", "full", "entire", "end-to-end",
-  ];
-  if (largeKeywords.some((kw) => lowerPrompt.includes(kw))) {
+  if (
+    LARGE_COMPLEXITY_REGEX.test(lowerPrompt) ||
+    LARGE_COMPLEXITY_LITERAL_PHRASES.some((phrase) => lowerPrompt.includes(phrase))
+  ) {
     return "large";
   }
 
-  // Medium complexity indicators
-  const mediumKeywords = [
-    "implement", "add", "update", "fix", "debug", "test", "verify",
-    "improve", "enhance", "optimize", "integrate", "connect",
-  ];
-  if (mediumKeywords.some((kw) => lowerPrompt.includes(kw))) {
+  if (MEDIUM_COMPLEXITY_REGEX.test(lowerPrompt)) {
     return "medium";
   }
 
