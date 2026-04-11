@@ -6,6 +6,7 @@ import test from "node:test";
 
 import type { ModelRegistryEntry } from "../model-registry.js";
 import {
+  buildProviderHealthSystemPrompt,
   clearSessionHangState,
   expireHealthMaps,
   findCuratedFallbackRoute,
@@ -634,4 +635,61 @@ test("clearSessionHangState_whenSessionTerminates_dropsFromAllThreeSessionMaps",
   assert.equal(sessionStartTimeMap.has("session-b"), true);
   assert.equal(sessionActiveProviderMap.has("session-b"), true);
   assert.equal(sessionActiveModelMap.has("session-b"), true);
+});
+
+test("buildProviderHealthSystemPrompt_whenOnlyRoutePenaltiesExist_emitsRouteSection", () => {
+  // Regression: the transform hook used to short-circuit on
+  // `providerHealthMap.size === 0`, so a route-level penalty
+  // (model_not_found, route-level quota from zero-token completion,
+  // timeout from the hang detector) never surfaced in the agent
+  // system prompt. The agent kept using a just-killed route with
+  // zero warning.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = {
+    id: "qwen3-coder-plus",
+    enabled: true,
+    description: "qwen3-coder-plus description",
+    capability_tier: "strong",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: [],
+    not_for: [],
+    default_roles: ["implementation_worker"],
+    provider_order: [
+      { provider: "iflowcn", model: "iflowcn/qwen3-coder-plus", priority: 1 },
+      { provider: "opencode-go", model: "opencode-go/qwen3-coder-plus", priority: 2 },
+    ],
+    notes: [],
+  };
+  const modelRouteHealthMap = new Map([
+    [
+      "iflowcn/qwen3-coder-plus",
+      { state: "model_not_found" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  const prompt = buildProviderHealthSystemPrompt(
+    [entry],
+    new Map(),
+    modelRouteHealthMap,
+    now,
+  );
+
+  assert.notEqual(prompt, null);
+  assert.match(prompt as string, /Route iflowcn\/qwen3-coder-plus \[MODEL NOT FOUND\]/);
+  // The suggested fallback must be the visible+healthy sibling route,
+  // not the dead one. findCuratedFallbackRoute already skips the dead
+  // route via modelRouteHealthMap consultation (M24).
+  assert.match(
+    prompt as string,
+    /Curated fallback for qwen3-coder-plus: opencode-go\/qwen3-coder-plus/,
+  );
+});
+
+test("buildProviderHealthSystemPrompt_whenNoPenalties_returnsNull", () => {
+  const prompt = buildProviderHealthSystemPrompt([], new Map(), new Map(), Date.now());
+  assert.equal(prompt, null);
 });

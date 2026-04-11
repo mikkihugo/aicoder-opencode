@@ -376,21 +376,26 @@ function healthStateLabel(state: ProviderHealthState): string {
   }
 }
 
-function buildProviderHealthSystemPrompt(
+export function buildProviderHealthSystemPrompt(
   modelRegistryEntries: ModelRegistryEntry[],
   providerHealthMap: Map<string, ProviderHealth>,
   modelRouteHealthMap: Map<string, ModelRouteHealth>,
   now: number,
 ): string | null {
-  const activePenalties = Array.from(providerHealthMap.entries()).filter(
+  const activeProviderPenalties = Array.from(providerHealthMap.entries()).filter(
+    ([, health]) => health.until > now,
+  );
+  const activeRoutePenalties = Array.from(modelRouteHealthMap.entries()).filter(
     ([, health]) => health.until > now,
   );
 
-  if (activePenalties.length === 0) {
+  if (activeProviderPenalties.length === 0 && activeRoutePenalties.length === 0) {
     return null;
   }
 
-  const sections = activePenalties.map(([providerID, health]) => {
+  const sections: string[] = [];
+
+  for (const [providerID, health] of activeProviderPenalties) {
     const label = healthStateLabel(health.state);
     const until = new Date(health.until).toISOString();
 
@@ -411,14 +416,59 @@ function buildProviderHealthSystemPrompt(
       return `- ${entry.id} → ${fallback}`;
     });
 
-    return [
+    sections.push([
       PROVIDER_QUOTA_STATUS_HEADER,
       `Provider ${providerID} [${label}] until ${until}.`,
       `Curated fallbacks (longcat/claude/gpt/grok excluded):`,
       ...fallbackLines,
-    ].join("\n");
-  });
+    ].join("\n"));
+  }
 
+  // Route-level penalties: previously ignored by the system prompt because
+  // the outer transform hook short-circuited on `providerHealthMap.size === 0`
+  // and this function had no code path for route-only state. Reachable via
+  // the `assistant.message.completed` zero-token → route quota handler,
+  // the `session.error` "model not found" → route `model_not_found` handler,
+  // and the hang-detector `setTimeout` → route `timeout` handler — all of
+  // which write to `modelRouteHealthMap`, NOT `providerHealthMap`. Without
+  // this section an agent running on a just-killed route got no warning at
+  // all from the system prompt.
+  for (const [routeKey, health] of activeRoutePenalties) {
+    const label = healthStateLabel(health.state);
+    const until = new Date(health.until).toISOString();
+
+    const owningEntry = modelRegistryEntries.find(
+      (entry) =>
+        entry.enabled &&
+        entry.provider_order.some((route) => route.model === routeKey),
+    );
+
+    const header = [
+      PROVIDER_QUOTA_STATUS_HEADER,
+      `Route ${routeKey} [${label}] until ${until}.`,
+    ];
+
+    if (owningEntry) {
+      // `findCuratedFallbackRoute` already consults `modelRouteHealthMap`
+      // (per M24), so passing an empty `blockedProviderID` is safe — the
+      // bad route is skipped by the route-health check, not by the
+      // provider-id check. Any other route (same provider, different
+      // model; or different provider entirely) is a valid fallback as
+      // long as it is visible + provider-healthy + route-healthy.
+      const fallback = findCuratedFallbackRoute(
+        owningEntry,
+        "",
+        providerHealthMap,
+        modelRouteHealthMap,
+        now,
+      );
+      header.push(`Curated fallback for ${owningEntry.id}: ${fallback}`);
+    }
+
+    sections.push(header.join("\n"));
+  }
+
+  if (sections.length === 0) return null;
   return sections.join("\n\n");
 }
 
@@ -1418,8 +1468,13 @@ export const ModelRegistryPlugin: Plugin = async () => {
           output.system.push(buildRoutingContextSystemPrompt(modelRegistryEntry));
         }
 
-        // Only inject health/available-models sections when there are active penalties.
-        if (providerHealthMap.size === 0) {
+        // Only inject health/available-models sections when there are active
+        // penalties. Route-level penalties count too — previously this guard
+        // was `providerHealthMap.size === 0` which skipped the entire block
+        // whenever only `modelRouteHealthMap` had entries, silently hiding
+        // route-specific failures (model_not_found, route-level quota from
+        // zero-token completion, route-level timeout from hang detector).
+        if (providerHealthMap.size === 0 && modelRouteHealthMap.size === 0) {
           return;
         }
 

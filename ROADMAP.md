@@ -172,6 +172,18 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M27: system prompt silently ignored route-level penalties — short-circuit on `providerHealthMap.size === 0` skipped the whole health block `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `experimental.chat.system.transform` guarded the health injection with `if (providerHealthMap.size === 0) return;`. Three common error paths write ONLY to `modelRouteHealthMap`, never touching `providerHealthMap`: (a) `assistant.message.completed` with zero input+output tokens → route-level `quota`, (b) `session.error` with "model not found" message → route-level `model_not_found`, (c) the hang-detector `setTimeout` in `chat.params` after `AICODER_ROUTE_HANG_TIMEOUT_MS` → route-level `timeout`. When any of these fired and no provider-level penalty was present, the transform hook returned early and the agent got zero warning that the route it was currently using had just been classified as dead. It would happily retry the exact same dead route on the next turn until enough route failures eventually escalated something to provider level.
+- **Secondary bug**: `buildProviderHealthSystemPrompt` itself had no code path for route-level penalties — it only iterated `providerHealthMap`. Even if the outer guard had been removed in isolation, the prompt builder would have returned an empty string.
+- **Fix**: extend `buildProviderHealthSystemPrompt` to also iterate `modelRouteHealthMap.entries()` filtered by `until > now`. For each active route penalty, locate the owning registry entry (first enabled entry whose `provider_order[].model === routeKey`) and emit a section with the route id, state label, expiry time, and a "Curated fallback for &lt;entry.id&gt;" line computed via `findCuratedFallbackRoute`. The route-level health check added in M24 means passing an empty `blockedProviderID` is safe: the bad route is skipped via the route-health check, not via the provider-id check, and any sibling visible+healthy route can serve as the fallback. Also drop the transform-hook guard to `providerHealthMap.size === 0 && modelRouteHealthMap.size === 0`.
+- **Export**: `buildProviderHealthSystemPrompt` was file-private; exported it for direct unit testing.
+- **Tests**: (a) `buildProviderHealthSystemPrompt_whenOnlyRoutePenaltiesExist_emitsRouteSection` — seeds a single entry with two routes (iflowcn primary dead via `model_not_found`, opencode-go secondary live), calls with empty provider map, asserts the emitted prompt contains both `Route iflowcn/qwen3-coder-plus [MODEL NOT FOUND]` AND the `Curated fallback for qwen3-coder-plus: opencode-go/qwen3-coder-plus` line (proving the M24 route-aware fallback walker feeds correctly into the M27 section). (b) `buildProviderHealthSystemPrompt_whenNoPenalties_returnsNull` — pins the clean-state fast path.
+- **Deferred to a follow-up**: `buildAvailableModelsSystemPrompt` still uses raw `provider_order[0]` and ignores route health. Same bug class, different function. Left unfixed in this commit to keep the edit bounded; will be M28 or later.
+- **Verification**: 135/135 tests pass (133 + 2 new), `tsc -p tsconfig.json` clean.
+- **Files**: `src/plugins/model-registry.ts`, `src/plugins/model-registry.test.ts`.
+
 ### M26: session terminal handlers only cleared `sessionStartTimeMap` — `sessionActiveProviderMap` and `sessionActiveModelMap` leaked one entry per session forever `✅ COMPLETED`
 
 Completion Notes (2026-04-11):
