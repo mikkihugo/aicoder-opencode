@@ -1,7 +1,13 @@
 ---
 description: Fast read-only codebase mapper for ownership, search, and execution paths.
 mode: subagent
-model: z-ai/glm-4.7-flash
+model: zai-coding-plan/glm-4.7-flash
+models:
+  - zai-coding-plan/glm-4.7-flash
+  - zai-coding-plan/glm-4.7
+  - ollama-cloud/qwen3-coder-next
+routing_role: long_context_reader
+routing_complexity: medium
 permission:
   edit: deny
   bash:

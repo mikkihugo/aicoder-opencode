@@ -4,7 +4,7 @@ mode: subagent
 model: kimi-for-coding/kimi-k2-thinking
 models:
   - kimi-for-coding/kimi-k2-thinking
-  - ollama-cloud/glm-5.1
+  - zai-coding-plan/glm-5.1
   - ollama-cloud/minimax-m2.7
 routing_role: architect
 routing_complexity: large

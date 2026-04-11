@@ -4,7 +4,7 @@ mode: subagent
 model: ollama-cloud/qwen3-coder-next
 models:
   - ollama-cloud/qwen3-coder-next
-  - ollama-cloud/glm-5.1
+  - zai-coding-plan/glm-5.1
   - ollama-cloud/qwen3-coder:480b
 routing_role: code_reviewer
 routing_complexity: medium

@@ -1,7 +1,13 @@
 ---
 description: Read-only architecture helper for boundaries, tradeoffs, and simplification.
 mode: subagent
-model: minimax/MiniMax-M2.7
+model: ollama-cloud/minimax-m2.7
+models:
+  - ollama-cloud/minimax-m2.7
+  - zai-coding-plan/glm-5.1
+  - kimi-for-coding/kimi-k2-thinking
+routing_role: architect
+routing_complexity: large
 permission:
   edit: deny
   bash:

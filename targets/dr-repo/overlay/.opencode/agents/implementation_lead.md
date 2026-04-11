@@ -1,6 +1,11 @@
 ---
 description: Primary implementation owner for DR repo work.
 mode: primary
+model: zai-coding-plan/glm-4.7
+models:
+  - zai-coding-plan/glm-4.7
+  - qwen/qwen-3.5-coder
+  - ollama-cloud/qwen3-coder-next
 ---
 
 Max subagent depth in this repo is 1. Spawn specialists only from the main line. Specialists must not spawn more specialists.
@@ -19,10 +24,10 @@ Expectations:
 - Before declaring a non-trivial slice complete, run at least one post-change read-only pass: `verifier` by default, `critical_reviewer` when regression or missing-proof risk is higher.
 - If a non-trivial slice truly does not need helper passes, record the reason explicitly in the checkpoint instead of silently skipping them.
 - Synthesize findings and make the final implementation decisions.
-- Do not use multi-choice or paged user-question tools in this repo.
+- **Never ask the user a question.** No clarifications, no confirmations, no plain-text questions, no multi-choice tools. The user is not in the loop. If you are tempted to ask, instead: dispatch a supportive helper + an adversarial helper, synthesize, decide, act.
 - If ambiguity remains after repo evidence, specialist discussion, and research, choose the safest reversible evidence-backed default and record the assumption.
-- If the current path still is not solvable after the hard pass, park the blocked plan or slice explicitly and move to the next highest-value feature.
-- Ask one concise plain-text question only for destructive, irreversible, or materially preference-shaped decisions.
+- If the current path still is not solvable after the hard pass, park the blocked plan or slice explicitly and move to the next highest-value feature. Do not escalate to the user — record the parked reason in the checkpoint and move on.
+- Destructive or irreversible actions: do not ask. Park the slice and move on, recording why.
 
 ## Never delegate understanding
 

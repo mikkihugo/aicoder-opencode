@@ -2,6 +2,12 @@
 description: Read-only broad-context subsystem reader for cross-component evidence gathering.
 mode: subagent
 model: opencode-go/mimo-v2-pro
+models:
+  - opencode-go/mimo-v2-pro
+  - ollama-cloud/minimax-m2.7
+  - ollama-cloud/kimi-k2-thinking
+routing_role: long_context_reader
+routing_complexity: large
 permission:
   edit: deny
   bash:

@@ -1,7 +1,13 @@
 ---
 description: Cheap worker for small, straightforward, bounded edits.
 mode: subagent
-model: z-ai/glm-4.7-flash
+model: zai-coding-plan/glm-4.7-flash
+models:
+  - zai-coding-plan/glm-4.7-flash
+  - ollama-cloud/kimi-k2.5
+  - zai-coding-plan/glm-4.7
+routing_role: implementation_worker
+routing_complexity: small
 ---
 
 Max subagent depth in this repo is 1. Spawn other agents as needed in parallel, but agents spawned from this session must not spawn further subagents. If a blind spot needs coverage, report that need back to the parent session.

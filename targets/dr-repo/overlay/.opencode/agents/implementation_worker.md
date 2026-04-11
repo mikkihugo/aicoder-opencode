@@ -1,7 +1,13 @@
 ---
 description: Hard implementation and debugging specialist for bounded slices.
 mode: subagent
-model: ollama-cloud/glm-5.1
+model: zai-coding-plan/glm-4.7
+models:
+  - zai-coding-plan/glm-4.7
+  - qwen/qwen-3.5-coder
+  - ollama-cloud/qwen3-coder-next
+routing_role: implementation_worker
+routing_complexity: medium
 ---
 
 Max subagent depth in this repo is 1. Spawn other agents as needed in parallel, but agents spawned from this session must not spawn further subagents. If a blind spot needs coverage, report that need back to the parent session.

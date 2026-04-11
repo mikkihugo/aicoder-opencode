@@ -47,7 +47,6 @@ const AGENT_HEALTH_DIRECTORY = path.join(REPO_ROOT, ".opencode", "state", "agent
 const MAINTENANCE_PASSWORD_PATH = "/home/mhugo/code/dr-repo/.opencode/state/maintenance-web/server-password";
 const DEFAULT_MAINTENANCE_SERVER_URL = "http://127.0.0.1:8080";
 const MAINTENANCE_AUTOMATION_USERNAME = "opencode";
-const DEFAULT_AUTOPILOT_MODEL = process.env.DR_AUTOPILOT_MODEL?.trim() || "ollama-cloud/glm-5.1";
 
 function checkpointDirectory() {
   return path.join(REPO_ROOT, ".opencode", "state", "checkpoints");
@@ -520,8 +519,6 @@ async function runAutopilotOnce() {
     `autopilot${failureDigest}`,
     "--agent",
     "implementation_lead",
-    "--model",
-    DEFAULT_AUTOPILOT_MODEL,
     ...(shouldAttach ? ["--attach", attachURL, ...(maintenancePassword ? ["--password", maintenancePassword] : [])] : []),
   ];
 

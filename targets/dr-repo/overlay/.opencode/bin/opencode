@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
-REPO_XDG_CONFIG_HOME="$REPO_ROOT/.opencode/xdg-config"
 REPO_XDG_CACHE_HOME="$REPO_ROOT/.opencode/xdg-cache"
 REPO_XDG_DATA_HOME="$REPO_ROOT/.opencode/xdg-data"
 REPO_XDG_STATE_HOME="$REPO_ROOT/.opencode/xdg-state"
@@ -82,7 +81,6 @@ load_repo_opencode_environment() {
   fi
 
   export MINIMAX_API_HOST="${MINIMAX_API_HOST:-https://api.minimax.io}"
-  export XDG_CONFIG_HOME="$REPO_XDG_CONFIG_HOME"
   export XDG_CACHE_HOME="$REPO_XDG_CACHE_HOME"
   export XDG_DATA_HOME="$REPO_XDG_DATA_HOME"
   export XDG_STATE_HOME="$REPO_XDG_STATE_HOME"
@@ -139,11 +137,4 @@ for argument in "$@"; do
   fi
 done
 
-for argument in "$@"; do
-  if [[ "$argument" == "serve" || "$argument" == "web" ]]; then
-    run_opencode_with_cleanup "$REAL_OPENCODE" "$@"
-    exit $?
-  fi
-done
-
-run_opencode_with_cleanup "$REAL_OPENCODE" --pure "$@"
+run_opencode_with_cleanup "$REAL_OPENCODE" "$@"

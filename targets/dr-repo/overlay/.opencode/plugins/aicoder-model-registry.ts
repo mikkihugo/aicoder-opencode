@@ -1,1 +1,1 @@
-export { ModelRegistryPlugin } from "../../../../../src/plugins/model-registry.ts";
+export { ModelRegistryPlugin } from "../../../../../dist/plugins/model-registry.js";

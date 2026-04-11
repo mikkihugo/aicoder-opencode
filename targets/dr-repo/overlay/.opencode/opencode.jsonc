@@ -13,7 +13,6 @@
     "./.agents/skills/control-plane-maintenance-base/SKILL.md"
   ],
   "plugin": [
-    "file:./.opencode/plugins/model-registry",
     "file:./.opencode/plugins/dr-checkpoints",
     "file:./.opencode/plugins/dr-plan-context",
     "file:./.opencode/plugins/dr-context-compaction",

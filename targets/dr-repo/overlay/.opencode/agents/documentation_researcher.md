@@ -1,7 +1,7 @@
 ---
 description: Read-only external-doc and reference researcher.
 mode: subagent
-model: z-ai/glm-4.7-flash
+model: zai-coding-plan/glm-4.7-flash
 permission:
   edit: deny
   bash:

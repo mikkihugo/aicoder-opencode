@@ -2,6 +2,12 @@
 description: Read-only security reviewer for trust boundaries, auth, sessions, CSRF, secrets, and dangerous execution paths.
 mode: subagent
 model: kimi-for-coding/kimi-k2-thinking
+models:
+  - kimi-for-coding/kimi-k2-thinking
+  - zai-coding-plan/glm-5.1
+  - ollama-cloud/minimax-m2.7
+routing_role: deep_reviewer
+routing_complexity: large
 permission:
   edit: deny
   bash:

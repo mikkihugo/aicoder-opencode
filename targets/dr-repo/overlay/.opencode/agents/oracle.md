@@ -2,6 +2,12 @@
 description: Read-only strategic advisor for hard debugging, self-review, and high-cost tradeoffs.
 mode: subagent
 model: kimi-for-coding/kimi-k2-thinking
+models:
+  - kimi-for-coding/kimi-k2-thinking
+  - zai-coding-plan/glm-5.1
+  - ollama-cloud/minimax-m2.7
+routing_role: oracle
+routing_complexity: large
 permission:
   edit: deny
   bash:

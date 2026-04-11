@@ -10,57 +10,22 @@ MAINTENANCE_AUTOMATION_USERNAME="${DR_REPO_MAINTENANCE_AUTOMATION_USERNAME:-${DR
 MAINTENANCE_PASSWORD_PATH="${DR_REPO_MAINTENANCE_PASSWORD_PATH:-$REPO_ROOT/.opencode/state/maintenance-web/server-password}"
 LOG_DIRECTORY="$REPO_ROOT/.opencode/state/autopilot"
 LOG_PATH="$LOG_DIRECTORY/maintenance-autonomous-start.log"
-START_MESSAGE="${1:-Start autonomous iteration for dr-repo and continue until done.}"
-AUTONOMOUS_SESSION_TITLE="${DR_REPO_MAINTENANCE_AUTONOMOUS_SESSION_TITLE:-${DR_MAINTENANCE_AUTONOMOUS_SESSION_TITLE:-dr-maintenance-autonomous}}"
-GENERIC_AUTONOMOUS_TITLE_REGEX="${DR_REPO_MAINTENANCE_GENERIC_AUTONOMOUS_TITLE_REGEX:-${DR_MAINTENANCE_GENERIC_AUTONOMOUS_TITLE_REGEX:-autonomous iteration|dr autonomous iteration mode}}"
+START_MESSAGE="${1:-Maintenance iteration for dr-repo. Follow this workflow strictly:
+1. Consult roadmap_keeper for the next highest-value slice (read STATUS.md, ROADMAP.md, active plans under docs/plans/, recent checkpoints).
+2. Dispatch planning_analyst and consumer_advocate in parallel for that slice. Planning must produce a Critical Files list; consumer_advocate must surface user-facing friction and unsafe defaults.
+3. For every non-trivial slice, run a concrete partner/combatant pair in parallel before coding: use codebase_explorer or architecture_consultant as the supportive read helper, and use critical_reviewer or oracle as the adversarial read helper. Synthesize both reports yourself before editing.
+4. Implement the change yourself, or delegate one tightly scoped implementation_worker task with exact paths, exact change, and one-sentence why.
+5. Run verifier after changes. If regression or security risk is material, run critical_reviewer or security_reviewer as an additional read-only pass.
+6. Commit when verified. Loop to step 1 for the next slice. Never ask the user unless the next move is destructive or irreversible; otherwise record the assumption in the checkpoint and continue.
+7. Keep the session title and checkpoints clean and specific to dr-repo maintenance.
+
+Spec-kit is the canonical scaffold: shape every non-trivial slice as /specify (spec from .specify/templates/spec-template.md) -> /plan (plan from plan-template.md) -> /tasks (tasks from tasks-template.md) -> /implement. PM skills (pm-outcome-roadmap, pm-create-prd, pm-brainstorm-okrs, pm-prioritization-frameworks, pm-pre-mortem) feed the spec; planning_analyst feeds the plan; implementation_lead executes tasks.}"
+AUTONOMOUS_SESSION_TITLE="${DR_REPO_MAINTENANCE_AUTONOMOUS_SESSION_TITLE:-${DR_MAINTENANCE_AUTONOMOUS_SESSION_TITLE:-dr-repo-maintenance}}"
+GENERIC_AUTONOMOUS_TITLE_REGEX="${DR_REPO_MAINTENANCE_GENERIC_AUTONOMOUS_TITLE_REGEX:-${DR_MAINTENANCE_GENERIC_AUTONOMOUS_TITLE_REGEX:-dr-maintenance-autonomous|dr[- ]repo maintenance|autonomous iteration|dr autonomous iteration mode}}"
 SESSION_ID_FILE="$LOG_DIRECTORY/maintenance-autonomous-session-id"
-AUTONOMOUS_MODEL="${DR_REPO_MAINTENANCE_AUTONOMOUS_MODEL:-${DR_AUTOPILOT_MODEL:-ollama-cloud/glm-5.1}}"
 RUNNER_UNIT_NAME="${DR_REPO_MAINTENANCE_RUNNER_UNIT_NAME:-dr-repo-maintenance-run.service}"
-
-resolve_real_opencode_binary() {
-  PATH="$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" command -v opencode 2>/dev/null || true
-}
-
-OPENCODE_BIN="$(resolve_real_opencode_binary)"
-
-if [[ -z "$OPENCODE_BIN" ]]; then
-  echo "dr-maintenance-autonomous: could not find real opencode binary" >&2
-  exit 1
-fi
-
-maintenance_automation_url() {
-  if [[ -n "${DR_REPO_MAINTENANCE_AUTOMATION_URL:-}" ]]; then
-    printf '%s\n' "$DR_REPO_MAINTENANCE_AUTOMATION_URL"
-    return 0
-  fi
-
-  if [[ -n "${DR_MAINTENANCE_AUTOMATION_URL:-}" ]]; then
-    printf '%s\n' "$DR_MAINTENANCE_AUTOMATION_URL"
-    return 0
-  fi
-
-  if [[ ! -s "$MAINTENANCE_PASSWORD_PATH" ]]; then
-    printf '%s\n' "$MAINTENANCE_SERVER_URL"
-    return 0
-  fi
-
-  python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" <<'PY'
-import sys
-from pathlib import Path
-from urllib.parse import quote, urlsplit, urlunsplit
-
-server_url = sys.argv[1]
-username = sys.argv[2]
-password_path = Path(sys.argv[3])
-password = password_path.read_text(encoding="utf-8").strip()
-parts = urlsplit(server_url)
-host = parts.hostname or "127.0.0.1"
-port = f":{parts.port}" if parts.port else ""
-userinfo = f"{quote(username, safe='')}:{quote(password, safe='')}"
-netloc = f"{userinfo}@{host}{port}"
-print(urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment)))
-PY
-}
+REMOTE_MESSAGE_READ_TIMEOUT_SECONDS="${DR_REPO_REMOTE_MESSAGE_READ_TIMEOUT_SECONDS:-120}"
+ACTIVE_RUN_STALE_SECONDS="${DR_REPO_ACTIVE_RUN_STALE_SECONDS:-300}"
 
 list_remote_sessions() {
   python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" "$REPO_ROOT" <<'PY'
@@ -177,10 +142,256 @@ with open(checkpoint_path, "w", encoding="utf-8") as handle:
 PY
 }
 
+create_remote_session() {
+  local session_title="$1"
+  python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" "$REPO_ROOT" "$session_title" <<'PY'
+import base64
+import json
+import sys
+import urllib.request
+import urllib.error
+from pathlib import Path
+from urllib.parse import quote
+
+server_url = sys.argv[1].rstrip("/")
+username = sys.argv[2]
+password_path = Path(sys.argv[3])
+repo_root = sys.argv[4]
+session_title = sys.argv[5]
+body = json.dumps({"title": session_title}).encode("utf-8")
+request = urllib.request.Request(
+    f"{server_url}/session?directory={quote(repo_root, safe='/')}",
+    data=body,
+    method="POST",
+)
+request.add_header("Content-Type", "application/json")
+request.add_header("Accept", "application/json")
+
+if password_path.exists():
+    password = password_path.read_text(encoding="utf-8").strip()
+    if password:
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        request.add_header("Authorization", f"Basic {token}")
+
+with urllib.request.urlopen(request, timeout=30) as response:
+    payload = json.loads(response.read().decode("utf-8"))
+    print(payload["id"])
+PY
+}
+
+session_requires_rotation() {
+  local session_id="$1"
+  local expected_agent="$2"
+  python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" "$session_id" "$expected_agent" <<'PY'
+import base64
+import json
+import sys
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+server_url = sys.argv[1].rstrip("/")
+username = sys.argv[2]
+password_path = Path(sys.argv[3])
+session_id = sys.argv[4]
+expected_agent = sys.argv[5]
+request = urllib.request.Request(f"{server_url}/session/{session_id}/message")
+
+if password_path.exists():
+    password = password_path.read_text(encoding="utf-8").strip()
+    if password:
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        request.add_header("Authorization", f"Basic {token}")
+
+try:
+    with urllib.request.urlopen(request, timeout=30) as response:
+        messages = json.loads(response.read().decode("utf-8"))
+except urllib.error.URLError:
+    print("missing-session")
+    raise SystemExit(0)
+
+if not messages:
+    print("empty-session")
+    raise SystemExit(0)
+
+for message in messages:
+    info = message.get("info") or {}
+    if info.get("role") != "user":
+        continue
+
+    agent_name = info.get("agent")
+    if isinstance(agent_name, str) and agent_name and agent_name != expected_agent:
+        print("foreign-agent")
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+session_has_active_assistant_run() {
+  local session_id="$1"
+  python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" "$session_id" <<'PY'
+import base64
+import json
+import sys
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+server_url = sys.argv[1].rstrip("/")
+username = sys.argv[2]
+password_path = Path(sys.argv[3])
+session_id = sys.argv[4]
+request = urllib.request.Request(f"{server_url}/session/{session_id}/message")
+
+if password_path.exists():
+    password = password_path.read_text(encoding="utf-8").strip()
+    if password:
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        request.add_header("Authorization", f"Basic {token}")
+
+try:
+    with urllib.request.urlopen(request, timeout=30) as response:
+        messages = json.loads(response.read().decode("utf-8"))
+except urllib.error.URLError:
+    raise SystemExit(1)
+
+for message in reversed(messages):
+    info = message.get("info") or {}
+    if info.get("role") != "assistant":
+        continue
+
+    finish = info.get("finish")
+    if isinstance(finish, str) and finish:
+        raise SystemExit(1)
+
+    print("assistant-active")
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+session_has_stale_assistant_run() {
+  local session_id="$1"
+  local stale_after_seconds="$2"
+  python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" "$session_id" "$stale_after_seconds" <<'PY'
+import base64
+import json
+import sys
+import time
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+server_url = sys.argv[1].rstrip("/")
+username = sys.argv[2]
+password_path = Path(sys.argv[3])
+session_id = sys.argv[4]
+stale_after_seconds = int(sys.argv[5])
+request = urllib.request.Request(f"{server_url}/session/{session_id}/message")
+
+if password_path.exists():
+    password = password_path.read_text(encoding="utf-8").strip()
+    if password:
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        request.add_header("Authorization", f"Basic {token}")
+
+try:
+    with urllib.request.urlopen(request, timeout=30) as response:
+        messages = json.loads(response.read().decode("utf-8"))
+except urllib.error.URLError:
+    raise SystemExit(1)
+
+now_ms = int(time.time() * 1000)
+for message in reversed(messages):
+    info = message.get("info") or {}
+    if info.get("role") != "assistant":
+        continue
+
+    finish = info.get("finish")
+    if isinstance(finish, str) and finish:
+        raise SystemExit(1)
+
+    created_ms = ((info.get("time") or {}).get("created"))
+    if isinstance(created_ms, (int, float)) and now_ms - int(created_ms) >= stale_after_seconds * 1000:
+        print("assistant-stale")
+        raise SystemExit(0)
+
+    raise SystemExit(1)
+
+raise SystemExit(1)
+PY
+}
+
+send_remote_prompt() {
+  local session_id="$1"
+  local agent_name="$2"
+  local prompt_text="$3"
+  python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" "$REPO_ROOT" "$session_id" "$agent_name" "$prompt_text" "$REMOTE_MESSAGE_READ_TIMEOUT_SECONDS" <<'PY'
+import base64
+import http.client
+import json
+import sys
+import urllib.request
+from pathlib import Path
+from urllib.parse import quote
+
+server_url = sys.argv[1].rstrip("/")
+username = sys.argv[2]
+password_path = Path(sys.argv[3])
+repo_root = sys.argv[4]
+session_id = sys.argv[5]
+agent_name = sys.argv[6]
+prompt_text = sys.argv[7]
+body = {
+    "agent": agent_name,
+    "parts": [
+        {
+            "type": "text",
+            "text": prompt_text,
+        }
+    ],
+}
+
+request = urllib.request.Request(
+    f"{server_url}/session/{quote(session_id, safe='')}/message?directory={quote(repo_root, safe='/')}",
+    data=json.dumps(body).encode("utf-8"),
+    method="POST",
+)
+request.add_header("Content-Type", "application/json")
+request.add_header("Accept", "application/json")
+
+if password_path.exists():
+    password = password_path.read_text(encoding="utf-8").strip()
+    if password:
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        request.add_header("Authorization", f"Basic {token}")
+
+with urllib.request.urlopen(request, timeout=30) as response:
+    print(
+        json.dumps(
+            {
+                "accepted": True,
+                "status": response.status,
+                "sessionID": session_id,
+                "agent": agent_name,
+            }
+        )
+    )
+PY
+}
+
+stop_legacy_runner() {
+  systemctl --user stop "$RUNNER_UNIT_NAME" >/dev/null 2>&1 || true
+}
+
 mkdir -p "$LOG_DIRECTORY"
+touch "$LOG_PATH"
+exec >>"$LOG_PATH" 2>&1
+echo "[$(date -Iseconds)] dr-repo-maintenance: bootstrap start"
 systemctl --user start "$MAINTENANCE_WEB_SERVICE_NAME" >/dev/null
 "$AUTOPILOT_BIN" start >/dev/null
-MAINTENANCE_AUTOMATION_URL="$(maintenance_automation_url)"
 wait_for_remote_server >/dev/null
 REMOTE_SESSIONS_JSON="$(list_remote_sessions)"
 
@@ -205,6 +416,7 @@ duplicates = [session["id"] for session in matching_sessions[1:]]
 generic_conflicts = [
     session["id"]
     for session in sessions
+    if str(session.get("directory", "")) == repo_root
     if str(session.get("title", "")) != session_title
     and generic_autonomous_title_regex.search(str(session.get("title", "")))
 ]
@@ -258,68 +470,39 @@ cleanup_session_ids() {
 cleanup_session_ids "$DUPLICATE_SESSION_IDS"
 cleanup_session_ids "$GENERIC_CONFLICT_SESSION_IDS"
 
-start_runner() {
-  if systemctl --user is-active --quiet "$RUNNER_UNIT_NAME"; then
-    RUNNER_WAS_STARTED=0
-    echo "dr-maintenance-autonomous: runner already active on $MAINTENANCE_SERVER_URL"
-    echo "log: $LOG_PATH"
-    return 0
+if [[ -n "$SELECTED_SESSION_ID" ]]; then
+  if session_requires_rotation "$SELECTED_SESSION_ID" "implementation_lead"; then
+    echo "[$(date -Iseconds)] dr-repo-maintenance: rotating polluted session $SELECTED_SESSION_ID"
+    delete_remote_session "$SELECTED_SESSION_ID"
+    SELECTED_SESSION_ID=""
   fi
-
-  RUNNER_WAS_STARTED=1
-  systemd-run \
-    --user \
-    --unit "$RUNNER_UNIT_NAME" \
-    --collect \
-    --quiet \
-    --working-directory="$REPO_ROOT" \
-    -p "StandardOutput=append:$LOG_PATH" \
-    -p "StandardError=append:$LOG_PATH" \
-    "$OPENCODE_BIN" run \
-      --attach "$MAINTENANCE_AUTOMATION_URL" \
-      --dir "$REPO_ROOT" \
-      --model "$AUTONOMOUS_MODEL" \
-      "$@" \
-      --command autopilot \
-      --agent implementation_lead \
-      "$START_MESSAGE"
-}
-
-RUNNER_WAS_STARTED=0
+fi
 
 if [[ -n "$SELECTED_SESSION_ID" ]]; then
-  printf '%s\n' "$SELECTED_SESSION_ID" >"$SESSION_ID_FILE"
-  write_autonomous_checkpoint "$SELECTED_SESSION_ID"
-  start_runner --session "$SELECTED_SESSION_ID"
-  echo "dr-maintenance-autonomous: resumed $SELECTED_SESSION_ID via $MAINTENANCE_SERVER_URL"
-  echo "log: $LOG_PATH"
-  exit 0
+  if session_has_stale_assistant_run "$SELECTED_SESSION_ID" "$ACTIVE_RUN_STALE_SECONDS"; then
+    echo "[$(date -Iseconds)] dr-repo-maintenance: rotating stale active session $SELECTED_SESSION_ID"
+    delete_remote_session "$SELECTED_SESSION_ID"
+    SELECTED_SESSION_ID=""
+  elif session_has_active_assistant_run "$SELECTED_SESSION_ID"; then
+    echo "[$(date -Iseconds)] dr-repo-maintenance: assistant still running in session $SELECTED_SESSION_ID"
+    printf '%s\n' "$SELECTED_SESSION_ID" >"$SESSION_ID_FILE"
+    write_autonomous_checkpoint "$SELECTED_SESSION_ID"
+    echo "dr-repo-maintenance: active run already in progress on $MAINTENANCE_SERVER_URL"
+    exit 0
+  fi
 fi
 
-start_runner --title "$AUTONOMOUS_SESSION_TITLE"
-
-if [[ "$RUNNER_WAS_STARTED" -ne 1 ]]; then
-  exit 0
+if [[ -z "$SELECTED_SESSION_ID" ]]; then
+  SELECTED_SESSION_ID="$(create_remote_session "$AUTONOMOUS_SESSION_TITLE")"
 fi
 
-sleep 2
-NEW_SESSION_ID="$(python3 - "$(list_remote_sessions)" "$AUTONOMOUS_SESSION_TITLE" "$REPO_ROOT" <<'PY'
-import json
-import sys
+printf '%s\n' "$SELECTED_SESSION_ID" >"$SESSION_ID_FILE"
+write_autonomous_checkpoint "$SELECTED_SESSION_ID"
 
-sessions = json.loads(sys.argv[1]) if sys.argv[1].strip() else []
-session_title = sys.argv[2]
-repo_root = sys.argv[3]
-for session in sessions:
-    if session.get("title") == session_title and session.get("directory") == repo_root:
-        print(session["id"])
-        break
-PY
-)"
-if [[ -n "$NEW_SESSION_ID" ]]; then
-  printf '%s\n' "$NEW_SESSION_ID" >"$SESSION_ID_FILE"
-  write_autonomous_checkpoint "$NEW_SESSION_ID"
-fi
+stop_legacy_runner
+echo "[$(date -Iseconds)] dr-repo-maintenance: prompting session $SELECTED_SESSION_ID via $MAINTENANCE_SERVER_URL"
+PROMPT_RESULT="$(send_remote_prompt "$SELECTED_SESSION_ID" "implementation_lead" "$START_MESSAGE")"
+echo "[$(date -Iseconds)] dr-repo-maintenance: prompt completed $PROMPT_RESULT"
 
-echo "dr-maintenance-autonomous: seeded via $MAINTENANCE_SERVER_URL"
+echo "dr-repo-maintenance: seeded via $MAINTENANCE_SERVER_URL"
 echo "log: $LOG_PATH"
