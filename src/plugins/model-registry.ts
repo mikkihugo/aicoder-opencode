@@ -624,6 +624,18 @@ export function buildRouteHealthEntry(
 const QUOTA_HTTP_STATUS_CODE = 429;
 const NO_CREDIT_HTTP_STATUS_CODE = 402;
 const KEY_DEAD_HTTP_STATUS_CODES: ReadonlySet<number> = new Set([401, 403]);
+// HTTP status codes that may legitimately carry a "model not found" body.
+// 404: direct providers returning HTTP-canonical not-found.
+// 500: openrouter synthesizes `500 "Model not found"` when its router
+//   cannot resolve the requested model to any upstream.
+// 0:   no status code is available (proxy stripped it, network error, or
+//   the runtime surfaced a structured error without a status). Accepting
+//   the keyword match here is the only signal available.
+// Authoritative status codes (401/402/403/429) are deliberately excluded
+// so key_dead / no_credit / quota classification wins over a keyword
+// match — see `shouldClassifyAsModelNotFound` for the bug history.
+const MODEL_NOT_FOUND_HTTP_STATUS_CODES: ReadonlySet<number> = new Set([0, 404, 500]);
+const MODEL_NOT_FOUND_KEYWORD = "model not found";
 
 // Lowercased substring sets for the keyword-fallback path (used only
 // when statusCode is 0 or unrecognized — e.g. network errors, proxies
@@ -725,6 +737,60 @@ export function classifyProviderApiError(
   if (QUOTA_KEYWORDS.some((kw) => lowerMessage.includes(kw))) return "quota";
 
   return "unclassified";
+}
+
+/**
+ * Decide whether an APIError should fire a route-level `model_not_found`
+ * penalty (1h on the composite `provider/model` key) instead of a
+ * provider-level penalty driven by `classifyProviderApiError`.
+ *
+ * History: the `session.error` handler used to check
+ * `message.includes("model not found")` unconditionally, BEFORE calling
+ * `classifyProviderApiError`, and then `return`ed on match. That path
+ * short-circuited every authoritative provider-level status code whenever
+ * the message narrative happened to contain the phrase. Reachable via
+ * custom proxies, aggregator wrappers, and providers that embed the
+ * requested model name in their auth/quota error bodies:
+ *
+ *   - `401 "unauthorized: your key cannot access model not found in allowlist"`
+ *     → fired `model_not_found` (route-level, 1h) instead of `key_dead`
+ *     (provider-level, 2h). Dead key retried every hour on just the one
+ *     route while its sibling routes through the same dead provider
+ *     continued to burn retries too.
+ *   - `402 "insufficient credits: model not found in paid tier"`
+ *     → fired `model_not_found` instead of `no_credit` (2h provider).
+ *     Same half-quarantine bug.
+ *   - `403 "forbidden: ... model not found ..."` → same as 401 path.
+ *   - `429 "rate limit exceeded: model not found in free quota window"`
+ *     → fired `model_not_found` (route-level) instead of `quota`
+ *     (provider-level). Wrong SCOPE: the provider is throttling, not
+ *     the model — all routes through that provider should back off.
+ *
+ * The fix mirrors the M35 priority-dominance rule inside
+ * `classifyProviderApiError`: authoritative status codes (401/402/403/429)
+ * must win over any keyword heuristic. Only statuses that genuinely mean
+ * "this model does not exist at this provider" trigger the model-not-found
+ * path — see the `MODEL_NOT_FOUND_HTTP_STATUS_CODES` set.
+ *
+ * The helper is pure so it is unit-testable without any live health maps
+ * or opencode runtime event payloads.
+ *
+ * Args:
+ *   statusCode: HTTP status code from the opencode APIError payload, or
+ *     0 when absent.
+ *   lowerMessage: Error message, already lowercased at the call site.
+ *
+ * Returns:
+ *   `true` when the caller should fire a route-level `model_not_found`
+ *   penalty. `false` when the authoritative status code should instead
+ *   drive a provider-level classification via `classifyProviderApiError`.
+ */
+export function shouldClassifyAsModelNotFound(
+  statusCode: number,
+  lowerMessage: string,
+): boolean {
+  if (!lowerMessage.includes(MODEL_NOT_FOUND_KEYWORD)) return false;
+  return MODEL_NOT_FOUND_HTTP_STATUS_CODES.has(statusCode);
 }
 
 /**
@@ -2069,12 +2135,13 @@ export const ModelRegistryPlugin: Plugin = async () => {
         const modelID = model?.id;
 
         // "Model not found" message → model_not_found backoff (1h).
-        // Note: we require the message match — a bare 500 is routinely a
-        // transient upstream error and must not poison an otherwise-working
-        // route. Tested statusCode/message combinations: 500+"Model not found"
-        // (openrouter synthesized), 404+"model not found" (direct providers).
+        // Gated on `shouldClassifyAsModelNotFound`: authoritative status
+        // codes 401/402/403/429 suppress the keyword match so a dead key
+        // or quota-throttled provider isn't misclassified as a per-route
+        // missing-model problem. Accepted statuses: 0 (no status), 404
+        // (direct providers), 500 (openrouter router synthesis).
         const isModelNotFound =
-          modelID !== undefined && message.includes("model not found");
+          modelID !== undefined && shouldClassifyAsModelNotFound(statusCode, message);
         if (isModelNotFound && modelID) {
           const { routeKey, health } = buildRouteHealthEntry(
             providerID,

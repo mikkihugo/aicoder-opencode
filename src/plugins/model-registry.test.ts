@@ -10,6 +10,7 @@ import {
   buildProviderHealthSystemPrompt,
   buildRouteHealthEntry,
   classifyProviderApiError,
+  shouldClassifyAsModelNotFound,
   clearSessionHangState,
   countHealthyVisibleRoutes,
   composeRouteKey,
@@ -1816,6 +1817,106 @@ test("classifyProviderApiError_whenStatusIs500AndNoKeywords_returnsUnclassified"
   // trigger a provider penalty.
   const result = classifyProviderApiError(500, "");
   assert.equal(result, "unclassified");
+});
+
+test("shouldClassifyAsModelNotFound_when404WithModelNotFoundMessage_returnsTrue", () => {
+  // HTTP-canonical not-found from a direct provider. Route-level
+  // model_not_found penalty is correct — the provider is fine, this
+  // specific model doesn't exist there.
+  assert.equal(
+    shouldClassifyAsModelNotFound(404, "model not found: glm-5.1"),
+    true,
+  );
+});
+
+test("shouldClassifyAsModelNotFound_when500WithModelNotFoundMessage_returnsTrue", () => {
+  // Openrouter synthesizes `500 "Model not found"` when its router
+  // cannot resolve the requested model to any upstream. Accepted.
+  assert.equal(
+    shouldClassifyAsModelNotFound(500, "model not found in router"),
+    true,
+  );
+});
+
+test("shouldClassifyAsModelNotFound_whenStatusIsZeroWithModelNotFoundMessage_returnsTrue", () => {
+  // statusCode=0 means no authoritative signal is available (proxy
+  // stripped it, network error, structured body). The keyword is the
+  // only classifier we have — accept it.
+  assert.equal(
+    shouldClassifyAsModelNotFound(0, "model not found on upstream"),
+    true,
+  );
+});
+
+test("shouldClassifyAsModelNotFound_when401WithModelNotFoundMessage_returnsFalse", () => {
+  // Priority-dominance regression pin: a dead key that happens to
+  // mention the phrase in its auth-failure narrative must NOT fire
+  // a route-level model_not_found (1h). The caller's downstream
+  // `classifyProviderApiError(401, ...)` will correctly return
+  // "key_dead" and the provider will be quarantined for 2h.
+  assert.equal(
+    shouldClassifyAsModelNotFound(
+      401,
+      "unauthorized: your key cannot access model not found in allowlist",
+    ),
+    false,
+  );
+});
+
+test("shouldClassifyAsModelNotFound_when402WithModelNotFoundMessage_returnsFalse", () => {
+  // Priority-dominance regression pin: no_credit (402) must win over
+  // a keyword match. Otherwise a drained account retries every hour
+  // on just one route instead of quarantining the provider for 2h.
+  assert.equal(
+    shouldClassifyAsModelNotFound(
+      402,
+      "insufficient credits: model not found in paid tier",
+    ),
+    false,
+  );
+});
+
+test("shouldClassifyAsModelNotFound_when403WithModelNotFoundMessage_returnsFalse", () => {
+  // Priority-dominance regression pin: 403 routes to key_dead like 401.
+  assert.equal(
+    shouldClassifyAsModelNotFound(
+      403,
+      "forbidden: api key cannot reach model not found in tier",
+    ),
+    false,
+  );
+});
+
+test("shouldClassifyAsModelNotFound_when429WithModelNotFoundMessage_returnsFalse", () => {
+  // Priority-dominance regression pin: 429 is a PROVIDER-level quota
+  // signal. Misclassifying as route-level model_not_found leaves the
+  // other routes through the same throttled provider burning retries
+  // while only the one route sits out the backoff window.
+  assert.equal(
+    shouldClassifyAsModelNotFound(
+      429,
+      "rate limit exceeded: model not found in free quota window",
+    ),
+    false,
+  );
+});
+
+test("shouldClassifyAsModelNotFound_whenStatusIs500WithUnrelatedMessage_returnsFalse", () => {
+  // A bare 500 with no keyword is a transient upstream error — must
+  // not poison a working route. Requires the keyword to trip.
+  assert.equal(
+    shouldClassifyAsModelNotFound(500, "internal server error"),
+    false,
+  );
+});
+
+test("shouldClassifyAsModelNotFound_when404WithUnrelatedMessage_returnsFalse", () => {
+  // 404 without the keyword does not trigger the penalty — some
+  // providers return 404 for transient routing blips.
+  assert.equal(
+    shouldClassifyAsModelNotFound(404, "not found"),
+    false,
+  );
 });
 
 test("countHealthyVisibleRoutes_whenNoPenaltiesActive_returnsAllVisibleRoutes", () => {
