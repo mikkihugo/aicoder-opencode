@@ -28,9 +28,9 @@ Shared maintenance control plane for repo-local AI coding lanes.
 - **Completion Notes (2026-04-11):** Added .specify/, spec-kit/, Product-Manager-Skills/, apps/ to .gitignore. These are external repos (git subrepos) that don't belong in aicoder-opencode.
 
 ### S004: Push unpushed commits
-- **Status:** Pending
+- **Status:** Parked
 - **Priority:** Low (local-only changes)
-- **Scope:** Review 12 ahead-of-origin commits, verify they're ready, push to origin
+- **Parked (2026-04-11):** 16 commits ahead of origin. Pushing to origin is a visible external action — requires user confirmation. All local commits verified: `make check` passes, targets validate.
 
 ## Completed
 
