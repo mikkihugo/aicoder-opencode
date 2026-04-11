@@ -4585,6 +4585,85 @@ export function finalizeHungSessionState(
  *   now: Wall-clock timestamp in ms.
  *   persistFn: Injected persister (production passes
  *     `persistProviderHealth`; tests pass a spy).
+ *
+ * ## Drift surfaces (M146 PDD)
+ *
+ * The three pre-existing M77 pins bundle scenario outcomes (hung →
+ * write+persist+clear; completed → no-write+no-persist; within-budget →
+ * no-write+no-persist+session-intact). They cover the big scenarios but
+ * each test asserts multiple post-conditions in one body, so a single
+ * sabotage fires multiple assertions AND multiple pins, and the failure
+ * output cannot localise which of the three orthogonal invariants broke.
+ * M146 adds three asymmetric pins that each fire on exactly one surface:
+ *
+ *   (1) **`if (result === null) return;` null-guard.** The sole thing
+ *       protecting the three `result.*` dereferences below from a
+ *       `TypeError: cannot read properties of null (reading 'routeKey')`.
+ *       The guard matters precisely BECAUSE this wrapper runs inside the
+ *       `chat.params` hang-timer `setTimeout` closure — an async-isolated
+ *       execution context with no surrounding `try`/`catch` and no
+ *       caller-side handler. A thrown exception there surfaces as an
+ *       `unhandledRejection` at the Node process level, which in a
+ *       daemonized plugin host manifests as noisy stderr spam AND (worse)
+ *       aborts the timer's cleanup semantics so the per-session maps
+ *       retain their entries — the exact silent-death leak M77 was
+ *       designed to close. A refactor that "simplifies" the early return
+ *       to let control fall through (or replaces the guard with a
+ *       non-null assertion `result!.routeKey` on the theory that
+ *       `finalizeHungSessionState` is "always" non-null at this call
+ *       site) would pass every existing scenario pin because the hung
+ *       scenario never reaches the null branch and the non-hung scenarios
+ *       observe no-ops anyway. The new Pin A fires exclusively on the
+ *       null path and asserts `doesNotThrow` — decoupled from every
+ *       map-size assertion so no other sabotage can trigger it.
+ *
+ *   (2) **`result.routeKey` passed as the 3rd argument to
+ *       `recordRouteHealthPenalty`.** This is the composite route key
+ *       under which the penalty will be stored in `modelRouteHealthMap`.
+ *       A drift that substitutes a different identifier — the raw
+ *       `sessionID`, a hard-coded literal, the stale `result.health.state`
+ *       string, a model-id without the provider prefix — would write the
+ *       penalty to a key no reader ever queries. `isRouteCurrentlyHealthy`
+ *       and `findLiveRoutePenalty` both compose their read key via
+ *       `composeRouteKey({provider, model})`, so a misrouted write is
+ *       silently lost: the hung session's route keeps being selected on
+ *       the next turn, the hang timer fires again, another misrouted
+ *       write happens, and the backoff never accrues. The classic
+ *       "penalty recorded but invisible" drift. New Pin B asserts the
+ *       entry lands at EXACTLY `composeRouteKey({provider: "iflowcn",
+ *       model: "qwen3-coder-plus"})` using `map.has` on the composite key
+ *       literal. Orthogonal to Pin A (hung path, not null path) and
+ *       Pin C (key check, not persistFn check).
+ *
+ *   (3) **`persistFn` forwarded as the 5th argument to
+ *       `recordRouteHealthPenalty`.** This is the injected persistence
+ *       callback — production passes `persistProviderHealth` (the disk
+ *       writer that appends to the on-disk JSONL health log consumed by
+ *       the M35 resume-after-restart path); tests pass a spy. A drift
+ *       that substitutes a noop `() => {}`, or accidentally passes a
+ *       different captured function from an outer scope, breaks the
+ *       disk-durability contract: the in-memory map still has the
+ *       penalty, the current session still sees the backoff, BUT the
+ *       plugin process restart loses every hang-detected penalty because
+ *       nothing was ever written to disk. The next restart re-enables
+ *       every penalized route, the hang-timer re-accrues from scratch,
+ *       and a user who restarted to clear an unrelated issue inherits
+ *       a fresh round of the same dead-route hangs. New Pin C asserts
+ *       the spy fires exactly once on the hung path — orthogonal to
+ *       Pin B because Pin B checks WHERE the write landed (map key)
+ *       while Pin C checks WHETHER the durability callback fired
+ *       (spy call count). A sabotage that misroutes the key still
+ *       fires the spy; a sabotage that swallows the spy still writes
+ *       the map. The two surfaces are independent.
+ *
+ * ## Body contract
+ *
+ * Bitwise-identical to pre-M146. Three-statement body: delegate to
+ * `finalizeHungSessionState`, guard on null, forward to
+ * `recordRouteHealthPenalty`. Asymmetric pins at
+ * `finalizeHungSessionStateAndRecordPenalty_whenResultIsNull_doesNotThrowViaNullGuard`,
+ * `..._whenSessionHung_writesPenaltyAtExactCompositeRouteKey`, and
+ * `..._whenSessionHung_persistFnSpyFiresExactlyOnceOnNonNullPath`.
  */
 export function finalizeHungSessionStateAndRecordPenalty(
   sessionID: string,

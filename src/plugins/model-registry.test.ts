@@ -7764,6 +7764,138 @@ test("finalizeHungSessionStateAndRecordPenalty_whenDurationStillWithinBudget_doe
   assert.equal(modelMap.has("s3"), true);
 });
 
+// M146 asymmetric PDD pins for finalizeHungSessionStateAndRecordPenalty.
+// Each sabotage on one of the three orthogonal drift surfaces documented in
+// the M146 docstring fires EXACTLY one of the three pins below among the new
+// pins (pre-existing M77 scenario pins may fire additively):
+//
+//   S1 (drop `if (result === null) return;`)
+//     → Pin A fires (null path crashes through to `result.routeKey` deref)
+//     → Pins B, C untouched (hung path doesn't exercise the guard)
+//
+//   S2 (replace `result.routeKey` with a wrong literal / `sessionID` /
+//       `result.health.state` etc.)
+//     → Pin B fires (map entry lands at wrong key, `.has(composite)` is false)
+//     → Pin A untouched (null path never reaches the write)
+//     → Pin C untouched (persistFn still fires with the injected spy)
+//
+//   S3 (replace `persistFn` with noop `() => {}` / swallow the arg)
+//     → Pin C fires (spy never called)
+//     → Pin A untouched (null path short-circuits before the call)
+//     → Pin B untouched (write still lands at correct composite key)
+test("finalizeHungSessionStateAndRecordPenalty_whenResultIsNull_doesNotThrowViaNullGuard", () => {
+  // M146 Pin A: the null-guard surface in isolation. Feed a session that is
+  // NOT in any of the hang-detection maps so `finalizeHungSessionState`
+  // returns null. The wrapper MUST early-return without dereferencing
+  // `result.routeKey` / `result.health`. A sabotage that drops the
+  // `if (result === null) return;` guard would throw a TypeError inside the
+  // `recordRouteHealthPenalty` call — this pin's sole assertion is that the
+  // wrapper does not throw on the null path. Decoupled from every map-size
+  // or spy-call assertion so only the null-guard drift can trip it.
+  const now = Date.now();
+  const startMap = new Map<string, number>();
+  const providerMap = new Map<string, string>();
+  const modelMap = new Map<string, { id: string; providerID: string }>();
+  const routeHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+
+  assert.doesNotThrow(() => {
+    finalizeHungSessionStateAndRecordPenalty(
+      "s-null",
+      startMap,
+      providerMap,
+      modelMap,
+      routeHealthMap,
+      providerHealthMap,
+      20,
+      now,
+      () => {},
+    );
+  }, "null-guard must short-circuit before dereferencing result.routeKey");
+});
+
+test("finalizeHungSessionStateAndRecordPenalty_whenSessionHung_writesPenaltyAtExactCompositeRouteKey", () => {
+  // M146 Pin B: the 3rd-argument routing surface in isolation. On the hung
+  // path, the wrapper MUST call `recordRouteHealthPenalty` with
+  // `result.routeKey` — which `evaluateSessionHangForTimeoutPenalty`
+  // constructs via `composeRouteKey({provider: "iflowcn", model:
+  // "qwen3-coder-plus"})` → literal `"iflowcn/qwen3-coder-plus"`. A sabotage
+  // that substitutes any other identifier (sessionID, a hard-coded literal,
+  // `result.health.state`, a model-id without provider prefix) would land
+  // the entry at the wrong key; readers query via `composeRouteKey` so the
+  // penalty becomes silently invisible. This pin asserts only the composite
+  // key `.has` — NOT the entry state, NOT the map size, NOT the persistFn
+  // spy — so only a key-drift sabotage can trip it.
+  const now = Date.now();
+  const startMap = new Map<string, number>([["s-key", now - 1000]]);
+  const providerMap = new Map<string, string>([["s-key", "iflowcn"]]);
+  const modelMap = new Map<string, { id: string; providerID: string }>([
+    ["s-key", { id: "qwen3-coder-plus", providerID: "iflowcn" }],
+  ]);
+  const routeHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+
+  finalizeHungSessionStateAndRecordPenalty(
+    "s-key",
+    startMap,
+    providerMap,
+    modelMap,
+    routeHealthMap,
+    providerHealthMap,
+    20,
+    now,
+    () => {},
+  );
+
+  assert.equal(
+    routeHealthMap.has("iflowcn/qwen3-coder-plus"),
+    true,
+    "hung-path write MUST land at composeRouteKey composite key",
+  );
+});
+
+test("finalizeHungSessionStateAndRecordPenalty_whenSessionHung_persistFnSpyFiresExactlyOnceOnNonNullPath", () => {
+  // M146 Pin C: the 5th-argument persist-callback surface in isolation. On
+  // the hung path, the wrapper MUST forward `persistFn` unchanged to
+  // `recordRouteHealthPenalty`, which invokes it exactly once to append the
+  // penalty to the on-disk JSONL health log. A sabotage that substitutes a
+  // noop `() => {}`, captures a stale persist from an outer closure, or
+  // forgets the argument entirely would leave the in-memory map populated
+  // (so Pin B passes) but break the disk-durability contract (restart
+  // loses every hang-detected penalty). This pin asserts only the spy call
+  // count — NOT the map entry, NOT the key, NOT the state — so only a
+  // persistFn-forwarding drift can trip it.
+  const now = Date.now();
+  const startMap = new Map<string, number>([["s-persist", now - 1000]]);
+  const providerMap = new Map<string, string>([["s-persist", "iflowcn"]]);
+  const modelMap = new Map<string, { id: string; providerID: string }>([
+    ["s-persist", { id: "qwen3-coder-plus", providerID: "iflowcn" }],
+  ]);
+  const routeHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  let persistCalls = 0;
+
+  finalizeHungSessionStateAndRecordPenalty(
+    "s-persist",
+    startMap,
+    providerMap,
+    modelMap,
+    routeHealthMap,
+    providerHealthMap,
+    20,
+    now,
+    () => {
+      persistCalls += 1;
+    },
+  );
+
+  assert.equal(
+    persistCalls,
+    1,
+    "hung-path MUST forward persistFn spy to recordRouteHealthPenalty exactly once",
+  );
+});
+
 test("evaluateSessionHangForTimeoutPenalty_closureDoesNotRetainFullInput_regressionPin", () => {
   // Pin that the helper signature accepts only primitives + Map refs —
   // no opencode `input` object. A future refactor that re-introduced a
