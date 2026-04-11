@@ -21,6 +21,7 @@ import {
   inferTaskComplexity,
   parsePersistedHealthEntry,
   recommendTaskModelRoute,
+  evaluateSessionHangForTimeoutPenalty,
   selectBestModelForRoleAndTask,
   summarizeVisibleRouteHealth,
 } from "./model-registry.js";
@@ -1772,4 +1773,134 @@ test("selectBestModelForRoleAndTask_whenHealthyCountsTie_prefersCandidateWithFew
 
   assert.ok(best);
   assert.equal(best.id, "clean", "cleaner candidate wins when healthy counts tie");
+});
+
+test("evaluateSessionHangForTimeoutPenalty_whenSessionAlreadyCompleted_returnsNull", () => {
+  // clearSessionHangState removes the start-time entry when a session
+  // completes cleanly. A late-firing hang timer must become a no-op in
+  // that case — any other behavior would retroactively poison a route
+  // whose session succeeded.
+  const startMap = new Map<string, number>();
+  const providerMap = new Map<string, string>([["s1", "iflowcn"]]);
+  const modelMap = new Map<string, { id: string; providerID: string }>([
+    ["s1", { id: "iflowcn/qwen3-coder-plus", providerID: "iflowcn" }],
+  ]);
+
+  const result = evaluateSessionHangForTimeoutPenalty(
+    "s1",
+    startMap,
+    providerMap,
+    modelMap,
+    new Map(),
+    20,
+    Date.now(),
+  );
+
+  assert.equal(result, null);
+});
+
+test("evaluateSessionHangForTimeoutPenalty_whenDurationWithinBudget_returnsNull", () => {
+  // Duration strictly equal to timeoutMs is within budget (the threshold
+  // uses `>` not `>=`). This prevents a photo-finish timer from
+  // penalizing a session that finished on the exact boundary.
+  const now = Date.now();
+  const startMap = new Map<string, number>([["s1", now - 20]]); // duration == 20
+  const providerMap = new Map<string, string>([["s1", "iflowcn"]]);
+  const modelMap = new Map<string, { id: string; providerID: string }>([
+    ["s1", { id: "iflowcn/qwen3-coder-plus", providerID: "iflowcn" }],
+  ]);
+
+  const result = evaluateSessionHangForTimeoutPenalty(
+    "s1",
+    startMap,
+    providerMap,
+    modelMap,
+    new Map(),
+    20, // duration equals this
+    now,
+  );
+
+  assert.equal(result, null);
+});
+
+test("evaluateSessionHangForTimeoutPenalty_whenProviderOrModelMissing_returnsNull", () => {
+  // If the provider/model session-map entries were cleared or never
+  // populated, classification is impossible; the helper must return
+  // null rather than guess or throw.
+  const now = Date.now();
+  const startMap = new Map<string, number>([["s1", now - 500]]);
+  const providerMap = new Map<string, string>(); // missing
+  const modelMap = new Map<string, { id: string; providerID: string }>();
+
+  const result = evaluateSessionHangForTimeoutPenalty(
+    "s1",
+    startMap,
+    providerMap,
+    modelMap,
+    new Map(),
+    20,
+    now,
+  );
+
+  assert.equal(result, null);
+});
+
+test("evaluateSessionHangForTimeoutPenalty_whenSessionHung_returnsTimeoutEntry", () => {
+  // Happy path: session exceeded its budget, provider+model both known,
+  // helper returns a route-health entry ready for the caller to write.
+  // Asserts composite route key (via buildRouteHealthEntry/composeRouteKey),
+  // state = timeout, and retryCount bumped from existing.
+  const now = Date.now();
+  const startMap = new Map<string, number>([["s1", now - 1000]]); // 1s > 20ms
+  const providerMap = new Map<string, string>([["s1", "iflowcn"]]);
+  const modelMap = new Map<string, { id: string; providerID: string }>([
+    // Composite model.id — regression lane for M38 double-prefixing.
+    ["s1", { id: "iflowcn/qwen3-coder-plus", providerID: "iflowcn" }],
+  ]);
+  const routeHealthMap = new Map([
+    [
+      "iflowcn/qwen3-coder-plus",
+      { state: "timeout" as const, until: now - 10_000, retryCount: 4 },
+    ],
+  ]);
+
+  const result = evaluateSessionHangForTimeoutPenalty(
+    "s1",
+    startMap,
+    providerMap,
+    modelMap,
+    routeHealthMap,
+    20,
+    now,
+  );
+
+  assert.ok(result, "a hung session with full context must produce a penalty");
+  assert.equal(result.routeKey, "iflowcn/qwen3-coder-plus", "composite key canonicalized, no double prefix");
+  assert.equal(result.health.state, "timeout");
+  assert.equal(result.health.retryCount, 5, "retry count carried forward and incremented");
+  assert.ok(
+    result.health.until > now,
+    "until lies in the future (now + ROUTE_QUOTA_BACKOFF_DURATION_MS)",
+  );
+});
+
+test("evaluateSessionHangForTimeoutPenalty_closureDoesNotRetainFullInput_regressionPin", () => {
+  // Pin that the helper signature accepts only primitives + Map refs —
+  // no opencode `input` object. A future refactor that re-introduced a
+  // closure over `input` would have to revert this signature or add a
+  // new parameter, either of which would fail this test at compile time.
+  // This is more a shape assertion than a runtime check: if the
+  // parameter list changes to include a rich request object, the test
+  // no longer compiles.
+  const params: Parameters<typeof evaluateSessionHangForTimeoutPenalty> = [
+    "s1",
+    new Map<string, number>(),
+    new Map<string, string>(),
+    new Map<string, { id: string; providerID: string }>(),
+    new Map(),
+    900_000,
+    Date.now(),
+  ];
+  // Sanity: calling with these params on an empty session yields null.
+  assert.equal(evaluateSessionHangForTimeoutPenalty(...params), null);
 });

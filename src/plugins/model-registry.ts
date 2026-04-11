@@ -543,6 +543,20 @@ export function computeProviderHealthUpdate(
  *   and then triggers persistence. The caller remains responsible for the
  *   mutation so this helper stays pure.
  */
+/**
+ * Backoff durations for the different penalty classes.
+ *
+ * These used to live inside the plugin closure (and still have closure-
+ * level aliases for the existing call sites) but pure helpers like
+ * `evaluateSessionHangForTimeoutPenalty` need them at module scope so
+ * they can be imported by tests and referenced without constructing the
+ * plugin. Keeping one authoritative source here prevents drift between
+ * the helper and the closure.
+ */
+export const ROUTE_QUOTA_BACKOFF_DURATION_MS = 60 * 60 * 1000; // 1h
+export const PROVIDER_KEY_DEAD_DURATION_MS = 2 * 60 * 60 * 1000; // 2h
+export const PROVIDER_NO_CREDIT_DURATION_MS = 2 * 60 * 60 * 1000; // 2h
+
 export function buildRouteHealthEntry(
   providerID: string,
   modelID: string,
@@ -748,6 +762,82 @@ export function clearSessionHangState(
   sessionStartTimeMap.delete(sessionID);
   sessionActiveProviderMap.delete(sessionID);
   sessionActiveModelMap.delete(sessionID);
+}
+
+/**
+ * Pure helper invoked by the `chat.params` hang-timer `setTimeout` closure.
+ *
+ * Previously the closure captured the full opencode `input` object — a
+ * reference that transitively holds the request's prompt body, tool list,
+ * message history, and every other per-request payload. The timer is
+ * armed for `AICODER_ROUTE_HANG_TIMEOUT_MS + 100` (default 900100 ms =
+ * 15 min), so a process running many concurrent or back-to-back sessions
+ * accumulates 15 minutes' worth of per-session request payloads pinned
+ * in closure state, even for sessions that have long since completed.
+ * `unref()` kept the process from being blocked on the timer but did NOT
+ * break the closure retention — the timer object still holds the closure
+ * until it fires or is cleared. This helper takes only primitive
+ * `sessionID` plus the outer Map references; the closure can now capture
+ * `(sessionID, timeoutMs, now)` via plain locals and drop the `input`
+ * reference as soon as `chat.params` returns.
+ *
+ * Semantics (unchanged from the inline version):
+ *  1. If the session's start-time is missing, the session already
+ *     completed (`clearSessionHangState` ran) and no penalty is recorded.
+ *  2. If elapsed time since the recorded start is not strictly greater
+ *     than `timeoutMs`, the session is still within its budget and no
+ *     penalty is recorded.
+ *  3. If either the provider-id or model is missing for the session,
+ *     classification is impossible and no penalty is recorded.
+ *  4. Otherwise, build a fresh `ModelRouteHealth` entry with state
+ *     `"timeout"` and `QUOTA_BACKOFF_DURATION_MS` lifetime, delegating to
+ *     `buildRouteHealthEntry` so the route key is canonicalized via
+ *     `composeRouteKey` and retry count is carried forward.
+ *
+ * Args:
+ *   sessionID: Opaque session identifier (primitive string — the whole
+ *     point of this helper is to avoid capturing anything richer).
+ *   sessionStartTimeMap: Turn-start timestamp map.
+ *   sessionActiveProviderMap: Provider-id-per-session map.
+ *   sessionActiveModelMap: Active model-per-session map.
+ *   modelRouteHealthMap: Route-health map consulted for `existing`.
+ *   timeoutMs: The hang-timeout threshold this session was armed with.
+ *   now: Wall-clock timestamp in ms.
+ *
+ * Returns:
+ *   `{ routeKey, health }` when the session exceeded its budget and a
+ *   route penalty should be written, or `null` when no penalty applies.
+ *   The caller performs the `map.set` so the helper stays pure.
+ */
+export function evaluateSessionHangForTimeoutPenalty(
+  sessionID: string,
+  sessionStartTimeMap: Map<string, number>,
+  sessionActiveProviderMap: Map<string, string>,
+  sessionActiveModelMap: Map<string, { id: string; providerID: string }>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  timeoutMs: number,
+  now: number,
+): { routeKey: string; health: ModelRouteHealth } | null {
+  const startTime = sessionStartTimeMap.get(sessionID);
+  if (startTime === undefined) return null;
+
+  const duration = now - startTime;
+  if (duration <= timeoutMs) return null;
+
+  const providerID = sessionActiveProviderMap.get(sessionID);
+  const model = sessionActiveModelMap.get(sessionID);
+  if (!providerID || !model) return null;
+
+  return buildRouteHealthEntry(
+    providerID,
+    model.id,
+    "timeout",
+    ROUTE_QUOTA_BACKOFF_DURATION_MS,
+    modelRouteHealthMap.get(
+      composeRouteKey({ provider: providerID, model: model.id }),
+    ),
+    now,
+  );
 }
 
 export function findCuratedFallbackRoute(
@@ -1609,9 +1699,13 @@ export const ModelRegistryPlugin: Plugin = async () => {
   const sessionActiveModelMap = new Map<string, { id: string; providerID: string }>();
   const sessionStartTimeMap = new Map<string, number>();
 
-  const QUOTA_BACKOFF_DURATION_MS = 60 * 60 * 1000;        // 1h — recovers automatically
-  const KEY_DEAD_DURATION_MS = 2 * 60 * 60 * 1000;         // 2h — may be transient token refresh
-  const NO_CREDIT_DURATION_MS = 2 * 60 * 60 * 1000;        // 2h — may be replenished
+  // Re-exposed from module scope so the plugin-closure code paths keep
+  // their existing references. Pure helpers outside the closure
+  // (e.g. `evaluateSessionHangForTimeoutPenalty`) reference the
+  // module-scope constants directly.
+  const QUOTA_BACKOFF_DURATION_MS = ROUTE_QUOTA_BACKOFF_DURATION_MS;
+  const KEY_DEAD_DURATION_MS = PROVIDER_KEY_DEAD_DURATION_MS;
+  const NO_CREDIT_DURATION_MS = PROVIDER_NO_CREDIT_DURATION_MS;
 
   function recordProviderHealth(
     providerID: string,
@@ -1965,29 +2059,29 @@ export const ModelRegistryPlugin: Plugin = async () => {
             void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
           }
         } else {
+          // Capture only primitive `sessionID` plus the outer Map refs so
+          // the closure does NOT retain a reference to the full `input`
+          // object (prompt body, tool list, message history). `unref()`
+          // below is orthogonal: it keeps the timer from blocking
+          // process exit but does not break closure retention, so the
+          // narrow-capture pattern is what actually bounds memory here.
+          // See `evaluateSessionHangForTimeoutPenalty` docstring for the
+          // full rationale and semantics.
+          const capturedSessionID = input.sessionID;
+          const capturedTimeoutMs = timeoutMs;
           const hangTimer = setTimeout(() => {
-            const startTime = sessionStartTimeMap.get(input.sessionID);
-            if (!startTime) return; // Session already completed
-
-            const duration = Date.now() - startTime;
-            if (duration > timeoutMs) {
-              const providerID = sessionActiveProviderMap.get(input.sessionID);
-              const model = sessionActiveModelMap.get(input.sessionID);
-              if (providerID && model) {
-                const { routeKey, health } = buildRouteHealthEntry(
-                  providerID,
-                  model.id,
-                  "timeout",
-                  QUOTA_BACKOFF_DURATION_MS,
-                  modelRouteHealthMap.get(
-                    composeRouteKey({ provider: providerID, model: model.id }),
-                  ),
-                  Date.now(),
-                );
-                modelRouteHealthMap.set(routeKey, health);
-                void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
-              }
-            }
+            const result = evaluateSessionHangForTimeoutPenalty(
+              capturedSessionID,
+              sessionStartTimeMap,
+              sessionActiveProviderMap,
+              sessionActiveModelMap,
+              modelRouteHealthMap,
+              capturedTimeoutMs,
+              Date.now(),
+            );
+            if (!result) return;
+            modelRouteHealthMap.set(result.routeKey, result.health);
+            void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
           }, timeoutMs + 100); // Check slightly after the timeout threshold
           // Do not keep the Node event loop alive waiting on a hang timer —
           // the timer is best-effort health telemetry, not critical work.
