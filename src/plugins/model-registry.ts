@@ -3572,6 +3572,59 @@ export function clearSessionHangState(
  * restart hook) can route through this helper and inherit the
  * invariant for free.
  *
+ * ## Drift surfaces (M120 PDD)
+ *
+ * The three `.set` lines look symmetrical but each one is load-bearing
+ * for an orthogonal hang-detection failure mode, and the pre-existing
+ * M79 symmetry pin `bindSessionHangState_whenCalled_populatesAllThree
+ * MapsAtomically` asserts all three `.get` values in one bundled test
+ * (self-described as a "symmetry pin"). That means every one-line
+ * sabotage fires the SAME pin — an engineer running a focused
+ * regression cannot tell from the failure message which specific
+ * `.set` broke. These three surfaces partition the failure modes so a
+ * sabotage of exactly one `.set` call fires exactly one new pin
+ * uniquely, restoring asymmetric-pin locality:
+ *
+ *  1. **`sessionActiveProviderMap.set` — provider binding write.**
+ *     The first `.set` in the triplet wires the per-session
+ *     provider identifier that `readAndClearSessionHangState` snapshots
+ *     before the terminal clear, and that the hang finalizer uses to
+ *     compose the provider side of a `timeout` penalty's composite
+ *     route key. A dropped write leaves `sessionActiveProviderMap.get
+ *     (sessionID)` returning `undefined`, the downstream
+ *     `composeRouteKey({provider: undefined, model: ...})` builds a
+ *     pathological `"undefined/<model>"` composite that no
+ *     `modelRouteHealthMap` entry matches, and the hang penalty lands
+ *     under a key no reader ever queries — a silently-unrecorded
+ *     timeout the agent cannot route around.
+ *
+ *  2. **`sessionActiveModelMap.set` — model tuple binding write.**
+ *     The second `.set` wires the `{id, providerID}` model tuple,
+ *     which the hang finalizer composes with the provider binding
+ *     from surface 1 to build the composite route key. A dropped
+ *     write symmetrically produces `"<provider>/undefined"` via
+ *     `composeRouteKey` — same class of silently-unrecorded timeout
+ *     penalty as surface 1, one field deeper in the composite.
+ *
+ *  3. **`sessionStartTimeMap.set` — start-time anchor write.** The
+ *     third `.set` wires the wall-clock anchor that the hang timer's
+ *     `setTimeout` callback reads to compute `elapsedMs =
+ *     Date.now() - sessionStart`. A dropped write leaves the
+ *     start-time map without an entry for this session — the hang
+ *     finalizer's `sessionStartTimeMap.get(sessionID)` short-circuits
+ *     to `undefined`, the `elapsedMs` computation yields `NaN`, and
+ *     `shouldRecordImmediateTimeoutPenalty` / the hang-window check
+ *     early-return without recording any penalty. The hang timer was
+ *     armed but the penalty-recording branch it enables is DOA — a
+ *     silent disarm class that looks like "no hang detected" to the
+ *     rest of the plugin.
+ *
+ * Each surface lives on one line of the three-line body. A sabotage
+ * that drops exactly one `.set` call fires exactly one new pin
+ * uniquely, while the pre-existing bundled symmetry pin fires on all
+ * three as additive coverage. The body is bitwise-unchanged —
+ * documentation and pins only.
+ *
  * Args:
  *   sessionID: The turn's session identifier.
  *   providerID: The provider id from `input.provider.info.id`.

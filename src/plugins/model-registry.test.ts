@@ -1566,6 +1566,86 @@ test("bindSessionHangState_whenCalledForSecondSession_leavesFirstSessionIntact",
   assert.equal(sessionActiveProviderMap.get("s2"), "ollama-cloud");
 });
 
+// M120 pin A — isolated drift surface 1: `sessionActiveProviderMap.set`.
+// Asserts ONLY the provider-map binding post-call, so a sabotage that
+// drops only the model-map write (pin B) or only the start-time write
+// (pin C) leaves the provider map intact and this pin still passes.
+// Only a sabotage that drops `sessionActiveProviderMap.set` leaves the
+// provider map empty and fires this assertion uniquely.
+test("bindSessionHangState_whenCalled_writesProviderBindingSpecifically", () => {
+  const sessionStartTimeMap = new Map<string, number>();
+  const sessionActiveProviderMap = new Map<string, string>();
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >();
+
+  bindSessionHangState(
+    "s1",
+    "iflowcn",
+    { id: "qwen3-coder-plus", providerID: "iflowcn" },
+    5000,
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  assert.equal(sessionActiveProviderMap.get("s1"), "iflowcn");
+});
+
+// M120 pin B — isolated drift surface 2: `sessionActiveModelMap.set`.
+// Asserts ONLY the model-map binding post-call. Symmetric to pin A:
+// only a sabotage that drops `sessionActiveModelMap.set` leaves the
+// model map empty and fires this assertion uniquely.
+test("bindSessionHangState_whenCalled_writesModelTupleBindingSpecifically", () => {
+  const sessionStartTimeMap = new Map<string, number>();
+  const sessionActiveProviderMap = new Map<string, string>();
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >();
+
+  bindSessionHangState(
+    "s1",
+    "iflowcn",
+    { id: "qwen3-coder-plus", providerID: "iflowcn" },
+    5000,
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  assert.deepEqual(sessionActiveModelMap.get("s1"), {
+    id: "qwen3-coder-plus",
+    providerID: "iflowcn",
+  });
+});
+
+// M120 pin C — isolated drift surface 3: `sessionStartTimeMap.set`.
+// Asserts ONLY the start-time anchor post-call. Only a sabotage that
+// drops `sessionStartTimeMap.set` leaves the start-time map empty
+// and fires this assertion uniquely.
+test("bindSessionHangState_whenCalled_writesStartTimeAnchorSpecifically", () => {
+  const sessionStartTimeMap = new Map<string, number>();
+  const sessionActiveProviderMap = new Map<string, string>();
+  const sessionActiveModelMap = new Map<
+    string,
+    { id: string; providerID: string }
+  >();
+
+  bindSessionHangState(
+    "s1",
+    "iflowcn",
+    { id: "qwen3-coder-plus", providerID: "iflowcn" },
+    5000,
+    sessionStartTimeMap,
+    sessionActiveProviderMap,
+    sessionActiveModelMap,
+  );
+
+  assert.equal(sessionStartTimeMap.get("s1"), 5000);
+});
+
 test("readAndClearSessionHangState_whenFullyBound_returnsTupleAndClearsMaps", () => {
   // M78 pin: the helper MUST read providerID/model BEFORE clearing the
   // maps. If a future edit swaps the order the returned tuple would be
