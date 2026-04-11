@@ -14,6 +14,7 @@ import {
   isFallbackBlocked,
   findFirstHealthyVisibleRoute,
   findPreferredHealthyRoute,
+  isAgentVisibleHealthState,
   hasUsableCredential,
   isZeroTokenQuotaSignal,
   parseAgentFrontmatter,
@@ -719,6 +720,137 @@ test("buildProviderHealthSystemPrompt_whenOnlyRoutePenaltiesExist_emitsRouteSect
 test("buildProviderHealthSystemPrompt_whenNoPenalties_returnsNull", () => {
   const prompt = buildProviderHealthSystemPrompt([], new Map(), new Map(), Date.now());
   assert.equal(prompt, null);
+});
+
+test("isAgentVisibleHealthState_whenStateIsKeyMissing_returnsFalse", () => {
+  assert.equal(isAgentVisibleHealthState("key_missing"), false);
+});
+
+test("isAgentVisibleHealthState_whenStateIsTransientPenalty_returnsTrue", () => {
+  assert.equal(isAgentVisibleHealthState("quota"), true);
+  assert.equal(isAgentVisibleHealthState("key_dead"), true);
+  assert.equal(isAgentVisibleHealthState("no_credit"), true);
+  assert.equal(isAgentVisibleHealthState("model_not_found"), true);
+  assert.equal(isAgentVisibleHealthState("timeout"), true);
+});
+
+test("buildProviderHealthSystemPrompt_whenOnlyKeyMissingPenaltiesExist_returnsNull", () => {
+  // M59 regression pin. Before M58 wired `initializeProviderHealthState`
+  // into the factory, `key_missing` entries were effectively never
+  // installed at runtime and this code path was dormant. After M58,
+  // every cold start installs `key_missing` for every uncredentialed
+  // curated provider — on a realistic install that's 15–25 entries.
+  // Surfacing each of them as its own "Provider X [KEY MISSING] until
+  // never. Curated fallbacks: ..." section on every agent turn was a
+  // semantic and cost bug: the agent can't route to a key_missing
+  // provider in the first place (isProviderHealthy already skips them
+  // upstream), the label `PROVIDER_QUOTA_STATUS_HEADER` conflates
+  // permanent plumbing state with transient backoff the agent might
+  // retry through, and the per-entry findCuratedFallbackRoute loop adds
+  // nontrivial CPU cost to every turn. Fix filters key_missing out of
+  // the system prompt via `isAgentVisibleHealthState`.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "opencode", model: "opencode/glm-5.1", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+    ],
+  );
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      {
+        state: "key_missing" as const,
+        until: Number.POSITIVE_INFINITY,
+        retryCount: 0,
+      },
+    ],
+    [
+      "iflowcn",
+      {
+        state: "key_missing" as const,
+        until: Number.POSITIVE_INFINITY,
+        retryCount: 0,
+      },
+    ],
+  ]);
+
+  const prompt = buildProviderHealthSystemPrompt(
+    [entry],
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+
+  assert.equal(prompt, null);
+});
+
+test("buildProviderHealthSystemPrompt_whenQuotaAndKeyMissingMixed_omitsKeyMissingFromSections", () => {
+  // Same M59 pin, mixed case. One transient `quota` entry (the agent
+  // must see this — it affects a route they might otherwise retry),
+  // one permanent `key_missing` entry (plumbing, must not appear). The
+  // output must contain the quota provider and must NOT mention the
+  // key_missing one.
+  const now = Date.now();
+  const quotaEntry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "opencode", model: "opencode/glm-5.1", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+    ],
+  );
+  const keyMissingEntry: ModelRegistryEntry = buildModelRegistryEntry(
+    "kimi-k2-thinking",
+    ["deep_reviewer"],
+    "frontier",
+    [
+      {
+        provider: "kimi-for-coding",
+        model: "kimi-for-coding/kimi-k2-thinking",
+        priority: 1,
+      },
+    ],
+  );
+
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+    [
+      "kimi-for-coding",
+      {
+        state: "key_missing" as const,
+        until: Number.POSITIVE_INFINITY,
+        retryCount: 0,
+      },
+    ],
+  ]);
+
+  const prompt = buildProviderHealthSystemPrompt(
+    [quotaEntry, keyMissingEntry],
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+
+  assert.notEqual(prompt, null);
+  assert.match(prompt as string, /Provider opencode \[QUOTA BACKOFF\]/);
+  assert.equal(
+    (prompt as string).includes("kimi-for-coding"),
+    false,
+    "key_missing provider must not appear in agent-visible system prompt",
+  );
+  assert.equal(
+    (prompt as string).includes("KEY MISSING"),
+    false,
+    "key_missing label must not leak into agent-visible system prompt",
+  );
 });
 
 test("buildAvailableModelsSystemPrompt_whenPrimaryRouteIsHiddenPaid_walksToVisibleSibling", () => {

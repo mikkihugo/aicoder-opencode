@@ -1385,6 +1385,57 @@ function isProviderHealthy(
   return health.until <= now;
 }
 
+/**
+ * Decide whether a `ProviderHealthState` should be surfaced in the
+ * agent-visible system prompt injected by
+ * `experimental.chat.system.transform` → `buildProviderHealthSystemPrompt`.
+ *
+ * `key_missing` is structural plumbing state: the plugin installs it at
+ * boot via `initializeProviderHealthState` for every curated provider
+ * without an auth.json entry or env-var credential, and `isProviderHealthy`
+ * internally consults it to skip those providers in the fallback scanner
+ * and the preferred-model lookup. The agent never has the option to route
+ * to a key_missing provider in the first place, so narrating "Provider X
+ * [KEY MISSING] until never. Curated fallbacks: ..." for every uncredentialed
+ * provider on every single turn is:
+ *
+ *  1. Semantically wrong: the label `PROVIDER_QUOTA_STATUS_HEADER`
+ *     ("Provider health status") conflates transient backoff
+ *     (quota/key_dead/no_credit/model_not_found/timeout — all finite
+ *     windows the agent might plausibly retry through) with a permanent
+ *     operator-action-required state. An agent reading "until never"
+ *     has no sensible recourse.
+ *  2. Massively noisy post-M58: before M58, the factory never installed
+ *     any key_missing entries so the `new Date(Infinity).toISOString()`
+ *     sites never fired — both bugs were dormant. After M58 the factory
+ *     correctly installs key_missing for every uncredentialed curated
+ *     provider, and a realistic install (a handful of credentials set,
+ *     the rest unset) now dumps 15–25 key_missing sections into every
+ *     agent turn's system prompt. Each section runs a per-entry
+ *     `findCuratedFallbackRoute` loop over the registry, so the noise
+ *     has a nontrivial CPU cost too.
+ *  3. Not load-bearing for the agent: the only reason a system prompt
+ *     would need to mention a penalty is if the agent might otherwise
+ *     route to that provider and waste a call. key_missing is already
+ *     filtered out upstream — the agent cannot and will not route there.
+ *
+ * Transient states (quota, key_dead, no_credit, model_not_found, timeout)
+ * are a different story: they represent providers that WERE healthy at
+ * startup and became unhealthy mid-session, which the agent does need
+ * situational awareness of when interpreting a fallback it wasn't
+ * expecting. Those continue to flow through the system prompt.
+ *
+ * Args:
+ *   state: The state field of a `ProviderHealth` entry.
+ *
+ * Returns:
+ *   `true` when the state represents a transient penalty worth surfacing
+ *   to the agent, `false` when the state is permanent plumbing state.
+ */
+export function isAgentVisibleHealthState(state: ProviderHealthState): boolean {
+  return state !== "key_missing";
+}
+
 function healthStateLabel(state: ProviderHealthState): string {
   switch (state) {
     case "quota": return "QUOTA BACKOFF";
@@ -1402,11 +1453,27 @@ export function buildProviderHealthSystemPrompt(
   modelRouteHealthMap: Map<string, ModelRouteHealth>,
   now: number,
 ): string | null {
+  // key_missing entries are excluded via `isAgentVisibleHealthState`: they
+  // are permanent plumbing state the agent can't route around, not a
+  // transient backoff. See the helper's docstring for the full rationale —
+  // in short, post-M58 every cold start installs key_missing for every
+  // uncredentialed curated provider, and surfacing them here would dump
+  // 15–25 "Provider X [KEY MISSING] until never" sections into every single
+  // agent turn's system prompt. The internal `isProviderHealthy` path
+  // still uses key_missing to skip dead providers in the fallback scanner.
+  // key_missing entries are excluded via `isAgentVisibleHealthState`: they
+  // are permanent plumbing state the agent can't route around, not a
+  // transient backoff. See the helper's docstring for the full rationale —
+  // in short, post-M58 every cold start installs key_missing for every
+  // uncredentialed curated provider, and surfacing them here would dump
+  // 15–25 "Provider X [KEY MISSING] until never" sections into every single
+  // agent turn's system prompt. The internal `isProviderHealthy` path
+  // still uses key_missing to skip dead providers in the fallback scanner.
   const activeProviderPenalties = Array.from(providerHealthMap.entries()).filter(
-    ([, health]) => health.until > now,
+    ([, health]) => health.until > now && isAgentVisibleHealthState(health.state),
   );
   const activeRoutePenalties = Array.from(modelRouteHealthMap.entries()).filter(
-    ([, health]) => health.until > now,
+    ([, health]) => health.until > now && isAgentVisibleHealthState(health.state),
   );
 
   if (activeProviderPenalties.length === 0 && activeRoutePenalties.length === 0) {
