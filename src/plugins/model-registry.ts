@@ -4863,6 +4863,53 @@ export function findCuratedFallbackRoute(
  *   The first visible route whose provider is healthy and whose
  *   composite-route entry is not penalized, or `null` when every
  *   visible route is blocked (or when there are no visible routes at all).
+ *
+ * ## Drift surfaces (M143 PDD)
+ *
+ * Three orthogonal contracts this helper silently promises every caller.
+ * Each has a dedicated asymmetric pin in the test suite so that exactly
+ * one new pin fires when that specific contract is broken; cross-drift
+ * between them cannot slip through as "the suite still passes".
+ *
+ * 1. **`filterVisibleProviderRoutes` gate, not raw `provider_order`
+ *    iteration.** The scan must start from the visibility-filtered view
+ *    so hidden paid/disallowed providers (cerebras, xai, deepseek,
+ *    cloudflare-ai-gateway, github-copilot, togetherai, minimax-cn,
+ *    non-`:free` openrouter, non-free opencode, …) are skipped even
+ *    when they precede a visible route in `provider_order`. Iterating
+ *    the raw array would silently return a paid or
+ *    credential-requiring route for entries whose primary slot lives
+ *    on a hidden provider — exactly the failure mode that poisoned the
+ *    pre-M58 `recommend_model_for_role` path. Pin A pre-pends a hidden
+ *    `cerebras` route at priority 1 so any raw-iteration regression is
+ *    immediately caught by the asserted `provider === "opencode"`.
+ *
+ * 2. **Ascending-priority first-match-wins order.** The for-loop MUST
+ *    consume `filterVisibleProviderRoutes`'s ascending-priority sort
+ *    (which that helper explicitly re-sorts by `priority` so readers
+ *    can treat `[0]` as authoritative — see its own docstring). The
+ *    contract here is that when MULTIPLE visible routes are healthy,
+ *    the helper returns the one with the lowest numeric `priority`,
+ *    not whichever one happened to be authored first or hashed into
+ *    the Map last. A silent reversal, a `.pop()`-then-`.push()` shuffle,
+ *    or switching to a reverse iterator would still pass the existing
+ *    `whenPrimaryHealthy` pin if that pin's two-route fixture degenerates
+ *    to "anything ≠ null works". Pin B locks the order with a
+ *    three-visible-route fixture and asserts `priority === 1`.
+ *
+ * 3. **`null` return on exhaustion, not the first visible route as a
+ *    defensive default.** When every visible route is blocked the
+ *    helper returns `null` — NOT `visibleRoutes[0] ?? null`, NOT
+ *    `undefined`, NOT a throw. Downstream readers (
+ *    `buildRoleRecommendationRoutes`, `computeRegistryEntryHealthReport`)
+ *    branch on `null` to set `primaryHealthy: false` and surface the
+ *    block reason via `alternativeRoutes`. If a well-meaning refactor
+ *    replaced the trailing `return null` with `return visibleRoutes[0]
+ *    ?? null` as a "just give the caller something to render" nudge,
+ *    every reader that distinguishes "no healthy route" from "here's a
+ *    route you can try" would silently lose that distinction. Pin C
+ *    uses a single visible route under a live provider penalty and
+ *    asserts strict `=== null` so any such refactor fires immediately.
  */
 export function findFirstHealthyRouteInEntry(
   modelRegistryEntry: ModelRegistryEntry,

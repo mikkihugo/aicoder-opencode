@@ -4724,6 +4724,81 @@ test("findFirstHealthyRouteInEntry_whenPrimaryProviderHealthyButRouteLevelBlocke
   assert.equal(route.provider, "iflowcn");
 });
 
+test("findFirstHealthyRouteInEntry_whenHiddenProviderPrecedesVisibleProvider_skipsHiddenAndReturnsVisible", () => {
+  // M143 Pin A — drift surface 1: the scan MUST start from
+  // `filterVisibleProviderRoutes`, not raw `provider_order`. A hidden
+  // provider at priority 1 must be filtered out before iteration so
+  // the priority-2 visible route is returned. If a regression iterates
+  // `provider_order` directly, the cerebras route passes the health
+  // check (empty maps) and wins — this assertion fails.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "cerebras", model: "cerebras/glm-5.1", priority: 1 },
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 2 },
+    ],
+  );
+  const route = findFirstHealthyRouteInEntry(entry, new Map(), new Map(), now);
+  assert.ok(route);
+  assert.equal(route.provider, "opencode");
+});
+
+test("findFirstHealthyRouteInEntry_whenThreeVisibleRoutesAreHealthy_returnsAscendingPriorityOneRoute", () => {
+  // M143 Pin B — drift surface 2: first-match iteration MUST consume
+  // `filterVisibleProviderRoutes`'s ascending-priority sort. With THREE
+  // healthy visible routes, a silent `.reverse()` / reverse-iterator
+  // regression would return priority 3 and still pass a two-route
+  // "opencode OR iflowcn" fixture. The three-route fixture plus
+  // strict `priority === 1` assertion locks the order.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+      { provider: "openrouter", model: "openrouter/zhipu/glm-5.1:free", priority: 3 },
+    ],
+  );
+  const route = findFirstHealthyRouteInEntry(entry, new Map(), new Map(), now);
+  assert.ok(route);
+  assert.equal(route.priority, 1);
+});
+
+test("findFirstHealthyRouteInEntry_whenSingleVisibleRouteIsBlocked_returnsStrictNullNotBlockedRoute", () => {
+  // M143 Pin C — drift surface 3: exhaustion MUST return `null`, not
+  // `visibleRoutes[0] ?? null` as a defensive "at least give the caller
+  // a route" nudge. Downstream readers (`buildRoleRecommendationRoutes`,
+  // `computeRegistryEntryHealthReport`) branch on `null` to set
+  // `primaryHealthy: false`. With a single visible route under a live
+  // quota penalty, the for-loop must fall through and return strict
+  // null — not the blocked route object.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [{ provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 }],
+  );
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      { state: "quota" as const, until: now + 60_000, retryCount: 2 },
+    ],
+  ]);
+  const result = findFirstHealthyRouteInEntry(
+    entry,
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+  assert.strictEqual(result, null);
+});
+
 test("buildRoleRecommendationRoutes_whenEntryHasNoVisibleRoutes_returnsEmptyPayload", () => {
   // Defensive: a curated entry whose every route is hidden by
   // `filterVisibleProviderRoutes` (all paid/blocked providers) must
