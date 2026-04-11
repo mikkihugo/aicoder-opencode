@@ -1065,6 +1065,69 @@ test("extractAssistantMessageCompletedPayload_whenShapeIsValid_returnsTokensBySt
   );
 });
 
+// M139 pin A — top-level `event === null` explicit guard. `typeof
+// null === "object"` in JavaScript, so a "cleanup refactor" that
+// drops the `event === null ||` clause on the opening if (because
+// "the typeof check covers it") lets null slip past the guard, the
+// cast to `Record<string, unknown>` preserves null, and the next
+// statement `eventObj.type` throws `TypeError: Cannot read
+// properties of null`. Every existing pin passes a concrete object
+// as `event`, so none of them reach a null top-level value. Pin
+// passes the literal `null` and asserts the return is undefined
+// without throwing. Asymmetry: Pin B's fixture has a valid top-level
+// object (null appears at properties layer), so a top-level guard
+// removal is a no-op for Pin B — its fixture reaches the properties
+// guard regardless. Pin C's fixture similarly has a valid object at
+// both top level and properties layer, so top-level guard removal
+// cannot affect it.
+test("extractAssistantMessageCompletedPayload_whenEventIsLiteralNull_topLevelNullGuardReturnsUndefinedWithoutDeref", () => {
+  const result = extractAssistantMessageCompletedPayload(null);
+  assert.equal(result, undefined);
+});
+
+// M139 pin B — nested `properties === null` explicit guard. Same JS
+// footgun at the properties layer. A refactor that drops the
+// `properties === null ||` clause lets a well-formed top-level event
+// with explicit-null properties reach `propertiesObj.sessionID`,
+// which throws on null-deref. Fixture sets `properties: null`
+// explicitly. Asymmetry: Pin A's fixture is null at top level, so
+// control short-circuits at the top-level guard before the
+// properties guard is reached — properties-guard removal is
+// irrelevant. Pin C's fixture has a valid-object properties (null
+// lives at the tokens layer), so properties-guard removal is a
+// no-op for Pin C — its fixture passes the properties guard
+// regardless and reaches the tokens guard.
+test("extractAssistantMessageCompletedPayload_whenPropertiesIsExplicitNull_propertiesNullGuardReturnsUndefinedWithoutDeref", () => {
+  const result = extractAssistantMessageCompletedPayload({
+    type: "assistant.message.completed",
+    properties: null,
+  });
+  assert.equal(result, undefined);
+});
+
+// M139 pin C — nested `tokens === null` explicit guard. Same JS
+// footgun at the deepest layer, but with a SILENT-RETURN failure
+// mode instead of a throw. If the `tokens === null ||` clause is
+// removed, null passes the `typeof tokens !== "object"` check (since
+// `typeof null === "object"`), the cast preserves null, and the
+// function returns `{sessionID: "s1", tokens: null}`. Downstream
+// `isZeroTokenQuotaSignal(tokens)` then crashes on
+// `Object.values(null)`, poisoning every assistant.message.completed
+// event hook. Asymmetry: Pin A and Pin B both short-circuit at
+// earlier guards before the tokens guard runs, so tokens-guard
+// removal cannot affect their fixtures. Existing pin 3
+// (`whenTokensIsMissing`) passes undefined tokens, which
+// `typeof undefined !== "object"` catches regardless of the null
+// clause — so the tokens null guard is globally unpinned until now.
+// Assert the result is undefined (not a `{tokens: null}` tuple).
+test("extractAssistantMessageCompletedPayload_whenTokensIsExplicitNull_tokensNullGuardReturnsUndefinedNotNullTuple", () => {
+  const result = extractAssistantMessageCompletedPayload({
+    type: "assistant.message.completed",
+    properties: { sessionID: "s1", tokens: null },
+  });
+  assert.equal(result, undefined);
+});
+
 test("extractSessionErrorApiErrorContext_whenShapeIsValid_returnsNarrowedTuple", () => {
   // M88 pin: a well-formed `session.error` envelope with APIError,
   // sessionID, statusCode, and a mixed-case message must return the

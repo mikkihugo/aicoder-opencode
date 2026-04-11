@@ -3077,6 +3077,66 @@ export function extractSessionErrorApiErrorContext(
  *   `tokens` is returned as `Record<string, unknown>` — the shape the
  *   downstream `isZeroTokenQuotaSignal` expects.
  */
+/**
+ * ## Drift surfaces (M139 PDD)
+ *
+ * The six existing pins cover the happy path, a missing-sessionID
+ * payload, a missing-tokens payload, a wrong type tag, an empty-string
+ * sessionID, and a reference-identity check on the returned `tokens`
+ * field. They leave three structurally-parallel-but-orthogonal
+ * `=== null` guards uncovered, each at a different nesting layer of
+ * the opencode runtime event shape. These guards exist specifically
+ * because `typeof null === "object"` in JavaScript — a property of
+ * the language that is wrong often enough to bite every few years.
+ * Each guard is independently refactorable ("why check `=== null`
+ * when the `typeof !== "object"` check covers it?" — it does not),
+ * and each guard protects a DIFFERENT downstream null-deref that
+ * would occur if the guard were removed:
+ *
+ * 1. **Top-level `event === null` explicit guard.** The opening check
+ *    is `if (event === null || typeof event !== "object") return
+ *    undefined;`. JS reports `typeof null === "object"`, so dropping
+ *    the `event === null ||` clause (a "cleanup refactor" that thinks
+ *    the typeof check is sufficient) lets `null` slip past the guard,
+ *    the following `const eventObj = event as Record<string, unknown>`
+ *    becomes a null cast, and the very next statement
+ *    `eventObj.type` throws `TypeError: Cannot read properties of
+ *    null (reading 'type')`. Every existing pin passes a concrete
+ *    object as `event` so none exercise this path. Fires: call with
+ *    the literal argument `null`; correct impl returns undefined,
+ *    sabotaged impl throws before any guard.
+ *
+ * 2. **Inner `properties === null` explicit guard.** Same JS
+ *    footgun, different nesting layer. `propertiesObj.sessionID`
+ *    lookup would throw on a null properties, and the guard exists
+ *    to catch the case where an opencode event is well-formed at the
+ *    top level but its `properties` field is explicitly `null` (a
+ *    shape opencode could legitimately emit for lifecycle events).
+ *    Existing pin 3 (`whenTokensIsMissing`) passes a valid-object
+ *    properties with tokens absent, and pin 2 (`whenSessionIDIsMissing`)
+ *    passes a valid-object properties with sessionID absent — both
+ *    pass the `properties === null` guard cleanly and do not observe
+ *    its removal. Fires: call with `{type:"assistant.message.completed",
+ *    properties: null}`; correct impl returns undefined, sabotaged
+ *    impl throws on `null.sessionID`.
+ *
+ * 3. **Inner `tokens === null` explicit guard.** Same JS footgun at
+ *    the deepest nesting layer. Unlike the top-level and properties
+ *    cases where a null-deref throws, dropping the `tokens === null`
+ *    clause here silently RETURNS a narrowed tuple whose `tokens`
+ *    field is `null` — because `typeof null === "object"` lets null
+ *    pass the typeof check, the return statement runs, and the cast
+ *    `tokens as Record<string, unknown>` preserves null as the value.
+ *    Downstream `isZeroTokenQuotaSignal(tokens)` then immediately
+ *    crashes on `Object.values(null)`, poisoning every
+ *    assistant.message.completed event. Existing pin 3 passes
+ *    undefined tokens (not null), which the `typeof tokens !==
+ *    "object"` check catches regardless of the null guard — so the
+ *    null guard is globally unpinned. Fires: call with
+ *    `{type:"assistant.message.completed", properties:{sessionID:"s1",
+ *    tokens: null}}`; correct impl returns undefined, sabotaged impl
+ *    returns a `{sessionID, tokens: null}` tuple.
+ */
 export function extractAssistantMessageCompletedPayload(
   event: unknown,
 ): { sessionID: string; tokens: Record<string, unknown> } | undefined {
