@@ -1472,6 +1472,73 @@ test("buildRouteHealthEntry_whenExistingEntryHasRetryCount_incrementsIt", () => 
   assert.equal(health.retryCount, 5, "repeat failures must remain observable");
 });
 
+test("buildRouteHealthEntry_whenExistingUntilIsLongerThanNewUntil_preservesExistingStateAndUntil", () => {
+  // Mirrors M36 at the provider level: do not let a shorter fresh penalty
+  // silently shrink a live longer one. Construct an existing route entry
+  // whose `until` sits 2h out — simulating either (a) a disk-loaded entry
+  // written by a parallel opencode process that paid a longer backoff, or
+  // (b) a hypothetical future writer that classifies e.g. `model_not_found`
+  // at a longer 2h duration. Fire a fresh 1h `timeout` event and assert
+  // the stored `until` stays on the 2h horizon, the `state` stays on the
+  // authoritative `model_not_found`, and `retryCount` still ticks so the
+  // health report surfaces the repeat failure.
+  const now = Date.now();
+  const existing = {
+    state: "model_not_found" as const,
+    until: now + 2 * 60 * 60 * 1000, // 2h out
+    retryCount: 3,
+  };
+
+  const { routeKey, health } = buildRouteHealthEntry(
+    "iflowcn",
+    "qwen3-coder-plus",
+    "timeout",
+    60 * 60 * 1000, // fresh penalty only 1h
+    existing,
+    now,
+  );
+
+  assert.equal(routeKey, "iflowcn/qwen3-coder-plus");
+  assert.equal(
+    health.state,
+    "model_not_found",
+    "longer-lived classification must not be overwritten by a shorter fresh event",
+  );
+  assert.equal(
+    health.until,
+    existing.until,
+    "existing `until` must be preserved when it is further out than `now + durationMs`",
+  );
+  assert.equal(health.retryCount, 4, "retryCount still ticks so repeat failures remain visible");
+});
+
+test("buildRouteHealthEntry_whenNewUntilIsLongerThanExisting_adoptsNewStateAndUntil", () => {
+  // The complementary boundary: if the incoming penalty is LONGER than
+  // the existing one, the new classification is authoritative. This is
+  // the common route case today (both equal at 1h, new wall-clock is
+  // later so new `until` wins). Pin the direction so a future "always
+  // preserve existing" regression is caught immediately.
+  const now = Date.now();
+  const existing = {
+    state: "timeout" as const,
+    until: now + 10 * 60 * 1000, // only 10min remaining
+    retryCount: 1,
+  };
+
+  const { health } = buildRouteHealthEntry(
+    "iflowcn",
+    "qwen3-coder-plus",
+    "quota",
+    60 * 60 * 1000, // fresh 1h penalty → 60min > 10min
+    existing,
+    now,
+  );
+
+  assert.equal(health.state, "quota", "newer/longer penalty wins the classification");
+  assert.equal(health.until, now + 60 * 60 * 1000);
+  assert.equal(health.retryCount, 2);
+});
+
 test("classifyProviderApiError_when402WithRateLimitKeyword_returnsNoCreditNotQuota", () => {
   // Regression: the old `||` cascade matched "rate limit" in the earlier
   // quota bucket and returned "quota" (1h), pre-empting the authoritative

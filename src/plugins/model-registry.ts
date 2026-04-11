@@ -566,11 +566,33 @@ export function buildRouteHealthEntry(
   now: number,
 ): { routeKey: string; health: ModelRouteHealth } {
   const routeKey = composeRouteKey({ provider: providerID, model: modelID });
+  const newUntil = now + durationMs;
+  // Preserve the longer-lived penalty, mirroring `computeProviderHealthUpdate`
+  // (M36). Today all four route-level writers use the same 1h backoff, so
+  // `existing.until > newUntil` is only reachable when `existing` was loaded
+  // from disk with a future `until` produced by another process, or when a
+  // later writer introduces a shorter penalty class. Either way, shrinking
+  // a live penalty silently re-opens a known-bad route: the M36 bug at the
+  // provider level used to pipe a 2h `key_dead` through a fresh 1h `quota`
+  // event and revive a dead key every hour. Apply the same invariant here
+  // before any future writer differentiates route durations and silently
+  // re-introduces the bug at the route level. `retryCount` still
+  // increments so repeat failures remain observable in the health report.
+  if (existing && existing.until > newUntil) {
+    return {
+      routeKey,
+      health: {
+        state: existing.state,
+        until: existing.until,
+        retryCount: existing.retryCount + 1,
+      },
+    };
+  }
   return {
     routeKey,
     health: {
       state,
-      until: now + durationMs,
+      until: newUntil,
       retryCount: (existing?.retryCount ?? 0) + 1,
     },
   };
