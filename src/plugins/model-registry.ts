@@ -1006,6 +1006,54 @@ export function findLiveRoutePenalty(
  * as the boolean negation "no live penalty" so the predicate and the
  * entry-returning readers cannot drift.
  *
+ * ## Drift surfaces (M104 PDD)
+ *
+ * Beyond the pre-existing M71 boundary pins (empty map, expired entry,
+ * live entry, key_missing infinity) three orthogonal drift surfaces
+ * remain unpinned. Any of them could regress silently because the
+ * existing pins only assert the return value, not HOW the return value
+ * was produced, and not the map state after the call.
+ *
+ * 1. **Return-by-reference, not a defensive copy.** The live-entry path
+ *    is `return health` where `health` is the exact object installed by
+ *    `recordProviderHealthPenalty`. Callers rely on this identity to
+ *    detect "same penalty as last check" without deep-comparing — the
+ *    `computeRegistryEntryHealthReport` reader captures the reference
+ *    at tool-call time so a later retry-count bump by
+ *    `computeProviderHealthUpdate` is visible through the same handle.
+ *    A future regression that spread `{...health}` for "safety" would
+ *    break reference equality while still passing every M71 deepEqual
+ *    pin. Pin: strict `===` identity check against the inserted object.
+ *
+ * 2. **Read-only map — no mutation on expired hit.** The expired branch
+ *    returns `null` and leaves the map untouched. Deletion is the job
+ *    of `expireHealthMaps` (called once per chat turn by
+ *    `experimental.chat.system.transform`), NOT findLive*. Keeping
+ *    findLive read-only matters because callers read the same map many
+ *    times per turn for different providers; if findLive deleted the
+ *    expired entry on first touch, the retryCount escalation ladder
+ *    would reset mid-turn whenever an unrelated caller happened to
+ *    probe an expired entry before the next real penalty. A regression
+ *    that "helpfully" cleaned up on read would still pass the return-
+ *    value pin. Pin: after an expired-entry call, the map still
+ *    contains the expired entry.
+ *
+ * 3. **Exact provider-ID keying — no case folding, no composite form.**
+ *    The lookup is a bare `providerHealthMap.get(providerID)`; the
+ *    helper does NOT normalize case or strip any `provider/model`
+ *    composite suffix. Provider IDs are canonical slugs (`"openrouter"`,
+ *    `"ollama-cloud"`, `"iflowcn"`) and callers pass them verbatim from
+ *    session state. The dual-map architecture (ProviderHealth vs
+ *    ModelRouteHealth) depends on this: route keys go through
+ *    `composeRouteKey` and provider keys do not, and confusing the two
+ *    would create phantom hits or phantom misses. A regression that
+ *    introduced `providerID.toLowerCase()` for defensive reasons would
+ *    pass the existing lowercase-ID pins but silently miss any mixed-
+ *    case probe, which matters because the `provider.models` hook
+ *    receives provider IDs from opencode's session state unchanged.
+ *    Pin: mixed-case provider ID is NOT found when the map key is
+ *    lowercase.
+ *
  * Args:
  *   providerHealthMap: Runtime provider-keyed health map.
  *   providerID: Provider identifier (e.g. `"openrouter"`, `"ollama-cloud"`).

@@ -2790,6 +2790,74 @@ test("findLiveProviderPenalty_whenKeyMissingEntry_returnsEntryForAnyNow", () => 
   });
 });
 
+test("findLiveProviderPenalty_whenEntryLive_returnsEntryByStrictReferenceNotCopy", () => {
+  // M104 identity pin: the live-entry path must return the exact object
+  // installed in the map, not a spread/clone. Callers (notably
+  // `computeRegistryEntryHealthReport`) rely on reference stability so
+  // later retryCount mutations by `computeProviderHealthUpdate` are
+  // visible through the captured handle. A spread sabotage would still
+  // pass every deepEqual pin but would silently break this invariant.
+  const installedHealth: ProviderHealth = {
+    state: "no_credit",
+    until: 2_000_000,
+    retryCount: 4,
+  };
+  const providerHealthMap = new Map<string, ProviderHealth>([
+    ["openrouter", installedHealth],
+  ]);
+  const result = findLiveProviderPenalty(providerHealthMap, "openrouter", 1_000_000);
+  assert.strictEqual(
+    result,
+    installedHealth,
+    "live entry must be returned by strict reference, not as a defensive copy",
+  );
+});
+
+test("findLiveProviderPenalty_whenEntryExpired_doesNotMutateInputMap", () => {
+  // M104 read-only pin: the expired branch must leave the map
+  // untouched. Cleanup is the sole responsibility of `expireHealthMaps`
+  // (invoked once per chat turn). A regression that deleted the
+  // expired entry on read would reset the retryCount escalation ladder
+  // whenever an unrelated caller probed an expired entry mid-turn.
+  const expiredHealth: ProviderHealth = {
+    state: "quota",
+    until: 500_000,
+    retryCount: 3,
+  };
+  const providerHealthMap = new Map<string, ProviderHealth>([
+    ["openrouter", expiredHealth],
+  ]);
+  const result = findLiveProviderPenalty(providerHealthMap, "openrouter", 1_000_000);
+  assert.equal(result, null);
+  assert.ok(
+    providerHealthMap.has("openrouter"),
+    "expired entry must remain in the map — findLive is read-only, expireHealthMaps owns cleanup",
+  );
+  assert.strictEqual(
+    providerHealthMap.get("openrouter"),
+    expiredHealth,
+    "expired entry must be the same object — no silent replacement",
+  );
+});
+
+test("findLiveProviderPenalty_whenProviderIdHasMixedCase_doesNotCaseFoldTheLookup", () => {
+  // M104 exact-key pin: the helper must NOT normalize case. Provider
+  // IDs are canonical slugs passed verbatim from session state by the
+  // `provider.models` hook. Any defensive `.toLowerCase()` would still
+  // pass the lowercase-ID pins but silently turn a mixed-case probe
+  // into a false hit, which would bypass `isProviderHealthy` checks
+  // for any caller that happened to capitalize the provider ID.
+  const providerHealthMap = new Map<string, ProviderHealth>([
+    ["openrouter", { state: "quota", until: 2_000_000, retryCount: 1 }],
+  ]);
+  const result = findLiveProviderPenalty(providerHealthMap, "OpenRouter", 1_000_000);
+  assert.equal(
+    result,
+    null,
+    "mixed-case provider ID must NOT match a lowercase map key — exact keying only",
+  );
+});
+
 test("findRegistryEntryByModel_whenRuntimeIdIsRawAndRegistryIsComposite_returnsEntry", () => {
   // Common case: runtime delivers `{id: "glm-5", providerID: "ollama-cloud"}`
   // and registry route is composite "ollama-cloud/glm-5". Pin that the
