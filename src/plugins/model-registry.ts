@@ -984,6 +984,45 @@ export const PROVIDER_NO_CREDIT_DURATION_MS = 2 * 60 * 60 * 1000; // 2h
 export const ROUTE_MODEL_NOT_FOUND_DURATION_MS = 6 * 60 * 60 * 1000; // 6h
 
 /**
+ * Authoritative mapping from `ProviderApiErrorClass` to backoff duration.
+ *
+ * ## Drift shape this closes
+ *
+ * The `session.error` hook used to hand-wire the penalty lookup as three
+ * parallel if-else branches:
+ *
+ *     if (errorClass === "quota") {
+ *       recordProviderHealth(..., "quota", QUOTA_BACKOFF_DURATION_MS);
+ *     } else if (errorClass === "no_credit") {
+ *       recordProviderHealth(..., "no_credit", NO_CREDIT_DURATION_MS);
+ *     } else if (errorClass === "key_dead") {
+ *       recordProviderHealth(..., "key_dead", KEY_DEAD_DURATION_MS);
+ *     }
+ *
+ * This couples the class→duration mapping to its single call site, and if
+ * `ProviderApiErrorClass` gains a new penalty state (say `"blocked"`), TS
+ * would NOT fail — the new state would silently fall through the chain
+ * and be dropped as though it were `"unclassified"`, quarantining nothing.
+ *
+ * ## Why a Record with `Exclude<>`
+ *
+ * `Record<Exclude<ProviderApiErrorClass, "unclassified">, number>` forces
+ * exhaustiveness: every penalty state in the union MUST appear as a key,
+ * and `"unclassified"` is excluded from the mapping by construction (not
+ * by an if-guard that can forget to be added). Adding a new penalty state
+ * to the union fails compilation at this Record literal until the author
+ * assigns a duration, making the mapping impossible to forget.
+ */
+export const PROVIDER_PENALTY_CLASS_TO_BACKOFF_DURATION_MS: Record<
+  Exclude<ProviderApiErrorClass, "unclassified">,
+  number
+> = {
+  quota: ROUTE_QUOTA_BACKOFF_DURATION_MS,
+  no_credit: PROVIDER_NO_CREDIT_DURATION_MS,
+  key_dead: PROVIDER_KEY_DEAD_DURATION_MS,
+};
+
+/**
  * Default hang-timer budget used when `AICODER_ROUTE_HANG_TIMEOUT_MS` is
  * unset or unparseable. 15 minutes matches the upper bound of interactive
  * deep-reasoning turns on kimi-k2-thinking / minimax-m2.7 / cogito-2.1
@@ -3351,8 +3390,6 @@ export const ModelRegistryPlugin: Plugin = async () => {
   // (e.g. `evaluateSessionHangForTimeoutPenalty`) reference the
   // module-scope constants directly.
   const QUOTA_BACKOFF_DURATION_MS = ROUTE_QUOTA_BACKOFF_DURATION_MS;
-  const KEY_DEAD_DURATION_MS = PROVIDER_KEY_DEAD_DURATION_MS;
-  const NO_CREDIT_DURATION_MS = PROVIDER_NO_CREDIT_DURATION_MS;
 
   function recordProviderHealth(
     providerID: string,
@@ -3612,12 +3649,12 @@ export const ModelRegistryPlugin: Plugin = async () => {
         // 401+rate-limit both misclassified as quota, dead keys retried
         // every hour forever).
         const errorClass = classifyProviderApiError(statusCode, message);
-        if (errorClass === "quota") {
-          recordProviderHealth(providerID, "quota", QUOTA_BACKOFF_DURATION_MS);
-        } else if (errorClass === "no_credit") {
-          recordProviderHealth(providerID, "no_credit", NO_CREDIT_DURATION_MS);
-        } else if (errorClass === "key_dead") {
-          recordProviderHealth(providerID, "key_dead", KEY_DEAD_DURATION_MS);
+        if (errorClass !== "unclassified") {
+          recordProviderHealth(
+            providerID,
+            errorClass,
+            PROVIDER_PENALTY_CLASS_TO_BACKOFF_DURATION_MS[errorClass],
+          );
         }
         // "unclassified" → no penalty. Transient upstream errors must not
         // quarantine healthy providers.

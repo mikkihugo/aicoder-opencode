@@ -14,6 +14,7 @@ import {
   buildRouteHealthEntry,
   buildModelNotFoundRouteHealth,
   classifyProviderApiError,
+  PROVIDER_PENALTY_CLASS_TO_BACKOFF_DURATION_MS,
   isFallbackBlocked,
   findFirstHealthyRouteInEntry,
   findFirstHealthyVisibleRoute,
@@ -29,6 +30,8 @@ import {
   DEFAULT_ROUTE_HANG_TIMEOUT_MS,
   ROUTE_MODEL_NOT_FOUND_DURATION_MS,
   ROUTE_QUOTA_BACKOFF_DURATION_MS,
+  PROVIDER_NO_CREDIT_DURATION_MS,
+  PROVIDER_KEY_DEAD_DURATION_MS,
   shouldClassifyAsModelNotFound,
   clearSessionHangState,
   countHealthyVisibleRoutes,
@@ -3349,6 +3352,40 @@ test("buildRouteHealthEntry_whenNewUntilIsLongerThanExisting_adoptsNewStateAndUn
   assert.equal(health.state, "quota", "newer/longer penalty wins the classification");
   assert.equal(health.until, now + 60 * 60 * 1000);
   assert.equal(health.retryCount, 2);
+});
+
+test("PROVIDER_PENALTY_CLASS_TO_BACKOFF_DURATION_MS_quotaKey_mapsTo1HourConstant", () => {
+  // Pins the `quota` → `ROUTE_QUOTA_BACKOFF_DURATION_MS` (1h) assignment
+  // in the Record. If a refactor reassigns `quota` to the 2h key_dead
+  // constant by mistake, the session.error hook would quarantine quota
+  // hits for twice as long — doubling the wasted retry budget for the
+  // most common transient error class.
+  assert.equal(
+    PROVIDER_PENALTY_CLASS_TO_BACKOFF_DURATION_MS.quota,
+    ROUTE_QUOTA_BACKOFF_DURATION_MS,
+  );
+});
+
+test("PROVIDER_PENALTY_CLASS_TO_BACKOFF_DURATION_MS_noCreditKey_mapsTo2HourNoCreditConstant", () => {
+  // Pins the `no_credit` → `PROVIDER_NO_CREDIT_DURATION_MS` assignment.
+  // Regression target: a swap to `ROUTE_QUOTA_BACKOFF_DURATION_MS` would
+  // retry a billing-dead provider every hour, burning requests against
+  // a guaranteed 402.
+  assert.equal(
+    PROVIDER_PENALTY_CLASS_TO_BACKOFF_DURATION_MS.no_credit,
+    PROVIDER_NO_CREDIT_DURATION_MS,
+  );
+});
+
+test("PROVIDER_PENALTY_CLASS_TO_BACKOFF_DURATION_MS_keyDeadKey_mapsTo2HourKeyDeadConstant", () => {
+  // Pins the `key_dead` → `PROVIDER_KEY_DEAD_DURATION_MS` assignment.
+  // A dead API key that falls back to the 1h quota window would be
+  // retried every hour forever, the exact regression M35 was introduced
+  // to close via authoritative status-code classification.
+  assert.equal(
+    PROVIDER_PENALTY_CLASS_TO_BACKOFF_DURATION_MS.key_dead,
+    PROVIDER_KEY_DEAD_DURATION_MS,
+  );
 });
 
 test("classifyProviderApiError_when402WithRateLimitKeyword_returnsNoCreditNotQuota", () => {
