@@ -172,6 +172,17 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M23: `best` branch of recommendTaskModelRoute used `provider_order[0]` unconditionally — returned hidden paid routes and unhealthy routes as "best" `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: after `const best = selectBestModelForRoleAndTask(...)` returned an entry, the caller did `const primaryRoute = best.provider_order[0]` and returned it unconditionally. This skipped both (a) `filterVisibleProviderRoutes`, so hidden/paid routes (togetherai, xai, cerebras, cloudflare-ai-gateway) could be returned despite being deliberately blocked by curation, and (b) any provider/route health check, so a model with a quota-backed-off provider or a timed-out route would be returned as the "best" route, guaranteeing an immediate inference failure at the caller.
+- **Why the last-resort fallback masked it**: for registry entries where the first provider happened to be visible+healthy, the code worked by accident. For the common-in-production scenario of a curated entry whose primary is a hidden route (retained in the registry for dr-repo/letta-workspace diagnostic reads but filtered on the live fleet), the hook returned the wrong thing on every call.
+- **Why no test caught it**: the earlier M19 test `BestRegistryPathIsHit` was named as if it exercised the `best` branch but actually fell through to last-resort, because `selectBestModelForRoleAndTask`'s filter is `best_for.some(bf => bf.includes(task))` not the reverse — passing `task: "coding task"` against `best_for: ["coding"]` returned no candidates, so best was null and last-resort handled it. Fleet-wide the `best` branch was barely exercised by tests at all.
+- **Fix**: after `best` is returned, walk `filterVisibleProviderRoutes(best.provider_order)` and pick the first route that is both provider-healthy (`isProviderHealthy`) and route-healthy (`modelRouteHealthMap.get(route.model)` missing or expired). If none are healthy, fall through to the last-resort healthy-route scan instead of returning a dead route.
+- **Test**: new `recommendTaskModelRoute_whenBestEntryPrimaryRouteIsHiddenOrUnhealthy_fallsThroughToLastResort` uses `prompt: "coding"` + `best_for: ["coding tasks"]` so the substring filter actually matches and the `best` branch is truly live. It constructs a single entry with three routes (togetherai=hidden, iflowcn=unhealthy, opencode-go=healthy) and asserts the chosen route is opencode-go. Verified to fail on HEAD with `togetherai/qwen3-coder-plus` when the fix is stashed.
+- **Verification**: 128/128 tests pass (127 + 1 new), `tsc -p tsconfig.json` clean, dist rebuilt.
+- **Files**: `src/plugins/model-registry.ts`, `src/plugins/model-registry.test.ts`.
+
 ### M22: `provider.models` openrouter filter never matched — every curated openrouter model silently hidden from opencode `✅ COMPLETED`
 
 Completion Notes (2026-04-11):

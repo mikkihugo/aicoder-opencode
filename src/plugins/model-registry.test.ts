@@ -344,3 +344,74 @@ test("recommendTaskModelRoute_whenBestRegistryPathIsHit_returnsSinglePrefixedRou
   assert.equal(decision.selectedModelRoute, "iflowcn/qwen3-coder-plus");
   assert.doesNotMatch(decision.selectedModelRoute, /^[^/]+\/[^/]+\//);
 });
+
+test("recommendTaskModelRoute_whenBestEntryPrimaryRouteIsHiddenOrUnhealthy_fallsThroughToLastResort", async () => {
+  // Regression: the `best` branch of recommendTaskModelRoute used to
+  // grab `best.provider_order[0]` unconditionally and return it, even
+  // when that route was a hidden/paid provider (togetherai, xai,
+  // cerebras, cloudflare-ai-gateway) or a route whose provider/route
+  // health was actively penalized. The caller then tried to use an
+  // invisible or dead route as the canonical "best" choice, guaranteeing
+  // an immediate inference failure. This test pins the visible+healthy
+  // walk: the best entry's primary route is togetherai (hidden), the
+  // secondary is iflowcn with an unhealthy provider, and the tertiary
+  // is opencode-go (visible + healthy). The chosen route must be the
+  // tertiary — NOT togetherai, NOT iflowcn. A secondary entry's
+  // visible+healthy route can also satisfy the contract as long as the
+  // result is never the hidden or unhealthy route.
+  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "aicoder-model-routing-"));
+
+  const providerHealthMap = new Map([
+    [
+      "iflowcn",
+      {
+        state: "quota" as const,
+        until: Date.now() + 60_000,
+        retryCount: 1,
+      },
+    ],
+  ]);
+
+  const decision = await recommendTaskModelRoute(
+    tempDirectory,
+    {
+      // No agent metadata on disk → no preferred models.
+      subagent_type: "implementation_lead",
+      // Prompt="coding" so selectBestModelForRoleAndTask's substring
+      // filter (`best_for.some(bf => bf.includes(lowerTask))`) actually
+      // matches the `best_for: ["coding tasks"]` entry below and the
+      // `best` branch truly runs (not the last-resort fallback).
+      prompt: "coding",
+    },
+    [
+      {
+        id: "qwen3-coder-plus",
+        enabled: true,
+        description: "qwen3-coder-plus description",
+        capability_tier: "strong",
+        cost_tier: "free",
+        billing_mode: "free",
+        latency_tier: "standard",
+        concurrency: 1,
+        quota_visibility: "system-observed",
+        best_for: ["coding tasks"],
+        not_for: [],
+        default_roles: ["implementation_worker"],
+        provider_order: [
+          // Hidden paid route — must be skipped.
+          { provider: "togetherai", model: "togetherai/qwen3-coder-plus", priority: 1 },
+          // Provider-level unhealthy — must be skipped.
+          { provider: "iflowcn", model: "iflowcn/qwen3-coder-plus", priority: 2 },
+          // Visible + healthy — this is the correct choice.
+          { provider: "opencode-go", model: "opencode-go/qwen3-coder-plus", priority: 3 },
+        ],
+        notes: [],
+      },
+    ],
+    providerHealthMap,
+    new Map(),
+    Date.now(),
+  );
+
+  assert.equal(decision.selectedModelRoute, "opencode-go/qwen3-coder-plus");
+});

@@ -766,7 +766,25 @@ async function recommendTaskModelRoute(
   );
 
   if (best) {
-    const primaryRoute = best.provider_order[0];
+    // Previously this branch used `best.provider_order[0]` unconditionally,
+    // which was wrong in two ways:
+    //   1. The raw `provider_order[0]` may be a hidden/paid route
+    //      (togetherai, xai, cerebras, cloudflare-ai-gateway) that the
+    //      curation layer deliberately blocks via filterVisibleProviderRoutes.
+    //   2. It never checked provider health OR route-level health, so a
+    //      model with a quota-backed-off provider and/or a timed-out route
+    //      would still be returned as the "best" route — guaranteeing an
+    //      immediate inference failure for the caller.
+    // Walk the visible routes in priority order and return the first
+    // healthy one. If none are healthy, fall through to the last-resort
+    // healthy-route scan below so the caller gets a working route.
+    const visibleRoutes = filterVisibleProviderRoutes(best.provider_order);
+    const bestRouteIsHealthy = (route: { provider: string; model: string }): boolean => {
+      if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
+      const routeHealth = modelRouteHealthMap.get(route.model);
+      return !routeHealth || routeHealth.until <= now;
+    };
+    const primaryRoute = visibleRoutes.find(bestRouteIsHealthy);
     if (primaryRoute) {
       return {
         // primaryRoute.model is already composite "provider/model-id".
