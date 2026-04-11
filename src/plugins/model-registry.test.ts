@@ -14,7 +14,9 @@ import {
   isFallbackBlocked,
   isZeroTokenQuotaSignal,
   parseAgentFrontmatter,
+  parseHangTimeoutMs,
   stripYamlScalarQuotes,
+  DEFAULT_ROUTE_HANG_TIMEOUT_MS,
   ROUTE_MODEL_NOT_FOUND_DURATION_MS,
   ROUTE_QUOTA_BACKOFF_DURATION_MS,
   shouldClassifyAsModelNotFound,
@@ -2916,4 +2918,69 @@ test("parseAgentFrontmatter_whenRoutingComplexityIsInvalid_leavesFieldUnset", ()
   ].join("\n"));
 
   assert.equal(metadata.routing_complexity, undefined);
+});
+
+test("parseHangTimeoutMs_whenUndefined_returnsDefault", () => {
+  assert.equal(parseHangTimeoutMs(undefined), DEFAULT_ROUTE_HANG_TIMEOUT_MS);
+});
+
+test("parseHangTimeoutMs_whenEmptyString_returnsDefault", () => {
+  // Empty env var (`AICODER_ROUTE_HANG_TIMEOUT_MS=`) must be treated as
+  // unset, not as `Number("") === 0` which would flip the call site into
+  // the immediate-penalty test branch on every session.
+  assert.equal(parseHangTimeoutMs(""), DEFAULT_ROUTE_HANG_TIMEOUT_MS);
+});
+
+test("parseHangTimeoutMs_whenValidIntegerString_returnsValue", () => {
+  assert.equal(parseHangTimeoutMs("450000"), 450000);
+});
+
+test("parseHangTimeoutMs_whenZeroString_returnsZeroForTestShortPath", () => {
+  // The `chat.params` call site uses `timeoutMs < 1000` as the test-mode
+  // immediate-penalty trigger. Genuine test callers must still be able
+  // to request that branch with `"0"` or `"500"`.
+  assert.equal(parseHangTimeoutMs("0"), 0);
+});
+
+test("parseHangTimeoutMs_whenNonNumericString_returnsDefault", () => {
+  // Headline pin: a typo like `AICODER_ROUTE_HANG_TIMEOUT_MS=abc` used
+  // to land as `parseInt("abc", 10) === NaN`. `NaN < 1000` is `false`
+  // so the code entered the production `setTimeout(fn, NaN + 100)`
+  // branch, which Node coerces to a ~1ms delay — firing
+  // `finalizeHungSessionState` immediately and recording a spurious
+  // `"timeout"` penalty against the session's route. Every subsequent
+  // session repeated the penalty until the operator noticed the env
+  // typo, silently blacking out every route in the registry. The
+  // helper now falls back to `DEFAULT_ROUTE_HANG_TIMEOUT_MS` on NaN.
+  assert.equal(parseHangTimeoutMs("abc"), DEFAULT_ROUTE_HANG_TIMEOUT_MS);
+});
+
+test("parseHangTimeoutMs_whenTrailingGarbageAppendedToValidInteger_returnsDefault", () => {
+  // `parseInt("450000abc", 10)` silently returned `450000`, hiding
+  // operator misconfiguration (the wrong value is honored as-if the
+  // garbage were a valid suffix). `Number("450000abc")` returns `NaN`,
+  // which the helper rejects, surfacing the typo as a safe fallback to
+  // `DEFAULT_ROUTE_HANG_TIMEOUT_MS` rather than a silent-accept of a
+  // partially-parsed value. The literal deliberately is NOT the
+  // default so this pin discriminates against the old `parseInt`
+  // semantics rather than coincidentally matching on the default.
+  assert.equal(
+    parseHangTimeoutMs("450000abc"),
+    DEFAULT_ROUTE_HANG_TIMEOUT_MS,
+  );
+});
+
+test("parseHangTimeoutMs_whenNegativeString_returnsDefault", () => {
+  // A negative timeout is never a "test mode" request — it is a
+  // misconfiguration. `parseInt("-1", 10) === -1` used to satisfy
+  // `< 1000` and fire the immediate-penalty branch on every session.
+  // The helper now rejects negatives and falls back.
+  assert.equal(parseHangTimeoutMs("-1"), DEFAULT_ROUTE_HANG_TIMEOUT_MS);
+});
+
+test("parseHangTimeoutMs_whenFloatString_truncatesToInteger", () => {
+  // `setTimeout` coerces fractional delays anyway, but pinning the
+  // truncation keeps the return type a clean integer for the
+  // `< 1000` comparison and any arithmetic downstream.
+  assert.equal(parseHangTimeoutMs("123456.789"), 123456);
 });

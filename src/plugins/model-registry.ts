@@ -636,6 +636,65 @@ export const PROVIDER_NO_CREDIT_DURATION_MS = 2 * 60 * 60 * 1000; // 2h
 // shrink an active model_not_found window.
 export const ROUTE_MODEL_NOT_FOUND_DURATION_MS = 6 * 60 * 60 * 1000; // 6h
 
+/**
+ * Default hang-timer budget used when `AICODER_ROUTE_HANG_TIMEOUT_MS` is
+ * unset or unparseable. 15 minutes matches the upper bound of interactive
+ * deep-reasoning turns on kimi-k2-thinking / minimax-m2.7 / cogito-2.1
+ * without forcing genuinely-hung silent-death sessions to linger longer.
+ */
+export const DEFAULT_ROUTE_HANG_TIMEOUT_MS = 900000;
+
+/**
+ * Parse the `AICODER_ROUTE_HANG_TIMEOUT_MS` env var into a validated
+ * millisecond budget for the `chat.params` hang timer.
+ *
+ * The previous inline `parseInt(raw ?? "900000", 10)` had three latent
+ * misbehaviors that only a real misconfiguration would surface, but when
+ * any of them did fire the consequences cascaded across every active
+ * session until the operator noticed:
+ *
+ *  1. **NaN fall-through.** `parseInt("abc", 10)` returns `NaN`. The
+ *     downstream check `timeoutMs < 1000` evaluates to `false` for `NaN`
+ *     (all comparisons against `NaN` are `false`), so the code enters the
+ *     production `setTimeout(fn, NaN + 100)` branch. Node coerces the
+ *     delay to `1` ms, the timer fires almost immediately, and
+ *     `finalizeHungSessionState` records a spurious `"timeout"` penalty
+ *     on whatever provider/model the session is using. Every subsequent
+ *     session repeats the penalty — a typo in an env var silently blacks
+ *     out every route in the registry.
+ *  2. **Trailing garbage accepted.** `parseInt("900000abc", 10)` returns
+ *     `900000`, hiding the operator error instead of flagging it.
+ *  3. **Negative values.** `parseInt("-1", 10)` returns `-1`, which is
+ *     `< 1000`, so the "test mode" branch fires and immediately penalizes
+ *     the route — a negative timeout is not a test request, it is a
+ *     misconfiguration.
+ *
+ * The replacement rules: reject any input that is not a finite
+ * non-negative integer (via `Number()` + `Number.isFinite()` + `< 0`
+ * guard), falling back to `DEFAULT_ROUTE_HANG_TIMEOUT_MS`. `Number("")`
+ * is `0`, so empty strings are treated as unset and also fall back. The
+ * test-mode short-path (`< 1000`) is preserved: a caller who genuinely
+ * wants immediate-penalty test semantics can still pass `"0"` or `"500"`
+ * and have them honored.
+ *
+ * Args:
+ *   rawValue: The raw env-var string, or `undefined` when unset.
+ *
+ * Returns:
+ *   A non-negative integer millisecond budget. Defaults to
+ *   `DEFAULT_ROUTE_HANG_TIMEOUT_MS` on any invalid input.
+ */
+export function parseHangTimeoutMs(rawValue: string | undefined): number {
+  if (rawValue === undefined || rawValue.length === 0) {
+    return DEFAULT_ROUTE_HANG_TIMEOUT_MS;
+  }
+  const parsedValue = Number(rawValue);
+  if (!Number.isFinite(parsedValue) || parsedValue < 0) {
+    return DEFAULT_ROUTE_HANG_TIMEOUT_MS;
+  }
+  return Math.trunc(parsedValue);
+}
+
 export function buildRouteHealthEntry(
   providerID: string,
   modelID: string,
@@ -2539,8 +2598,10 @@ export const ModelRegistryPlugin: Plugin = async () => {
             CAPABILITY_TIER_TO_TEMPERATURE[modelRegistryEntry.capability_tier];
         }
 
-        // Schedule a timeout check that runs after the timeout period
-        const timeoutMs = parseInt(process.env.AICODER_ROUTE_HANG_TIMEOUT_MS ?? "900000", 10);
+        // Schedule a timeout check that runs after the timeout period.
+        // See `parseHangTimeoutMs` docstring for the NaN / negative /
+        // trailing-garbage edge cases the helper defends against.
+        const timeoutMs = parseHangTimeoutMs(process.env.AICODER_ROUTE_HANG_TIMEOUT_MS);
 
         // For testing purposes with very short timeouts, mark as timeout immediately
         if (timeoutMs < 1000) {
