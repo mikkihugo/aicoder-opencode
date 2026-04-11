@@ -3363,30 +3363,118 @@ function healthStateLabel(state: ProviderHealthState): string {
   }
 }
 
+/**
+ * Filter both the provider health map and the route health map through
+ * `isAgentVisibleLivePenalty` and return both entry lists as a tuple, or
+ * `null` when BOTH sides are empty (the system-prompt early-return
+ * sentinel).
+ *
+ * ## Drift shape
+ *
+ * `buildProviderHealthSystemPrompt` previously opened its body with two
+ * structurally-identical `Array.from(map.entries()).filter(([, health])
+ * => isAgentVisibleLivePenalty(health, now))` expressions — one for the
+ * provider map, one for the route map — followed by a third inline
+ * guard `if (activeProviderPenalties.length === 0 &&
+ * activeRoutePenalties.length === 0) return null;`. Three independent
+ * drift surfaces lived on that fragment:
+ *
+ *   1. The PROVIDER-side filter gates the entire provider section of
+ *      the system prompt. A refactor that drops the filter expression
+ *      (or leaves `Array.from(providerHealthMap.entries())` without
+ *      the `.filter(...)` call — easy to miss during a
+ *      "simplification" pass) silently dumps every `key_missing`
+ *      entry into the system prompt. Post-M58 every cold start
+ *      installs `key_missing` for every uncredentialed curated
+ *      provider (typically 15–25 entries), so the agent would see
+ *      a 15-section wall of `Provider X [KEY MISSING] until never`
+ *      on every single message — exactly the noise pre-M58 intentionally
+ *      hid. Already-expired entries would also leak in because the
+ *      filter drops them via `until > now`.
+ *
+ *   2. The ROUTE-side filter is a mirror of surface 1, on a different
+ *      map, with an identical failure mode (dump expired/permanent
+ *      route-level penalties into the system prompt). The mirror
+ *      shape makes this surface the classic "copy-paste drift target":
+ *      a refactor touches the provider filter and forgets the route
+ *      filter (or vice versa), leaving the two branches out of sync
+ *      with opposite filter policies — an asymmetric drift the
+ *      mirror-test structure is designed to catch.
+ *
+ *   3. The `both empty → null` early-return gate is load-bearing. The
+ *      outer `experimental.chat.system.transform` hook depends on
+ *      `buildProviderHealthSystemPrompt` returning `null` when there
+ *      is nothing to report (via `assembleHealthAwareSystemPrompts`'s
+ *      null filter). A refactor that drops the gate and always
+ *      returns a non-null string (e.g. an empty header) would cause
+ *      the transform hook to push an empty provider-health prompt
+ *      into `output.system` on every message with no penalties,
+ *      adding a useless header section and wasting the agent's
+ *      attention on a "nothing is broken right now" preamble.
+ *
+ * ## Why a single helper
+ *
+ * Collapsing the two filters + the early-return gate into one exported
+ * helper makes the three drift surfaces properties of one function
+ * rather than conventions spread across four lines of inline code in
+ * two structurally-parallel branches. The helper returns the two
+ * filtered entry lists as a tagged `{providers, routes}` object so the
+ * call site can destructure with the original variable names and keep
+ * the rest of the function body byte-identical.
+ *
+ * Args:
+ *   providerHealthMap: The plugin's live provider health map.
+ *   modelRouteHealthMap: The plugin's live route health map.
+ *   now: Current wall-clock ms — used by `isAgentVisibleLivePenalty`
+ *     to drop already-expired entries. Passed at the helper boundary
+ *     so the single `Date.now()` call at the hook entry point is
+ *     consistent across both filters.
+ *
+ * Returns:
+ *   `null` when both maps have no agent-visible live entries. Otherwise
+ *   `{providers, routes}` where each array is the filtered `[key, health]`
+ *   tuple list in map-iteration order.
+ */
+export function collectAgentVisibleLivePenalties(
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  now: number,
+): {
+  providers: Array<[string, ProviderHealth]>;
+  routes: Array<[string, ModelRouteHealth]>;
+} | null {
+  const providers = Array.from(providerHealthMap.entries()).filter(
+    ([, health]) => isAgentVisibleLivePenalty(health, now),
+  );
+  const routes = Array.from(modelRouteHealthMap.entries()).filter(
+    ([, health]) => isAgentVisibleLivePenalty(health, now),
+  );
+  if (providers.length === 0 && routes.length === 0) {
+    return null;
+  }
+  return { providers, routes };
+}
+
 export function buildProviderHealthSystemPrompt(
   modelRegistryEntries: ModelRegistryEntry[],
   providerHealthMap: Map<string, ProviderHealth>,
   modelRouteHealthMap: Map<string, ModelRouteHealth>,
   now: number,
 ): string | null {
-  // Agent-visible live penalties: `isAgentVisibleLivePenalty` excludes
-  // `key_missing` structural plumbing (post-M58 every cold start installs
-  // it for every uncredentialed curated provider, and surfacing them here
-  // would dump 15–25 "Provider X [KEY MISSING] until never" sections into
-  // every single agent turn's system prompt) AND already-expired entries
-  // whose `until <= now`. The internal `isProviderHealthy` path still uses
-  // `key_missing` to skip dead providers in the fallback scanner — this
-  // filter only gates the system-prompt surface.
-  const activeProviderPenalties = Array.from(providerHealthMap.entries()).filter(
-    ([, health]) => isAgentVisibleLivePenalty(health, now),
+  // M90: `collectAgentVisibleLivePenalties` replaces the two inline
+  // `Array.from(map.entries()).filter(...)` expressions and the
+  // `both empty → null` early-return gate. See the helper docstring
+  // for the three drift surfaces it closes (provider filter, route
+  // filter, and both-empty null sentinel).
+  const penalties = collectAgentVisibleLivePenalties(
+    providerHealthMap,
+    modelRouteHealthMap,
+    now,
   );
-  const activeRoutePenalties = Array.from(modelRouteHealthMap.entries()).filter(
-    ([, health]) => isAgentVisibleLivePenalty(health, now),
-  );
-
-  if (activeProviderPenalties.length === 0 && activeRoutePenalties.length === 0) {
+  if (penalties === null) {
     return null;
   }
+  const { providers: activeProviderPenalties, routes: activeRoutePenalties } = penalties;
 
   const sections: string[] = [];
 

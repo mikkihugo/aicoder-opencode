@@ -15,6 +15,7 @@ import {
   buildRouteHealthEntry,
   buildModelNotFoundRouteHealth,
   classifyProviderApiError,
+  collectAgentVisibleLivePenalties,
   PROVIDER_PENALTY_CLASS_TO_BACKOFF_DURATION_MS,
   isFallbackBlocked,
   findFirstHealthyRouteInEntry,
@@ -1598,6 +1599,60 @@ test("hasAgentVisiblePenalty_whenKeyMissingAndLiveQuotaMixed_returnsTrue", () =>
     ["opencode", { state: "quota" as const, until: now + 60_000, retryCount: 1 }],
   ]);
   assert.equal(hasAgentVisiblePenalty(providerHealthMap, new Map(), now), true);
+});
+
+test("collectAgentVisibleLivePenalties_whenOnlyProviderMapHasLiveEntry_returnsProvidersOnly", () => {
+  // Pin 1 (provider filter): provider map has one live quota + one
+  // key_missing; route map empty. Expects result.providers.length === 1
+  // (the key_missing entry filtered out) and result.routes.length === 0.
+  // A sabotage that drops the provider filter would include the
+  // key_missing entry and push providers.length to 2; a sabotage on the
+  // route filter has no effect (route map is empty either way).
+  const now = 2_000_000_000_000;
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  providerHealthMap.set("provA", { state: "quota", until: now + 60_000, retryCount: 0 });
+  providerHealthMap.set("provB", { state: "key_missing", until: Number.POSITIVE_INFINITY, retryCount: 0 });
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const result = collectAgentVisibleLivePenalties(providerHealthMap, modelRouteHealthMap, now);
+  assert.notEqual(result, null);
+  assert.equal(result?.providers.length, 1);
+  assert.equal(result?.providers[0]?.[0], "provA");
+  assert.equal(result?.routes.length, 0);
+});
+
+test("collectAgentVisibleLivePenalties_whenOnlyRouteMapHasLiveEntry_returnsRoutesOnly", () => {
+  // Pin 2 (route filter, mirror of pin 1): route map has one live
+  // quota + one key_missing; provider map empty. Expects
+  // result.routes.length === 1 and result.providers.length === 0. A
+  // sabotage that drops the route filter would include key_missing
+  // and push routes.length to 2; a sabotage on the provider filter
+  // has no effect (provider map is empty either way). The mirror
+  // shape catches the classic "refactor touches one branch and
+  // forgets the other" asymmetric drift.
+  const now = 2_000_000_000_000;
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  modelRouteHealthMap.set("openrouter/foo:free", { state: "quota", until: now + 60_000, retryCount: 0 });
+  modelRouteHealthMap.set("openrouter/bar:free", { state: "key_missing", until: Number.POSITIVE_INFINITY, retryCount: 0 });
+  const result = collectAgentVisibleLivePenalties(providerHealthMap, modelRouteHealthMap, now);
+  assert.notEqual(result, null);
+  assert.equal(result?.routes.length, 1);
+  assert.equal(result?.routes[0]?.[0], "openrouter/foo:free");
+  assert.equal(result?.providers.length, 0);
+});
+
+test("collectAgentVisibleLivePenalties_whenBothMapsEmpty_returnsNullSentinel", () => {
+  // Pin 3 (both-empty null sentinel): both maps are EMPTY (not merely
+  // filtered-to-empty). This isolates the null-gate drift surface
+  // from the two filter drift surfaces — dropping either filter
+  // has no effect on an empty map, but dropping the
+  // `both empty → null` gate would return `{providers: [], routes: []}`
+  // instead of null and fire this pin alone.
+  const now = 2_000_000_000_000;
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const result = collectAgentVisibleLivePenalties(providerHealthMap, modelRouteHealthMap, now);
+  assert.equal(result, null);
 });
 
 test("buildProviderHealthSummaryForTool_whenEntryPresent_preservesStateField", () => {
