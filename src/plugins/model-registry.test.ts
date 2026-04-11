@@ -1036,3 +1036,47 @@ test("selectBestModelForRoleAndTask_whenCandidateHasDeadVisibleRoutes_ranksLower
   assert.ok(best);
   assert.equal(best.id, "live-route-strong");
 });
+
+test("recommendTaskModelRoute_whenLastResortMustSkipRouteLevelDeadRoute_returnsNextHealthyRoute", async () => {
+  // Regression (M32): the "last resort" loop at the end of
+  // recommendTaskModelRoute previously only checked provider health. If
+  // the `best` branch returned null (task filter eliminated all
+  // candidates) and the first visible route of the first role-matched
+  // entry was provider-healthy but route-level dead (model_not_found,
+  // zero-token quota, hang timeout), it was returned as the "healthy
+  // visible route" and the caller got a route that was guaranteed to
+  // fail on inference. Same bug class as M29/M31 at the terminal path.
+  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "aicoder-model-routing-"));
+
+  // No agent metadata → preferredModels=[], role=null. Pair this with a
+  // task prompt that cannot match any candidate's best_for/default_roles
+  // substring, so selectBestModelForRoleAndTask returns null and control
+  // falls through to the last-resort scan.
+  const modelRouteHealthMap = new Map([
+    [
+      "iflowcn/dead-last-resort",
+      { state: "model_not_found" as const, until: Date.now() + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  const decision = await recommendTaskModelRoute(
+    tempDirectory,
+    {
+      subagent_type: "zzz_nonexistent_agent",
+      prompt: "zzz_completely_orthogonal_task_description_nothing_matches",
+      complexity: "large",
+    },
+    [
+      buildModelRegistryEntry("last-resort-entry", ["implementation_worker"], "strong", [
+        { provider: "iflowcn", model: "iflowcn/dead-last-resort", priority: 1 },
+        { provider: "ollama-cloud", model: "ollama-cloud/live-last-resort", priority: 2 },
+      ]),
+    ],
+    new Map(),
+    modelRouteHealthMap,
+    Date.now(),
+  );
+
+  assert.equal(decision.selectedModelRoute, "ollama-cloud/live-last-resort");
+  assert.match(decision.reasoning, /Fallback to first healthy visible route/);
+});

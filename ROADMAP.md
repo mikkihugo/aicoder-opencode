@@ -172,6 +172,17 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M32: `recommendTaskModelRoute` last-resort fallback returned provider-healthy but route-level-dead routes `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: the terminal `for (const entry of roleMatchedEntries)` loop at the end of `recommendTaskModelRoute` (post-best-branch fall-through) iterated visible routes and returned the first whose PROVIDER was healthy. It did not consult `modelRouteHealthMap` at all, so a provider-healthy-but-route-dead route (`model_not_found`, zero-token quota, hang-timer `timeout`) was returned as the "Fallback to first healthy visible route" and the caller got a route that was guaranteed to fail on the next inference call. Same bug class as M29 (agent-facing tool output), M31 (ranking comparator) — third variant at the terminal routing path.
+- **Reachability**: production-reachable. Path to hit: caller has no agent metadata (preferredModels=[]) and a task prompt that does not match any candidate's `best_for`/`default_roles` substring, so `selectBestModelForRoleAndTask` filters down to zero candidates and returns null → `best` branch is skipped → last-resort scan kicks in. If any role-matched entry has a primary visible route with a route-level penalty but a healthy provider, that route was returned as the recommendation.
+- **Fix**: walk visible routes with both `isProviderHealthy(providerHealthMap, route.provider, now)` AND `modelRouteHealthMap.get(composeRouteKey(route))?.until <= now` as `continue` guards, then return the first route that passes both. Control flow preserved — the function still throws at the end if no entry has a fully-healthy visible route.
+- **Test**: `recommendTaskModelRoute_whenLastResortMustSkipRouteLevelDeadRoute_returnsNextHealthyRoute` — single role-matched entry with two visible routes (`iflowcn/dead-last-resort` with `model_not_found` penalty, `ollama-cloud/live-last-resort` healthy); no agent metadata; task prompt `"zzz_completely_orthogonal_task_description_nothing_matches"` to force `best` to return null and push control into last resort. Asserts `selectedModelRoute === "ollama-cloud/live-last-resort"` AND `reasoning` matches `/Fallback to first healthy visible route/`.
+- **Verification**: verified-on-HEAD by temporarily reverting the last-resort block to provider-only; exactly 1 test failed (the new one), restored fix, 143/143 green (142 + 1 new). `npm run build` clean.
+- **Files**: `src/plugins/model-registry.ts` (last-resort fallback loop), `src/plugins/model-registry.test.ts` (1 new test).
+- **Rebuilt `dist/plugins/model-registry.js`** so overlay shims pick up the fix.
+
 ### M31: `selectBestModelForRoleAndTask` ranking counter ignored `modelRouteHealthMap` — route-level-dead candidates could win ties against fully-live candidates `✅ COMPLETED`
 
 Completion Notes (2026-04-11):

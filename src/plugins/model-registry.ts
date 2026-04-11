@@ -1009,15 +1009,21 @@ async function recommendTaskModelRoute(
   }
 
   // Last resort: use the first visible route from any role-matched entry
+  // whose PROVIDER AND ROUTE are both healthy. Previously this only checked
+  // provider health, so it could return a route with a route-level
+  // `model_not_found` / quota / hang `timeout` penalty and the caller would
+  // get a route that's guaranteed to fail on inference. Same bug class as
+  // M29/M31 at the terminal fallback path.
   for (const entry of roleMatchedEntries) {
     const visibleRoutes = filterVisibleProviderRoutes(entry.provider_order);
     for (const route of visibleRoutes) {
-      if (isProviderHealthy(providerHealthMap, route.provider, now)) {
-        return {
-          selectedModelRoute: route.model,
-          reasoning: `Fallback to first healthy visible route`,
-        };
-      }
+      if (!isProviderHealthy(providerHealthMap, route.provider, now)) continue;
+      const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
+      if (routeHealth && routeHealth.until > now) continue;
+      return {
+        selectedModelRoute: route.model,
+        reasoning: `Fallback to first healthy visible route`,
+      };
     }
   }
 
