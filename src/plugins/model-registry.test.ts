@@ -8,6 +8,7 @@ import type { ModelRegistryEntry } from "../model-registry.js";
 import {
   buildAvailableModelsSystemPrompt,
   buildProviderHealthSystemPrompt,
+  buildRoleRecommendationRoutes,
   buildRouteHealthEntry,
   buildModelNotFoundRouteHealth,
   classifyProviderApiError,
@@ -1518,6 +1519,182 @@ test("findFirstHealthyRouteInEntry_whenPrimaryProviderHealthyButRouteLevelBlocke
   );
   assert.ok(route);
   assert.equal(route.provider, "iflowcn");
+});
+
+test("buildRoleRecommendationRoutes_whenEntryHasNoVisibleRoutes_returnsEmptyPayload", () => {
+  // Defensive: a curated entry whose every route is hidden by
+  // `filterVisibleProviderRoutes` (all paid/blocked providers) must
+  // return `{primaryRoute: null, primaryHealthy: false,
+  // alternativeRoutes: []}`. The tool handler relies on this shape so
+  // the agent never sees a dangling `{ primaryRoute: undefined }` slot.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "hidden-only",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "togetherai", model: "togetherai/whatever", priority: 1 },
+      { provider: "xai", model: "xai/grok-4", priority: 2 },
+    ],
+  );
+  const result = buildRoleRecommendationRoutes(entry, new Map(), new Map(), now);
+  assert.equal(result.primaryRoute, null);
+  assert.equal(result.primaryHealthy, false);
+  assert.deepEqual(result.alternativeRoutes, []);
+});
+
+test("buildRoleRecommendationRoutes_whenPrimaryHealthy_returnsPrimaryAndRestAsAlternatives", () => {
+  // Clean happy path: primary visible route is healthy, so it's
+  // returned as `primaryRoute` with `primaryHealthy: true` and every
+  // other visible route lands in `alternativeRoutes`.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 1 },
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 2 },
+    ],
+  );
+  const result = buildRoleRecommendationRoutes(entry, new Map(), new Map(), now);
+  assert.ok(result.primaryRoute);
+  assert.equal(result.primaryRoute.provider, "iflowcn");
+  assert.equal(result.primaryHealthy, true);
+  assert.equal(result.alternativeRoutes.length, 1);
+  assert.equal(result.alternativeRoutes[0]!.route.provider, "opencode");
+});
+
+test("buildRoleRecommendationRoutes_whenPrimaryKeyMissingButSiblingHealthy_returnsSiblingAsPrimary", () => {
+  // Headline integration pin for M62. Post-M58 shipping shape:
+  // `opencode/glm-5.1-free` primary with `iflowcn/glm-5.1` sibling,
+  // opencode is key_missing at boot. Pre-M62, the tool reported the
+  // opencode route as `primaryRoute` with `primaryProviderHealthy:
+  // false` even though iflowcn was happily serving traffic. Agents
+  // received a dead route in the single slot the tool is supposed to
+  // populate with a working recommendation. Post-M62, the helper
+  // promotes the first healthy route (iflowcn) to `primaryRoute`
+  // with `primaryHealthy: true`, and the opencode route lands in
+  // `alternativeRoutes` with `healthy: false` so the agent still sees
+  // why it was demoted.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+    ],
+  );
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+  ]);
+  const result = buildRoleRecommendationRoutes(
+    entry,
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+  assert.ok(result.primaryRoute);
+  assert.equal(
+    result.primaryRoute.provider,
+    "iflowcn",
+    "helper must promote the first healthy route to primary, not report the key_missing opencode route",
+  );
+  assert.equal(result.primaryHealthy, true);
+  assert.equal(result.alternativeRoutes.length, 1);
+  assert.equal(result.alternativeRoutes[0]!.route.provider, "opencode");
+  assert.equal(
+    result.alternativeRoutes[0]!.healthy,
+    false,
+    "demoted opencode route must still surface its unhealthy state in alternativeRoutes",
+  );
+});
+
+test("buildRoleRecommendationRoutes_whenPrimaryRouteLevelBlockedButSiblingHealthy_returnsSibling", () => {
+  // Route-level penalty on the primary (model_not_found / zero-token
+  // quota / timeout) must also trigger the demotion, not just
+  // provider-level health. Regression shape for the M29/M30 class at
+  // the single-recommendation tool.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+    ],
+  );
+  const modelRouteHealthMap = new Map([
+    [
+      "opencode/glm-5.1-free",
+      { state: "model_not_found" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  const result = buildRoleRecommendationRoutes(
+    entry,
+    new Map(),
+    modelRouteHealthMap,
+    now,
+  );
+  assert.ok(result.primaryRoute);
+  assert.equal(result.primaryRoute.provider, "iflowcn");
+  assert.equal(result.primaryHealthy, true);
+  assert.equal(result.alternativeRoutes.length, 1);
+  assert.equal(result.alternativeRoutes[0]!.route.provider, "opencode");
+  assert.equal(result.alternativeRoutes[0]!.healthy, false);
+});
+
+test("buildRoleRecommendationRoutes_whenEveryVisibleRouteBlocked_fallsBackToFirstVisibleWithUnhealthyFlag", () => {
+  // Defensive fallback: `selectBestModelForRoleAndTask` is supposed to
+  // filter out entries where every visible route is blocked, but if
+  // that contract ever cracks the helper must still return a
+  // renderable shape — `primaryRoute = visibleRoutes[0]`,
+  // `primaryHealthy = false`, and every remaining visible route in
+  // `alternativeRoutes`. The agent still sees the block reason via
+  // `primaryProviderHealthy: false` and can surface it to the user
+  // instead of crashing on a null primary.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [
+      { provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 },
+      { provider: "iflowcn", model: "iflowcn/glm-5.1", priority: 2 },
+    ],
+  );
+  const providerHealthMap = new Map([
+    [
+      "opencode",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+    [
+      "iflowcn",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  const result = buildRoleRecommendationRoutes(
+    entry,
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+  assert.ok(result.primaryRoute);
+  assert.equal(
+    result.primaryRoute.provider,
+    "opencode",
+    "with no healthy routes anywhere, fall back to visibleRoutes[0] so the shape stays renderable",
+  );
+  assert.equal(result.primaryHealthy, false);
+  assert.equal(result.alternativeRoutes.length, 1);
+  assert.equal(result.alternativeRoutes[0]!.route.provider, "iflowcn");
+  assert.equal(result.alternativeRoutes[0]!.healthy, false);
 });
 
 test("computeRegistryEntryHealthReport_whenPrimaryKeyMissingButSiblingHealthy_returnsNull", () => {

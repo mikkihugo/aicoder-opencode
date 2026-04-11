@@ -1378,6 +1378,88 @@ export function findFirstHealthyRouteInEntry(
 }
 
 /**
+ * Build the `{primaryRoute, primaryHealthy, alternativeRoutes}` payload
+ * returned by the agent-facing `recommend_model_for_role` tool.
+ *
+ * The contract is: "hand the agent ONE concrete route it can use right
+ * now". Pre-M62, the tool returned `filterVisibleProviderRoutes(...)[0]`
+ * as `primaryRoute` regardless of health, and only set `primaryHealthy`
+ * to `true` when that specific slot happened to be routable. Post-M58
+ * (9b125b5), `initializeProviderHealthState` started installing
+ * `key_missing` entries at boot for every uncredentialed curated
+ * provider. For any entry whose `provider_order[0]` lives on an
+ * uncredentialed provider — which is exactly the shipping shape in
+ * `config/models.jsonc` (e.g. `opencode/glm-5.1-free` primary with
+ * `iflowcn/glm-5.1` sibling) — the tool reported
+ * `primaryRoute: "opencode/glm-5.1-free"` with `primaryProviderHealthy:
+ * false`, forcing agents to parse `alternativeRoutes` to find a usable
+ * route. That defeated the whole purpose of a "single recommendation"
+ * tool and introduced exactly the class of agent-confusion bugs M59/M60
+ * fixed in the system-prompt builders.
+ *
+ * This helper flips the contract: `primaryRoute` is the first visible
+ * route that is actually routable (provider healthy AND composite-route
+ * entry not penalized), exactly as the router itself would pick via
+ * `findFirstHealthyRouteInEntry`. When every visible route is blocked
+ * — a state `selectBestModelForRoleAndTask` is supposed to prevent but
+ * which we defensively handle — we fall back to the first visible route
+ * with `primaryHealthy: false` so the caller still gets a shape it can
+ * render and surface the block reason via `alternativeRoutes`.
+ * `alternativeRoutes` excludes whichever route was selected as primary,
+ * so the agent never sees the same route twice.
+ *
+ * Args:
+ *   modelRegistryEntry: Registry row to build a recommendation from.
+ *   providerHealthMap: Live provider-keyed health map.
+ *   modelRouteHealthMap: Live composite-route-keyed health map.
+ *   now: Wall-clock ms.
+ *
+ * Returns:
+ *   A `{primaryRoute, primaryHealthy, alternativeRoutes}` record.
+ *   `primaryRoute` is null only when the entry has no visible routes at
+ *   all (curation has hidden every provider). `primaryHealthy` is true
+ *   iff a healthy route was found. `alternativeRoutes` lists every
+ *   visible route except the one chosen as primary, each annotated with
+ *   its individual `healthy` flag.
+ */
+export function buildRoleRecommendationRoutes(
+  modelRegistryEntry: ModelRegistryEntry,
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  now: number,
+): {
+  primaryRoute: ProviderRoute | null;
+  primaryHealthy: boolean;
+  alternativeRoutes: Array<{ route: ProviderRoute; healthy: boolean }>;
+} {
+  const visibleRoutes = filterVisibleProviderRoutes(modelRegistryEntry.provider_order);
+  if (visibleRoutes.length === 0) {
+    return { primaryRoute: null, primaryHealthy: false, alternativeRoutes: [] };
+  }
+  const isRouteHealthy = (route: ProviderRoute): boolean => {
+    if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
+    const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
+    return !routeHealth || routeHealth.until <= now;
+  };
+  const healthyPrimary = findFirstHealthyRouteInEntry(
+    modelRegistryEntry,
+    providerHealthMap,
+    modelRouteHealthMap,
+    now,
+  );
+  // `visibleRoutes[0]` is guaranteed defined above by the length check;
+  // the non-null assertion narrows the type under
+  // `noUncheckedIndexedAccess` for the `healthyPrimary ?? ...` fallback.
+  const firstVisibleRoute: ProviderRoute = visibleRoutes[0]!;
+  const primaryRoute: ProviderRoute = healthyPrimary ?? firstVisibleRoute;
+  const primaryHealthy = healthyPrimary !== null;
+  const alternativeRoutes = visibleRoutes
+    .filter((route) => route !== primaryRoute)
+    .map((route) => ({ route, healthy: isRouteHealthy(route) }));
+  return { primaryRoute, primaryHealthy, alternativeRoutes };
+}
+
+/**
  * Compute a health report for a registry entry as seen by the
  * agent-facing `list_curated_models` tool.
  *
@@ -2845,31 +2927,38 @@ export const ModelRegistryPlugin: Plugin = async () => {
             }, null, 2);
           }
 
-          const visibleRoutes = filterVisibleProviderRoutes(best.provider_order);
-          const primaryRoute = visibleRoutes[0] ?? null;
-          const isRouteHealthy = (route: { provider: string; model: string }): boolean => {
-            if (!isProviderHealthy(providerHealthMap, route.provider, now)) return false;
-            const routeHealth = modelRouteHealthMap.get(composeRouteKey(route));
-            if (routeHealth && routeHealth.until > now) return false;
-            return true;
-          };
-          const primaryHealthy = primaryRoute ? isRouteHealthy(primaryRoute) : false;
+          // M62: hand the agent the first HEALTHY visible route as
+          // primary (not `provider_order[0]`). Pre-M62 this tool returned
+          // `filterVisibleProviderRoutes(best.provider_order)[0]` whether
+          // or not it was routable, so on the shipping models.jsonc shape
+          // (opencode/*-free primary + iflowcn sibling) it reported a
+          // permanently key_missing route as primary and forced the
+          // agent to parse `alternativeRoutes` to find something usable.
+          // See `buildRoleRecommendationRoutes` for the full rationale.
+          const recommendationRoutes = buildRoleRecommendationRoutes(
+            best,
+            providerHealthMap,
+            modelRouteHealthMap,
+            now,
+          );
 
           return JSON.stringify({
             recommendation: {
               modelID: best.id,
               // route.model fields in provider_order are already the
               // composite "provider/model-id" form per registry convention.
-              primaryRoute: primaryRoute ? primaryRoute.model : null,
+              primaryRoute: recommendationRoutes.primaryRoute
+                ? recommendationRoutes.primaryRoute.model
+                : null,
               capabilityTier: best.capability_tier,
               billingMode: best.billing_mode,
               roles: best.default_roles,
               bestFor: best.best_for,
-              primaryProviderHealthy: primaryHealthy,
+              primaryProviderHealthy: recommendationRoutes.primaryHealthy,
             },
-            alternativeRoutes: visibleRoutes.slice(1).map((route) => ({
-              route: route.model,
-              healthy: isRouteHealthy(route),
+            alternativeRoutes: recommendationRoutes.alternativeRoutes.map((entry) => ({
+              route: entry.route.model,
+              healthy: entry.healthy,
             })),
           }, null, 2);
         },
