@@ -1,0 +1,28 @@
+{
+  "skill_name": "dr-spec-first-tdd",
+  "triggers": {
+    "task_types": [
+      "feature",
+      "implementation",
+      "code_fix_generation",
+      "review"
+    ]
+  },
+  "required_steps": [
+    "identify_production_consumer",
+    "write_failing_contract_test",
+    "verify_red",
+    "implement_minimal_fix",
+    "verify_green",
+    "run_component_verification",
+    "record_evidence"
+  ],
+  "evidence_requirements": [
+    "failing_contract_test",
+    "passing_contract_test",
+    "test_results",
+    "lint_results",
+    "production_consumer"
+  ],
+  "enforcement_level": "mandatory"
+}
