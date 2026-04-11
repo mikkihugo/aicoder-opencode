@@ -7691,6 +7691,56 @@ test("hasUsableCredential_whenLegacyApiKeyShape_returnsTrue", () => {
   assert.equal(hasUsableCredential({ apiKey: "sk-legacy" }), true);
 });
 
+// M137 PDD: asymmetric pins on hasUsableCredential's three branch
+// invariants — each fires exactly one new pin uniquely among new pins.
+
+test("hasUsableCredential_whenApiTypeHasEmptyKeyButStaleApiKeyFallback_apiBranchShortCircuitsToFalse", () => {
+  // M137 Pin A — api-type is a HARD short-circuit. A `{type:"api",
+  // key:""}` entry models opencode persisting an explicit
+  // revocation; a leftover `apiKey` from a stale legacy blob MUST
+  // NOT resurrect the provider. A refactor that rewrites the api
+  // branch as `if (...) return true;` to unify fallbacks at the
+  // bottom would silently let the legacy apiKey override the
+  // revocation — this pin locks the hard-return semantics.
+  assert.equal(
+    hasUsableCredential({
+      type: "api",
+      key: "",
+      apiKey: "sk-legacy-fallback",
+    }),
+    false,
+  );
+});
+
+test("hasUsableCredential_whenBareUntypedKeyObject_honoredByFinalBareKeyFallback", () => {
+  // M137 Pin B — the final `typeof record.key === "string"`
+  // fallback exists specifically for third-party provider auth
+  // blobs that carry neither a `type` tag nor a legacy `apiKey`
+  // field. Deleting it as "dead code" (since opencode's own
+  // schemas don't emit it) would silently mark every such
+  // provider as `key_missing` on plugin init. This pin uses a
+  // raw untyped `{key:"sk-bare"}` fixture that only the bare-key
+  // fallback can satisfy — no other branch reads `.key` on an
+  // untyped entry.
+  assert.equal(hasUsableCredential({ key: "sk-bare" }), true);
+});
+
+test("hasUsableCredential_whenLegacyApiKeyCoexistsWithEmptyBareKey_legacyFallbackWinsOverBareKey", () => {
+  // M137 Pin C — the legacy `apiKey` fallback runs BEFORE the
+  // bare-`key` fallback so that older fixtures with
+  // `{apiKey:"sk-legacy", key:""}` remain usable. Deleting the
+  // legacy fallback as "redundant with bare-key" is subtly wrong:
+  // this fixture would fall through to the empty bare-key check
+  // and return false, breaking every legacy test that still uses
+  // the apiKey shape. The pin uses a simultaneous empty `key`
+  // field so ONLY the legacy apiKey branch can produce true —
+  // the bare-key fallback sees `"".length > 0` and passes.
+  assert.equal(
+    hasUsableCredential({ apiKey: "sk-legacy", key: "" }),
+    true,
+  );
+});
+
 test("findPreferredHealthyRoute_whenPreferredModelsEmpty_returnsNull", () => {
   const entries = [
     buildModelRegistryEntry("glm-5.1", ["architect"], "frontier", [

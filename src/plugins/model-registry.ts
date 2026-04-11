@@ -6790,6 +6790,58 @@ async function loadAuthKeys(): Promise<Map<string, { hasCredential: boolean }>> 
  * Returns:
  *   true iff the entry carries at least one non-empty credential field
  *   under any of the recognized schemas.
+ *
+ * ## Drift surfaces (M137 PDD)
+ *
+ * Three orthogonal branch invariants make this predicate easy to break
+ * with "obviously equivalent" refactors. M137 pins each on a fixture
+ * that no other branch can satisfy, so each sabotage fires exactly one
+ * new pin.
+ *
+ * 1. **`type === "api"` is a HARD short-circuit.** The api branch
+ *    `return typeof record.key === "string" && record.key.length > 0;`
+ *    is the ONLY credential check that runs for `{type:"api", ...}`
+ *    entries. It does NOT fall through to the legacy `apiKey` fallback
+ *    or the bare-`key` fallback on a negative result. This matters
+ *    because opencode persists explicit api credentials as
+ *    `{type:"api", key:""}` when a user rotates/revokes a key — the
+ *    presence of a leftover `apiKey` from a stale fixture or a merged
+ *    legacy blob MUST NOT resurrect the provider. A "cleaner" refactor
+ *    that converts the return into `if (...) return true;` (to unify
+ *    all fallbacks at the bottom) silently lets stale legacy shapes
+ *    override the user's explicit revocation. Pin A asserts a
+ *    `{type:"api", key:"", apiKey:"sk-legacy-fallback"}` fixture
+ *    returns false — only the hard short-circuit preserves this.
+ *
+ * 2. **Bare untyped `{key:"..."}` objects ARE honored via the final
+ *    fallback.** After the api/oauth/apiKey branches miss, there is
+ *    one last `typeof record.key === "string" && record.key.length > 0`
+ *    check that exists specifically to handle third-party provider
+ *    auth blobs that neither carry a `type` tag nor use the legacy
+ *    `apiKey` field (e.g. untyped plugin-authored shapes). Removing
+ *    this fallback as "dead code" (because opencode's own schemas
+ *    don't emit it) would silently mark every such provider as
+ *    `key_missing` on plugin init. Pin B asserts a raw `{key:"sk-bare"}`
+ *    fixture returns true — only the bare-key fallback covers this.
+ *
+ * 3. **Legacy `apiKey` fallback runs for UNTYPED entries only.** The
+ *    legacy `typeof record.apiKey === "string" && record.apiKey.length > 0`
+ *    fallback exists because older fixtures and some test doubles
+ *    persist `{apiKey:"..."}` with no `type` field. It sits AFTER the
+ *    api/oauth branches (so typed entries never reach it) and BEFORE
+ *    the bare-`key` fallback (so apiKey wins over a simultaneous empty
+ *    `key`). Deleting this fallback as "redundant with bare-key" is
+ *    subtly wrong: `{apiKey:"sk-legacy", key:""}` would fall through
+ *    the empty bare-key check and return false, breaking every legacy
+ *    test fixture that still uses the apiKey shape. Pin C asserts this
+ *    exact fixture returns true — only the legacy apiKey fallback
+ *    covers it (the bare-key fallback sees `key:""`).
+ *
+ * The three fixtures are mutually exclusive: Pin A's fixture has
+ * `type:"api"` so it never reaches the untyped fallbacks; Pin B's
+ * fixture has no `apiKey` field so it never hits the legacy fallback;
+ * Pin C's fixture has `key:""` so it never hits the bare-key fallback.
+ * Each sabotage flips exactly one fixture among the new pins.
  */
 export function hasUsableCredential(entry: unknown): boolean {
   if (typeof entry === "string") {
