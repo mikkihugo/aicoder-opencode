@@ -172,6 +172,21 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M36: `recordProviderHealth` unconditionally overwrote existing provider penalty, downgrading longer lockouts `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Bug observed**: `recordProviderHealth` (closure inside `ModelRegistryPlugin`) computed `newUntil = Date.now() + durationMs` and then `providerHealthMap.set(providerID, { state, until: newUntil, retryCount: prev+1 })` unconditionally. A 1h `quota` error against a provider already in a 2h `no_credit` penalty SHORTENED the lockout to 1h, causing premature retries on a provider the plugin already knew was broken for longer. Worse: `key_missing` state uses `until = Number.POSITIVE_INFINITY`; a subsequent finite `quota`/`timeout` penalty would silently downgrade the provider from "never retry — no key" to a 1h retry window, re-exposing the router to a guaranteed-fail credential.
+- **Reachability**: production-reachable on any provider that receives a sequence of different error classes in one session — very common for multi-route providers like openrouter, iflowcn, ollama-cloud where opencode rotates between routes with varying error modes within the same minute. Especially dangerous for the `key_missing` → `quota` downgrade because `key_missing` is an explicit "do not try" signal set by `initializeProviderHealthState`.
+- **Fix**: extracted pure exported `computeProviderHealthUpdate(existing, newState, newUntil)` helper (model-registry.ts:410). Returns the existing record (with bumped retryCount) when `existing.until > newUntil`, i.e. longer-lived penalty wins. Otherwise returns a fresh record. `recordProviderHealth` closure rewired to delegate. `Infinity > any finite` in JS handles the `key_missing` case without special-casing. Scope intentionally limited to provider-level; the three `modelRouteHealthMap` write sites all currently use the identical `QUOTA_BACKOFF_DURATION_MS = 1h`, so the same bug class isn't reachable at route level today (deferred as future defensive work).
+- **Tests**: four new tests in `model-registry.test.ts`:
+  - `computeProviderHealthUpdate_whenExistingLongerPenalty_preservesExistingStateAndUntil` — 2h no_credit existing, 1h quota incoming, asserts no_credit + longer until preserved, retryCount bumped to 2. The headline regression.
+  - `computeProviderHealthUpdate_whenKeyMissingInfinityExists_doesNotDowngradeToQuotaFinite` — `until=Infinity` existing, finite quota incoming, asserts state stays `key_missing`.
+  - `computeProviderHealthUpdate_whenIncomingIsLonger_acceptsIncoming` — 1h quota existing, 2h no_credit incoming, asserts incoming is accepted (prevents over-correction).
+  - `computeProviderHealthUpdate_whenNoExistingEntry_createsFreshRecord` — undefined existing, asserts fresh record with retryCount=1.
+- **Verification**: verified-on-HEAD by stubbing the helper body to unconditional overwrite (`void existing; return { state: newState, until: newUntil, retryCount: (existing?.retryCount ?? 0) + 1 }`); exactly 2 tests failed (`whenExistingLongerPenalty`, `whenKeyMissingInfinityExists`), the incoming-is-longer and no-existing-entry tests still passed as expected, restored fix. 154/154 green (150 + 4 new). `npm run build` clean.
+- **Files**: `src/plugins/model-registry.ts` (new helper + recordProviderHealth rewire), `src/plugins/model-registry.test.ts` (import + 4 new tests).
+- **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
+
 ### M35: `inferTaskComplexity` used substring matching, flipping trivial tasks to large tier on false positives like `"carefully"` containing `"full"` `✅ COMPLETED`
 
 Completion Notes (2026-04-11):

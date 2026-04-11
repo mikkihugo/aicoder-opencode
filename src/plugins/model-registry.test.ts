@@ -10,6 +10,7 @@ import {
   buildProviderHealthSystemPrompt,
   clearSessionHangState,
   composeRouteKey,
+  computeProviderHealthUpdate,
   computeRegistryEntryHealthReport,
   expireHealthMaps,
   filterProviderModelsByRouteHealth,
@@ -1196,4 +1197,72 @@ test("inferTaskComplexity_whenPromptUsesEndToEndLiteralPhrase_classifiesAsLarge"
     ),
     "large",
   );
+});
+
+test("computeProviderHealthUpdate_whenExistingLongerPenalty_preservesExistingStateAndUntil", () => {
+  // Regression: a 1h quota error fired against a provider already in a 2h
+  // no_credit penalty used to OVERWRITE the longer lockout with the
+  // shorter one, causing premature retries on a provider the plugin
+  // already knew was broken for longer.
+  const now = Date.now();
+  const existing = {
+    state: "no_credit" as const,
+    until: now + 2 * 60 * 60 * 1000, // 2h from now
+    retryCount: 1,
+  };
+  const newUntil = now + 60 * 60 * 1000; // 1h from now — SHORTER
+
+  const next = computeProviderHealthUpdate(existing, "quota", newUntil);
+
+  assert.equal(next.state, "no_credit", "preserve the longer-lived state");
+  assert.equal(next.until, existing.until, "preserve the longer-lived until");
+  assert.equal(next.retryCount, 2, "still bump retryCount so repeat failures remain observable");
+});
+
+test("computeProviderHealthUpdate_whenKeyMissingInfinityExists_doesNotDowngradeToQuotaFinite", () => {
+  // key_missing has until=Infinity — any finite penalty is strictly shorter
+  // and must not be able to overwrite it. Without this check, a spurious
+  // 429 while a provider is already flagged key_missing would flip the
+  // entry to quota+1h, silently unblocking a provider that has no
+  // credentials at all.
+  const existing = {
+    state: "key_missing" as const,
+    until: Number.POSITIVE_INFINITY,
+    retryCount: 0,
+  };
+
+  const next = computeProviderHealthUpdate(existing, "quota", Date.now() + 60 * 60 * 1000);
+
+  assert.equal(next.state, "key_missing");
+  assert.equal(next.until, Number.POSITIVE_INFINITY);
+  assert.equal(next.retryCount, 1);
+});
+
+test("computeProviderHealthUpdate_whenIncomingIsLonger_acceptsIncoming", () => {
+  // Symmetry: if the incoming penalty would extend the lockout (e.g.
+  // quota → no_credit on a provider that just crossed from 429 to 402),
+  // we accept the LONGER one. retryCount still increments.
+  const now = Date.now();
+  const existing = {
+    state: "quota" as const,
+    until: now + 60 * 60 * 1000, // 1h from now
+    retryCount: 3,
+  };
+  const newUntil = now + 2 * 60 * 60 * 1000; // 2h from now — LONGER
+
+  const next = computeProviderHealthUpdate(existing, "no_credit", newUntil);
+
+  assert.equal(next.state, "no_credit");
+  assert.equal(next.until, newUntil);
+  assert.equal(next.retryCount, 4);
+});
+
+test("computeProviderHealthUpdate_whenNoExistingEntry_createsFreshRecord", () => {
+  const newUntil = Date.now() + 60 * 60 * 1000;
+
+  const next = computeProviderHealthUpdate(undefined, "quota", newUntil);
+
+  assert.equal(next.state, "quota");
+  assert.equal(next.until, newUntil);
+  assert.equal(next.retryCount, 1);
 });

@@ -380,6 +380,52 @@ export function expireHealthMaps(
  *   is absent, so the late-firing timer is harmless even after the
  *   other two maps are cleared.
  */
+/**
+ * Compute the next `ProviderHealth` record given an incoming penalty
+ * classification, preserving the longer-lived lockout.
+ *
+ * Previously `recordProviderHealth` unconditionally overwrote any existing
+ * entry. A provider already in `no_credit` (2h duration) that subsequently
+ * hit a 429 was downgraded to `quota` (1h duration), shortening the
+ * lockout by an hour and causing the plugin to retry the provider long
+ * before it could plausibly have recovered. A provider in `key_missing`
+ * (until=Infinity) could also be silently downgraded to a finite penalty
+ * by a spurious subsequent error — a particularly bad outcome because
+ * `key_missing` is the canonical "don't route here at all" state.
+ *
+ * Policy: if `existing.until > newUntil`, preserve the existing entry
+ * entirely (state + until) and only bump `retryCount`. Otherwise accept
+ * the incoming state and until. `retryCount` always increments so repeat
+ * failures remain observable in the health tool output.
+ *
+ * Args:
+ *   existing: The current entry for this provider, or `undefined` when
+ *     none exists.
+ *   newState: The state classification derived from the incoming error.
+ *   newUntil: Absolute wall-clock expiry for the incoming penalty (ms).
+ *
+ * Returns:
+ *   The next `ProviderHealth` record to store.
+ */
+export function computeProviderHealthUpdate(
+  existing: ProviderHealth | undefined,
+  newState: ProviderHealthState,
+  newUntil: number,
+): ProviderHealth {
+  if (existing && existing.until > newUntil) {
+    return {
+      state: existing.state,
+      until: existing.until,
+      retryCount: existing.retryCount + 1,
+    };
+  }
+  return {
+    state: newState,
+    until: newUntil,
+    retryCount: (existing?.retryCount ?? 0) + 1,
+  };
+}
+
 export function clearSessionHangState(
   sessionID: string,
   sessionStartTimeMap: Map<string, number>,
@@ -1278,11 +1324,11 @@ export const ModelRegistryPlugin: Plugin = async () => {
     durationMs: number,
   ): void {
     const existing = providerHealthMap.get(providerID);
-    providerHealthMap.set(providerID, {
-      state,
-      until: Date.now() + durationMs,
-      retryCount: (existing?.retryCount ?? 0) + 1,
-    });
+    const newUntil = Date.now() + durationMs;
+    providerHealthMap.set(
+      providerID,
+      computeProviderHealthUpdate(existing, state, newUntil),
+    );
     void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
   }
 
