@@ -4660,6 +4660,68 @@ export function finalizeHungSessionStateAndRecordPenalty(
  *   `{ routeKey, health }` when the session exceeded its budget and a
  *   route penalty should be written, or `null` when no penalty applies.
  *   The caller performs the `map.set` so the helper stays pure.
+ *
+ * ## Drift surfaces (M145 PDD)
+ *
+ * The five pre-existing pins (`_whenSessionAlreadyCompleted_returnsNull`,
+ * `_whenDurationWithinBudget_returnsNull`,
+ * `_whenProviderOrModelMissing_returnsNull`,
+ * `_whenSessionHung_returnsTimeoutEntry`, and the closure-retention
+ * regression pin) exercise the big-shape guards and the happy-path entry
+ * construction, but three orthogonal invariants remain unpinned. Each has
+ * a plausible single-line refactor that would silently regress it:
+ *
+ *  1. **Duration gate is `<= timeoutMs` (inclusive) — boundary-exact
+ *     duration returns `null`, NOT a penalty.** The comparison
+ *     `duration <= timeoutMs` treats a session whose elapsed time equals
+ *     the threshold as still-within-budget. This matches every other
+ *     timeout semantics in the plugin (the hang-timer `setTimeout`
+ *     fires at `timeoutMs + 100`, the expiry comparators all use `<=
+ *     now`, the test-mode early-fire uses `<= testTimeoutMs`), so a
+ *     session that lands EXACTLY on the threshold must not yet be
+ *     classified as hung. A refactor to `duration < timeoutMs` (the
+ *     easy "strictly less than" misread of the semantics) would
+ *     silently over-penalize every exactly-on-threshold session — a
+ *     narrow but reachable class on fast machines where `now -
+ *     startTime` can coincidentally land on the exact `timeoutMs`
+ *     value. The pre-existing `_whenDurationWithinBudget` pin uses a
+ *     boundary-exact fixture too, so both pins fire additively on
+ *     this sabotage; among the three NEW M145 pins only pin A fires.
+ *
+ *  2. **Penalty state label is the literal `"timeout"`, not `"quota"`
+ *     or `"model_not_found"` or any other classification.** The third
+ *     positional arg to `buildRouteHealthEntry` is a string discriminant
+ *     that flows into `ModelRouteHealth.state` and drives downstream
+ *     rendering: `healthStateLabel("timeout") === "Timeout"`, the
+ *     `buildProviderHealthSystemPrompt` section header, the
+ *     `list_curated_models` tool output, and the persistence round-trip
+ *     via `serializeHealthEntryForPersistence`. A refactor that
+ *     "normalizes" the state to `"quota"` (on the theory that "a hang
+ *     is a form of slow quota-backoff") silently miscategorizes every
+ *     hang-timeout penalty — operator diagnostics see a Quota column
+ *     entry for a symptom that is NOT a 429, and the persisted-health
+ *     round-trip loses the timeout-versus-quota distinction on plugin
+ *     restart. Pin B asserts `health.state === "timeout"` on the
+ *     fresh-entry path so a state-label sabotage fires alone among
+ *     the three NEW M145 pins.
+ *
+ *  3. **`existing` is looked up via `lookupRouteHealthByIdentifiers`
+ *     and threaded into `buildRouteHealthEntry` so the M43 preserve-
+ *     longer merge invariant dominates.** The 5th positional arg to
+ *     `buildRouteHealthEntry` is the prior route-health record (when
+ *     one exists) — the M43 builder compares `existing.until` against
+ *     the freshly-computed `now + ROUTE_QUOTA_BACKOFF_DURATION_MS` and
+ *     keeps whichever window is longer. A refactor that passes
+ *     `undefined` as the `existing` arg (on the theory that "this is
+ *     a fresh timeout penalty, the builder will create a new entry")
+ *     silently overwrites a longer-lived prior penalty: a route
+ *     already sitting in `"no_credit"` (2h lockout) that also happens
+ *     to hang the session would be downgraded to a short-lived
+ *     `"timeout"` entry, restoring routability hours before the
+ *     original no-credit window should have closed. Pin C pre-
+ *     populates the map with a 2h `"no_credit"` lockout and asserts
+ *     the returned `health.until` is the PRESERVED (longer) value,
+ *     catching the skip-the-lookup drift alone.
  */
 export function evaluateSessionHangForTimeoutPenalty(
   sessionID: string,

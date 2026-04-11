@@ -7445,6 +7445,120 @@ test("evaluateSessionHangForTimeoutPenalty_whenSessionHung_returnsTimeoutEntry",
   );
 });
 
+test("evaluateSessionHangForTimeoutPenalty_whenDurationExactlyEqualsThreshold_returnsNullByInclusiveGate", () => {
+  // M145 pin A — duration gate uses `<= timeoutMs` (inclusive). A
+  // session whose elapsed time lands EXACTLY on the threshold is still
+  // within budget and must NOT be penalized. A refactor to
+  // `duration < timeoutMs` (the "strictly less than" misread) fires
+  // this pin alone: the fresh-entry path (pin B) uses a duration
+  // strictly past the threshold, and the preserve-longer path (pin C)
+  // also uses strictly-past — both survive the `<` sabotage. Only a
+  // boundary-exact fixture catches the inclusivity invariant.
+  const now = Date.now();
+  const timeoutMs = 20;
+  const startMap = new Map<string, number>([["s1", now - timeoutMs]]); // duration === timeoutMs exactly
+  const providerMap = new Map<string, string>([["s1", "iflowcn"]]);
+  const modelMap = new Map<string, { id: string; providerID: string }>([
+    ["s1", { id: "iflowcn/qwen3-coder-plus", providerID: "iflowcn" }],
+  ]);
+  const routeHealthMap = new Map<string, ModelRouteHealth>();
+
+  const result = evaluateSessionHangForTimeoutPenalty(
+    "s1",
+    startMap,
+    providerMap,
+    modelMap,
+    routeHealthMap,
+    timeoutMs,
+    now,
+  );
+
+  assert.strictEqual(result, null, "duration === timeoutMs is within budget, not hung");
+});
+
+test("evaluateSessionHangForTimeoutPenalty_whenHungWithNoPriorEntry_recordsStateLiteralTimeout", () => {
+  // M145 pin B — penalty state is the literal string `"timeout"`, not
+  // `"quota"` / `"model_not_found"` / any other discriminant. A
+  // sabotage that re-routes the penalty through the quota ladder
+  // (passing `"quota"` as the 3rd arg to buildRouteHealthEntry) fires
+  // this pin alone: pin A (boundary gate) still returns null under
+  // the sabotage, and pin C (preserve-longer) asserts `.until` not
+  // `.state` so it still passes with a quota-labeled entry. Only a
+  // fresh-entry state-literal assertion catches the state-label
+  // drift cleanly.
+  const now = Date.now();
+  const timeoutMs = 20;
+  const startMap = new Map<string, number>([["s1", now - (timeoutMs + 5)]]); // strictly past threshold
+  const providerMap = new Map<string, string>([["s1", "iflowcn"]]);
+  const modelMap = new Map<string, { id: string; providerID: string }>([
+    ["s1", { id: "iflowcn/qwen3-coder-plus", providerID: "iflowcn" }],
+  ]);
+  const routeHealthMap = new Map<string, ModelRouteHealth>(); // empty — no existing entry
+
+  const result = evaluateSessionHangForTimeoutPenalty(
+    "s1",
+    startMap,
+    providerMap,
+    modelMap,
+    routeHealthMap,
+    timeoutMs,
+    now,
+  );
+
+  assert.ok(result, "hung session with full context must produce a penalty");
+  assert.strictEqual(
+    result.health.state,
+    "timeout",
+    "penalty state discriminant is the literal 'timeout'",
+  );
+});
+
+test("evaluateSessionHangForTimeoutPenalty_whenExistingEntryHasLongerLockout_preserveLongerDominatesViaLookup", () => {
+  // M145 pin C — the helper MUST look up the existing route-health
+  // entry via lookupRouteHealthByIdentifiers and thread it into
+  // buildRouteHealthEntry as the `existing` arg so the M43 preserve-
+  // longer merge invariant can run. A refactor that passes
+  // `undefined` inline (skipping the lookup) fires this pin alone: a
+  // pre-populated route-health entry with a far-future `until` must
+  // still be the dominant window on the returned record. Pin A (null
+  // gate) and pin B (state literal on EMPTY map) are both
+  // observationally equivalent under `undefined`, so they survive
+  // the skip-the-lookup sabotage — only a pre-populated longer-lived
+  // fixture asserting `result.health.until === existingUntil` catches
+  // it.
+  const now = Date.now();
+  const timeoutMs = 20;
+  const farFutureUntil = now + 7_200_000; // 2h, much longer than ROUTE_QUOTA_BACKOFF_DURATION_MS
+  const startMap = new Map<string, number>([["s1", now - (timeoutMs + 5)]]);
+  const providerMap = new Map<string, string>([["s1", "iflowcn"]]);
+  const modelMap = new Map<string, { id: string; providerID: string }>([
+    ["s1", { id: "iflowcn/qwen3-coder-plus", providerID: "iflowcn" }],
+  ]);
+  const routeHealthMap = new Map<string, ModelRouteHealth>([
+    [
+      "iflowcn/qwen3-coder-plus",
+      { state: "no_credit" as const, until: farFutureUntil, retryCount: 3 },
+    ],
+  ]);
+
+  const result = evaluateSessionHangForTimeoutPenalty(
+    "s1",
+    startMap,
+    providerMap,
+    modelMap,
+    routeHealthMap,
+    timeoutMs,
+    now,
+  );
+
+  assert.ok(result, "hung session produces a penalty even when a longer existing entry is present");
+  assert.strictEqual(
+    result.health.until,
+    farFutureUntil,
+    "preserve-longer merge dominates: existing 2h lockout survives the fresh timeout write",
+  );
+});
+
 test("finalizeHungSessionState_whenSessionHung_clearsAllThreeSessionMapsAndReturnsPenalty", () => {
   // Headline regression: when the hang-timer `setTimeout` fires for a
   // session that was silently killed (network drop, client Ctrl-C, parent
