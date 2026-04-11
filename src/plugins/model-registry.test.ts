@@ -32,6 +32,7 @@ import {
   clearSessionHangState,
   countHealthyVisibleRoutes,
   composeRouteKey,
+  lookupRouteHealthByIdentifiers,
   computeProviderHealthUpdate,
   computeRegistryEntryHealthReport,
   expireHealthMaps,
@@ -1381,6 +1382,84 @@ test("composeRouteKey_whenRegistryEntryIsUnprefixed_producesCompositeKey", () =>
     composeRouteKey({ provider: "openrouter", model: "openrouter/xiaomi/mimo-v2-pro" }),
     "openrouter/xiaomi/mimo-v2-pro",
   );
+});
+
+test("lookupRouteHealthByIdentifiers_whenEntryStoredUnderCompositeKey_returnsEntry", () => {
+  // M67: the helper is the single source of truth for "find existing
+  // route health for this (providerID, modelID) pair". It must compose
+  // the composite key the same way writers do, otherwise a writer that
+  // inlines its own `${providerID}/${modelID}` string and this helper
+  // drift apart and the M43 preserve-longer invariant silently evaporates.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    [
+      "ollama-cloud/glm-5",
+      { state: "quota", until: 1_000_000, retryCount: 2 },
+    ],
+  ]);
+  const entry = lookupRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    "ollama-cloud",
+    "glm-5",
+  );
+  assert.deepEqual(entry, { state: "quota", until: 1_000_000, retryCount: 2 });
+});
+
+test("lookupRouteHealthByIdentifiers_whenModelIsAlreadyCompositePrefixed_doesNotDoubleNest", () => {
+  // M67: models.jsonc sometimes stores `model` as the already-composite
+  // `${provider}/${model}` form (ollama-cloud/glm-5, openrouter/xiaomi/...).
+  // `composeRouteKey` is idempotent for that case, and this helper must
+  // inherit the idempotence — otherwise a double-nested read would miss
+  // entries writers wrote once.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    [
+      "ollama-cloud/glm-5",
+      { state: "model_not_found", until: 2_000_000, retryCount: 1 },
+    ],
+  ]);
+  const entry = lookupRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    "ollama-cloud",
+    "ollama-cloud/glm-5",
+  );
+  assert.deepEqual(entry, {
+    state: "model_not_found",
+    until: 2_000_000,
+    retryCount: 1,
+  });
+});
+
+test("lookupRouteHealthByIdentifiers_whenNoEntryExists_returnsUndefined", () => {
+  // M67: a miss must return `undefined` so `buildRouteHealthEntry` /
+  // `buildModelNotFoundRouteHealth` see the fresh-entry shape and start
+  // the retry counter at 1 via `(existing?.retryCount ?? 0) + 1`.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const entry = lookupRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    "iflowcn",
+    "kimi-k2-0905",
+  );
+  assert.equal(entry, undefined);
+});
+
+test("lookupRouteHealthByIdentifiers_whenLongcatEntryIsUnprefixed_findsCompositeKey", () => {
+  // M67: the exact M30 drift shape. Writers canonicalize via
+  // `composeRouteKey` so longcat entries land at "longcat/LongCat-Flash-Chat"
+  // regardless of whether the registry model was stored with or without
+  // the `longcat/` prefix. The lookup helper must normalize the same way
+  // so a read for `{provider: "longcat", model: "LongCat-Flash-Chat"}`
+  // still finds the composite-keyed entry.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    [
+      "longcat/LongCat-Flash-Chat",
+      { state: "quota", until: 3_000_000, retryCount: 5 },
+    ],
+  ]);
+  const entry = lookupRouteHealthByIdentifiers(
+    modelRouteHealthMap,
+    "longcat",
+    "LongCat-Flash-Chat",
+  );
+  assert.deepEqual(entry, { state: "quota", until: 3_000_000, retryCount: 5 });
 });
 
 test("findRegistryEntryByModel_whenRuntimeIdIsRawAndRegistryIsComposite_returnsEntry", () => {

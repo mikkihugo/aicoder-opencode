@@ -481,6 +481,61 @@ export function composeRouteKey(providerRoute: { provider: string; model: string
 }
 
 /**
+ * Look up an existing `ModelRouteHealth` entry by runtime identifiers.
+ *
+ * Exists because every route-level health writer in the plugin factory
+ * builds a fresh penalty entry via `buildRouteHealthEntry` /
+ * `buildModelNotFoundRouteHealth`, which requires the CURRENT entry for
+ * the (provider, model) pair so the M43 "preserve longer-lived penalty"
+ * invariant can dominate the merge. Pre-M67 four distinct writers —
+ * `evaluateSessionHangForTimeoutPenalty` (the pure timeout helper), the
+ * `session.error` model-not-found path, the `assistant.message.completed`
+ * zero-token-quota path, and the `chat.params` early-fire test timeout
+ * path — each inlined the same three-step lookup:
+ *
+ *   1. Build the composite route key via `composeRouteKey({provider, model})`
+ *   2. `modelRouteHealthMap.get(routeKey)`
+ *   3. Pass the result as the `existing` argument to the builder.
+ *
+ * The inline triplet is small (one line after formatting) but it has
+ * the same drift shape the M64 `isRouteCurrentlyHealthy` consolidation
+ * closed at the reader side: four independent writers all have to agree
+ * on the exact composite-key construction, and any divergence (say, a
+ * writer that forgets to wrap `{provider, model}` through `composeRouteKey`
+ * and instead builds its own `${providerID}/${modelID}` string — exactly
+ * the M30 bug that motivated `composeRouteKey`) silently looks up the
+ * wrong key, finds `undefined`, and discards any in-flight penalty. The
+ * `buildRouteHealthEntry` merge then treats the write as a fresh entry,
+ * the preserve-longer invariant evaporates, and a shorter penalty
+ * silently overwrites a longer one.
+ *
+ * Centralizing the lookup here means the single point of truth for
+ * "how does a writer find its existing entry" lives next to
+ * `composeRouteKey` where the key convention is documented. Future
+ * additions (a fifth writer, a writer in a shim, a test harness) cannot
+ * invent a new key shape — they have to route through this helper.
+ *
+ * Args:
+ *   modelRouteHealthMap: Runtime composite-route-keyed health map.
+ *   providerID: Provider identifier as it appears on the runtime session.
+ *   modelID: Model identifier as it appears on the runtime session.
+ *
+ * Returns:
+ *   The current `ModelRouteHealth` entry if one exists, or `undefined`
+ *   when the route has no recorded health. The caller passes the result
+ *   directly into `buildRouteHealthEntry` / `buildModelNotFoundRouteHealth`
+ *   as the `existing` argument so the M43 preserve-longer merge invariant
+ *   dominates any fresh writes.
+ */
+export function lookupRouteHealthByIdentifiers(
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  providerID: string,
+  modelID: string,
+): ModelRouteHealth | undefined {
+  return modelRouteHealthMap.get(composeRouteKey({ provider: providerID, model: modelID }));
+}
+
+/**
  * Return `true` when a provider+model pair must be excluded from fallback
  * routing. Exported so the regex semantics can be unit-tested directly
  * without constructing the plugin closure.
@@ -1339,9 +1394,7 @@ export function evaluateSessionHangForTimeoutPenalty(
     model.id,
     "timeout",
     ROUTE_QUOTA_BACKOFF_DURATION_MS,
-    modelRouteHealthMap.get(
-      composeRouteKey({ provider: providerID, model: model.id }),
-    ),
+    lookupRouteHealthByIdentifiers(modelRouteHealthMap, providerID, model.id),
     now,
   );
 }
@@ -3212,9 +3265,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
           const { routeKey, health } = buildModelNotFoundRouteHealth(
             providerID,
             modelID,
-            modelRouteHealthMap.get(
-              composeRouteKey({ provider: providerID, model: modelID }),
-            ),
+            lookupRouteHealthByIdentifiers(modelRouteHealthMap, providerID, modelID),
             Date.now(),
           );
           modelRouteHealthMap.set(routeKey, health);
@@ -3283,9 +3334,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
             model.id,
             "quota",
             QUOTA_BACKOFF_DURATION_MS,
-            modelRouteHealthMap.get(
-              composeRouteKey({ provider: providerID, model: model.id }),
-            ),
+            lookupRouteHealthByIdentifiers(modelRouteHealthMap, providerID, model.id),
             Date.now(),
           );
           modelRouteHealthMap.set(routeKey, health);
@@ -3330,9 +3379,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
               model.id,
               "timeout",
               QUOTA_BACKOFF_DURATION_MS,
-              modelRouteHealthMap.get(
-                composeRouteKey({ provider: providerID, model: model.id }),
-              ),
+              lookupRouteHealthByIdentifiers(modelRouteHealthMap, providerID, model.id),
               Date.now(),
             );
             modelRouteHealthMap.set(routeKey, health);
