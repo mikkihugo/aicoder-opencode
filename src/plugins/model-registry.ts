@@ -722,6 +722,71 @@ export function buildModelNotFoundRouteHealth(
   );
 }
 
+/**
+ * Decide whether an `assistant.message.completed` event's `tokens`
+ * payload represents the canonical "silent quota exhaustion" signal
+ * that should fire a route-level `quota` penalty.
+ *
+ * History: the `assistant.message.completed` handler tested
+ * `tokens.input === 0 && tokens.output === 0` and unconditionally
+ * penalized the route with a 1h quota backoff on match. That predicate
+ * is too narrow: it covers only the two primary billing axes and
+ * ignores every other token counter opencode may expose (`reasoning`
+ * for deep-thinking models, nested `cache.read` / `cache.write`, and
+ * future counters added by upstream providers).
+ *
+ * Failure shape: a successful deep-reasoning turn on `kimi-k2-thinking`
+ * / `minimax-m2.7` / `cogito-2.1` — the exact three models the handler
+ * docstring already cites as routinely running 200+ tool calls — can
+ * plausibly report `{input: 0, output: 0, reasoning: N>0}` (zero
+ * billing on the primary axes because the work happened in the
+ * reasoning channel). The old predicate would see `input=0, output=0`,
+ * ignore `reasoning`, and penalize the route as quota-exhausted on a
+ * SUCCESSFUL completion. The route would flip to 1h backoff, the
+ * retryCount would tick, and the next session would bypass a healthy
+ * model for one cited as a premier deep-reasoning combatant in the
+ * user's catalog. Even if current opencode versions don't populate
+ * `reasoning` at this event, a future opencode release that does would
+ * silently start corrupting health state the moment it lands — the
+ * defensive predicate insulates against that.
+ *
+ * The correct signal is "every numeric counter is zero" — a genuine
+ * silent-failure turn produces nothing on any axis. Walk the
+ * top-level numeric properties and any one-level-nested object values
+ * (to handle shapes like `cache: {read, write}`). Any non-zero number
+ * means real activity occurred and the quota signal must be suppressed.
+ *
+ * The helper is pure so it is unit-testable without any live health
+ * maps or opencode runtime event payloads.
+ *
+ * Args:
+ *   tokens: The `tokens` field from `assistant.message.completed`,
+ *     as an unknown-shaped record.
+ *
+ * Returns:
+ *   `true` when all numeric counters (top-level and one-level nested)
+ *   are zero. `false` otherwise.
+ */
+export function isZeroTokenQuotaSignal(tokens: Record<string, unknown>): boolean {
+  if (tokens.input !== 0 || tokens.output !== 0) {
+    return false;
+  }
+  for (const value of Object.values(tokens)) {
+    if (typeof value === "number") {
+      if (value !== 0) return false;
+      continue;
+    }
+    if (value && typeof value === "object") {
+      for (const nestedValue of Object.values(value as Record<string, unknown>)) {
+        if (typeof nestedValue === "number" && nestedValue !== 0) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 // HTTP status codes that are authoritative signals for specific penalty
 // classes. When the upstream returns one of these, the status code wins
 // over any keyword heuristic — a 402 is a 402 no matter what text the
@@ -2359,8 +2424,14 @@ export const ModelRegistryPlugin: Plugin = async () => {
           sessionActiveModelMap,
         );
 
-        // Zero tokens on both input and output indicates quota exhaustion
-        if (tokens.input === 0 && tokens.output === 0) {
+        // Zero tokens across every counter indicates silent quota exhaustion.
+        // See `isZeroTokenQuotaSignal` docstring for why the narrow
+        // `input===0 && output===0` predicate was wrong: it ignored side-
+        // channel counters (`reasoning` for deep-thinking models, nested
+        // `cache.read`/`cache.write`), so a successful deep-reasoning turn
+        // could be silently penalized as quota-exhausted the moment any
+        // future opencode release started populating those fields.
+        if (isZeroTokenQuotaSignal(tokens as Record<string, unknown>)) {
           if (!providerID || !model) return;
 
           const { routeKey, health } = buildRouteHealthEntry(

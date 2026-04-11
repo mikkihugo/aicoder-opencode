@@ -12,6 +12,7 @@ import {
   buildModelNotFoundRouteHealth,
   classifyProviderApiError,
   isFallbackBlocked,
+  isZeroTokenQuotaSignal,
   ROUTE_MODEL_NOT_FOUND_DURATION_MS,
   ROUTE_QUOTA_BACKOFF_DURATION_MS,
   shouldClassifyAsModelNotFound,
@@ -2690,4 +2691,78 @@ test("evaluateSessionHangForTimeoutPenalty_closureDoesNotRetainFullInput_regress
   ];
   // Sanity: calling with these params on an empty session yields null.
   assert.equal(evaluateSessionHangForTimeoutPenalty(...params), null);
+});
+
+// M52: `isZeroTokenQuotaSignal` replaces the narrow `input===0 && output===0`
+// predicate in the `assistant.message.completed` handler. The narrow predicate
+// would silently penalize successful deep-reasoning turns as quota-exhausted
+// the moment any opencode release started populating side-channel counters
+// (`reasoning`, nested `cache.read`/`cache.write`). These tests pin the
+// defensive contract: a turn is quota-exhausted only when EVERY numeric
+// counter — top-level or one-level-nested — is zero.
+
+test("isZeroTokenQuotaSignal_whenBothPrimaryCountersAreZeroAndNoOtherCounters_returnsTrue", () => {
+  assert.equal(isZeroTokenQuotaSignal({ input: 0, output: 0 }), true);
+});
+
+test("isZeroTokenQuotaSignal_whenInputIsNonZero_returnsFalse", () => {
+  assert.equal(isZeroTokenQuotaSignal({ input: 42, output: 0 }), false);
+});
+
+test("isZeroTokenQuotaSignal_whenOutputIsNonZero_returnsFalse", () => {
+  assert.equal(isZeroTokenQuotaSignal({ input: 0, output: 7 }), false);
+});
+
+test("isZeroTokenQuotaSignal_whenReasoningCounterIsNonZero_returnsFalse", () => {
+  // Headline regression pin: kimi-k2-thinking / minimax-m2.7 / cogito-2.1
+  // could plausibly report a successful deep-reasoning turn with zero
+  // primary billing and nonzero `reasoning`. The narrow predicate would
+  // fire a 1h quota penalty on a SUCCESSFUL completion.
+  assert.equal(
+    isZeroTokenQuotaSignal({ input: 0, output: 0, reasoning: 12_000 }),
+    false,
+  );
+});
+
+test("isZeroTokenQuotaSignal_whenNestedCacheReadCounterIsNonZero_returnsFalse", () => {
+  // Nested-shape regression pin: opencode's tokens payload may expose
+  // `cache: {read, write}` rather than flat counters.
+  assert.equal(
+    isZeroTokenQuotaSignal({ input: 0, output: 0, cache: { read: 500, write: 0 } }),
+    false,
+  );
+});
+
+test("isZeroTokenQuotaSignal_whenNestedCacheWriteCounterIsNonZero_returnsFalse", () => {
+  assert.equal(
+    isZeroTokenQuotaSignal({ input: 0, output: 0, cache: { read: 0, write: 250 } }),
+    false,
+  );
+});
+
+test("isZeroTokenQuotaSignal_whenNestedObjectIsEmpty_returnsTrue", () => {
+  // Defensive pin: an empty nested object must not block the signal —
+  // only a genuine nonzero numeric counter should.
+  assert.equal(
+    isZeroTokenQuotaSignal({ input: 0, output: 0, cache: {} }),
+    true,
+  );
+});
+
+test("isZeroTokenQuotaSignal_whenNonNumericStringFieldPresent_returnsTrue", () => {
+  // Defensive pin: non-numeric non-object fields (e.g., a string model ID
+  // tag) must be ignored — only numeric counters carry quota semantics.
+  assert.equal(
+    isZeroTokenQuotaSignal({ input: 0, output: 0, model: "kimi-k2-thinking" }),
+    true,
+  );
+});
+
+test("isZeroTokenQuotaSignal_whenTopLevelSiblingCounterIsNonZero_returnsFalse", () => {
+  // Future-proofing pin: any top-level numeric counter that isn't input
+  // or output must block the zero signal.
+  assert.equal(
+    isZeroTokenQuotaSignal({ input: 0, output: 0, total: 5_000 }),
+    false,
+  );
 });
