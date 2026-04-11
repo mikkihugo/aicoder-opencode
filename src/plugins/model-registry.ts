@@ -107,13 +107,13 @@ const PROVIDER_HEALTH_STATES: ReadonlySet<string> = new Set<ProviderHealthState>
   "timeout",
 ]);
 
-type ProviderHealth = {
+export type ProviderHealth = {
   state: ProviderHealthState;
   until: number;
   retryCount: number;
 };
 
-type ModelRouteHealth = {
+export type ModelRouteHealth = {
   state: ProviderHealthState;
   until: number;
   retryCount: number;
@@ -363,9 +363,7 @@ export function filterProviderModelsByRouteHealth(
   const filtered: Record<string, unknown> = {};
   for (const [modelID, modelValue] of Object.entries(providerModels)) {
     if (!enabledRawModelIDs.has(modelID)) continue;
-    const routeKey = composeRouteKey({ provider: providerID, model: modelID });
-    const routeHealth = modelRouteHealthMap.get(routeKey);
-    if (routeHealth && routeHealth.until > now) continue;
+    if (findLiveRoutePenalty(modelRouteHealthMap, providerID, modelID, now)) continue;
     filtered[modelID] = modelValue;
   }
   return filtered;
@@ -533,6 +531,67 @@ export function lookupRouteHealthByIdentifiers(
   modelID: string,
 ): ModelRouteHealth | undefined {
   return modelRouteHealthMap.get(composeRouteKey({ provider: providerID, model: modelID }));
+}
+
+/**
+ * Look up a route-level health entry AND return it only when the penalty
+ * is currently live (`until > now`). Expired and absent entries both map
+ * to `null`.
+ *
+ * Exists because two readers — `filterProviderModelsByRouteHealth` (the
+ * `provider.models` opencode-hook that hides route-penalized models from
+ * opencode's model map) and `computeRegistryEntryHealthReport` (the
+ * `list_curated_models` tool reader that surfaces route-scope blocks to
+ * the agent) — each inlined the same three-line sequence:
+ *
+ *   const routeKey = composeRouteKey({ provider: providerID, model: modelID });
+ *   const routeHealth = modelRouteHealthMap.get(routeKey);
+ *   if (routeHealth && routeHealth.until > now) { ... }
+ *
+ * M67 extracted `lookupRouteHealthByIdentifiers` for the four WRITERS
+ * (session.error model-not-found, assistant.message.completed zero-token
+ * quota, chat.params test-mode timeout, chat.params hang-timer timeout)
+ * so they all funnel through `composeRouteKey` and cannot drift into the
+ * naive `${providerID}/${modelID}` template bug from M30. But the two
+ * reader sites above were overlooked — their inline `composeRouteKey`
+ * calls worked today, but any future change to composite-key semantics
+ * (a new normalization step, a new collision class, a registry-shape
+ * migration) would have to be replicated inline in both places, with
+ * nothing forcing the update. The classic drift setup: "the writers go
+ * through the helper, the readers rediscover the convention by hand."
+ *
+ * This helper closes the boundary. It composes `lookupRouteHealthByIdentifiers`
+ * (M67) with the expiry check so the two readers can drop their inline
+ * `composeRouteKey` call AND their `until > now` conjunction in favor of
+ * a single call. The canonical leaf predicate `isRouteCurrentlyHealthy`
+ * deliberately does NOT use this helper — it keeps the inline
+ * `modelRouteHealthMap.get(composeRouteKey(...))` form because it is the
+ * one-line negation "no live penalty" and delegating a one-liner into
+ * another one-liner adds pointless indirection. That divergence is
+ * explicit: `findLiveRoutePenalty` serves callers that need the penalty
+ * ENTRY (for scope reporting, for filter-out skip), while
+ * `isRouteCurrentlyHealthy` serves callers that only need the boolean.
+ *
+ * Args:
+ *   modelRouteHealthMap: Runtime composite-route-keyed health map.
+ *   providerID: Provider identifier as it appears on the runtime session.
+ *   modelID: Model identifier as it appears on the runtime session.
+ *   now: Wall-clock timestamp in ms used for the expiry comparison.
+ *
+ * Returns:
+ *   The `ModelRouteHealth` entry when one exists AND `until > now`
+ *   (penalty still active). `null` when the entry is absent or its
+ *   penalty window has already elapsed.
+ */
+export function findLiveRoutePenalty(
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  providerID: string,
+  modelID: string,
+  now: number,
+): ModelRouteHealth | null {
+  const routeHealth = lookupRouteHealthByIdentifiers(modelRouteHealthMap, providerID, modelID);
+  if (!routeHealth || routeHealth.until <= now) return null;
+  return routeHealth;
 }
 
 /**
@@ -1734,11 +1793,16 @@ export function computeRegistryEntryHealthReport(
       scope: "provider",
     };
   }
-  const routeHealth = modelRouteHealthMap.get(composeRouteKey(primaryRoute));
-  if (routeHealth && routeHealth.until > now) {
+  const livePenalty = findLiveRoutePenalty(
+    modelRouteHealthMap,
+    primaryRoute.provider,
+    primaryRoute.model,
+    now,
+  );
+  if (livePenalty) {
     return {
-      state: routeHealth.state,
-      until: formatHealthExpiry(routeHealth.until),
+      state: livePenalty.state,
+      until: formatHealthExpiry(livePenalty.until),
       scope: "route",
     };
   }

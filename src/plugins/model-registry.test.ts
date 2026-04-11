@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import type { ModelRegistryEntry } from "../model-registry.js";
+import type { ModelRouteHealth, ProviderHealth } from "./model-registry.js";
 import {
   buildAgentVisibleBackoffStatus,
   buildAvailableModelsSystemPrompt,
@@ -32,6 +33,7 @@ import {
   clearSessionHangState,
   countHealthyVisibleRoutes,
   composeRouteKey,
+  findLiveRoutePenalty,
   lookupRouteHealthByIdentifiers,
   isAgentVisibleLivePenalty,
   recordRouteHealthPenalty,
@@ -1608,6 +1610,73 @@ test("lookupRouteHealthByIdentifiers_whenLongcatEntryIsUnprefixed_findsComposite
     "LongCat-Flash-Chat",
   );
   assert.deepEqual(entry, { state: "quota", until: 3_000_000, retryCount: 5 });
+});
+
+test("findLiveRoutePenalty_whenMapEmpty_returnsNull", () => {
+  // M70 boundary pin: no entry at all → null, regardless of `now`.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const result = findLiveRoutePenalty(
+    modelRouteHealthMap,
+    "ollama-cloud",
+    "glm-5",
+    1_000_000,
+  );
+  assert.equal(result, null);
+});
+
+test("findLiveRoutePenalty_whenEntryExpired_returnsNull", () => {
+  // M70 boundary pin: an entry whose `until` is at-or-before `now` is
+  // treated as expired. `<=` matches `isRouteCurrentlyHealthy` and
+  // `expireHealthMaps` so the helper is consistent with the rest of the
+  // health-map machinery.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    ["ollama-cloud/glm-5", { state: "quota", until: 1_000_000, retryCount: 2 }],
+  ]);
+  const result = findLiveRoutePenalty(
+    modelRouteHealthMap,
+    "ollama-cloud",
+    "glm-5",
+    1_000_000,
+  );
+  assert.equal(result, null);
+});
+
+test("findLiveRoutePenalty_whenEntryLive_returnsEntry", () => {
+  // M70 boundary pin: a live entry is returned verbatim so callers can
+  // read `state`, `until`, and `retryCount` for scope reporting.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    ["ollama-cloud/glm-5", { state: "quota", until: 2_000_000, retryCount: 3 }],
+  ]);
+  const result = findLiveRoutePenalty(
+    modelRouteHealthMap,
+    "ollama-cloud",
+    "glm-5",
+    1_000_000,
+  );
+  assert.deepEqual(result, { state: "quota", until: 2_000_000, retryCount: 3 });
+});
+
+test("findLiveRoutePenalty_whenModelIsAlreadyCompositePrefixed_doesNotDoubleNest", () => {
+  // M70 drift-shape pin: the helper must route through
+  // `lookupRouteHealthByIdentifiers` (M67) so composite-key normalization
+  // is shared with writers. Writers canonicalize via `composeRouteKey`,
+  // which is idempotent: when the runtime model id ALREADY contains the
+  // provider prefix (e.g. `{provider: "ollama-cloud", model: "ollama-cloud/glm-5"}`),
+  // the stored key is `"ollama-cloud/glm-5"`, NOT
+  // `"ollama-cloud/ollama-cloud/glm-5"`. A naive `${providerID}/${modelID}`
+  // reader would build the double-nested key, miss the stored entry, and
+  // report a live penalty as absent — exactly the M30 bug pattern this
+  // test pins against.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    ["ollama-cloud/glm-5", { state: "model_not_found", until: 9_000_000, retryCount: 1 }],
+  ]);
+  const result = findLiveRoutePenalty(
+    modelRouteHealthMap,
+    "ollama-cloud",
+    "ollama-cloud/glm-5",
+    1_000_000,
+  );
+  assert.deepEqual(result, { state: "model_not_found", until: 9_000_000, retryCount: 1 });
 });
 
 test("findRegistryEntryByModel_whenRuntimeIdIsRawAndRegistryIsComposite_returnsEntry", () => {
