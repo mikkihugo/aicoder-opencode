@@ -88,11 +88,14 @@ Completion Notes (2026-04-11):
 - Added 5 tests: 3 unit tests for arg parsing + 2 integration tests for batch execution
 - All 118 tests pass
 
-### M5: Database path auto-discovery `⬜ PENDING`
+### M5: Database path auto-discovery `🚫 SKIPPED`
 
-- When `--target` is not specified, scan known XDG paths to find the actual database
-- Current behavior: always uses `~/.local/share/opencode/opencode.db`
-- Risk: could discover wrong database in multi-install setups
+Analysis (2026-04-11):
+- Current behavior is correct: no `--target` → control plane's own DB at `~/.local/share/opencode/opencode.db`
+- `--target <name>` → that target's derived DB path
+- `--all-targets` → all repo targets (M4)
+- Auto-discovery would introduce ambiguity ("which DB?") and the "wrong DB in multi-install" risk outweighs convenience
+- No implementation needed — the three explicit modes cover all real use cases
 
 ### M6: Backup directory target-awareness `✅ COMPLETED`
 
