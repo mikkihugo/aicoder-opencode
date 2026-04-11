@@ -28,6 +28,7 @@ import {
   isAgentVisibleHealthState,
   hasAgentVisiblePenalty,
   hasUsableCredential,
+  healthStateLabel,
   isZeroTokenQuotaSignal,
   parseAgentFrontmatter,
   parseHangTimeoutMs,
@@ -6260,4 +6261,54 @@ test("buildRoutingContextSystemPrompt_whenRenderingEntry_fusesCostTierAndBilling
   const costLine = rendered.split("\n").find((line) => line.startsWith("Cost tier:"));
 
   assert.equal(costLine, "Cost tier: cheap | Billing: paid_api");
+});
+
+// M98 pin A — `"QUOTA BACKOFF"` carries the `"BACKOFF"` suffix: the
+// `quota` state is the only transient-recoverable state with a
+// suffix word beyond the bare state name, signalling to the agent
+// that the recovery action is "wait the window out". A refactor that
+// drops the suffix (returning just `"QUOTA"`) silently desynchronizes
+// quota from the agent's "wait it out" recovery prompts. Asserts the
+// suffix predicate `.endsWith("BACKOFF")` specifically — not a
+// full-string match — so any sabotage at pin B's surface (underscore
+// substitution on multi-word states) or pin C's surface (three-word
+// model_not_found) leaves this pin green because neither touches the
+// quota case.
+test("healthStateLabel_whenStateIsQuota_labelCarriesBackoffSuffix", () => {
+  const label = healthStateLabel("quota");
+
+  assert.equal(label.endsWith("BACKOFF"), true);
+});
+
+// M98 pin B — underscore → space substitution: every multi-word
+// state uses ASCII SPACE as the word separator (never underscore).
+// A refactor that "just uppercases the state" and leaves the
+// underscore produces `"KEY_DEAD"` which the agent's single-token
+// recognizers (`\bKEY DEAD\b`) do not match. Asserts `!label.includes("_")`
+// on the `key_dead` case specifically — a two-word state, orthogonal
+// to pin C's three-word surface — so pin C's model_not_found drift
+// cannot fire here, and pin A's quota-suffix drift leaves this pin
+// green because key_dead is untouched.
+test("healthStateLabel_whenStateIsKeyDead_labelUsesSpaceNotUnderscore", () => {
+  const label = healthStateLabel("key_dead");
+
+  assert.equal(label.includes("_"), false);
+});
+
+// M98 pin C — three-word expansion for `model_not_found`: the
+// longest label is three words and enforces that the mapping splits
+// ALL underscores. A refactor that replaces only the FIRST underscore
+// (`.replace("_", " ")` vs `.replace(/_/g, " ")` — a plausible
+// mechanical-rewrite drift) silently produces `"MODEL NOT_FOUND"`
+// and breaks ONLY the three-word state while leaving every two-word
+// state unaffected — the insidious case a casual key_dead spot-check
+// would miss. Asserts the exact three-word label on model_not_found;
+// pin B's `includes("_") === false` assertion on key_dead does NOT
+// fire on a broken `model_not_found` because key_dead is untouched
+// by a `.replace("_", " ")`-only drift (no underscores after the
+// first case in the switch).
+test("healthStateLabel_whenStateIsModelNotFound_labelIsThreeWordForm", () => {
+  const label = healthStateLabel("model_not_found");
+
+  assert.equal(label, "MODEL NOT FOUND");
 });

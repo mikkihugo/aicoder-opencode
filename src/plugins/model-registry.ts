@@ -3470,7 +3470,60 @@ export function buildProviderHealthSummaryForTool(
   return summary;
 }
 
-function healthStateLabel(state: ProviderHealthState): string {
+/**
+ * Map an internal `ProviderHealthState` to the human-readable,
+ * agent-friendly label the plugin uses in every penalty-facing
+ * rendering surface (`formatPenaltySectionPrefix`,
+ * `buildAgentVisibleBackoffStatus`, the provider health system
+ * prompt, and tool-visible summaries).
+ *
+ * The label scheme is not cosmetic: the agent's "try another model"
+ * prompts match against these exact labels as matchable tokens, and
+ * opencode's downstream log scrapers grep for them too. A label
+ * convention drift at ANY one case silently desynchronizes one state
+ * from the rest and breaks agent-level recognition of that state
+ * without crashing anything. This helper is the sole source of truth
+ * for three independent label-convention surfaces:
+ *
+ *  1. **"QUOTA BACKOFF" (quota only — the suffix convention).** The
+ *     `quota` state is the only transient-recoverable state that
+ *     carries a SUFFIX word (`"BACKOFF"`) beyond the bare state name.
+ *     This is deliberate: quota is the only state where the agent's
+ *     recovery action is to wait the window out (as opposed to
+ *     key_dead where the action is "get a new key", no_credit where
+ *     the action is "top up", etc.), and the suffix is the signal.
+ *     A refactor that drops `"BACKOFF"` (the "keep it short" drift
+ *     class) leaves `"QUOTA"` — which the agent's recovery prompts do
+ *     not match as a "wait it out" state.
+ *
+ *  2. **Underscore → space substitution (multi-word states).** Four
+ *     states use snake_case internal names (`key_dead`, `no_credit`,
+ *     `key_missing`, `model_not_found`) but EVERY label uses ASCII
+ *     SPACE as the word separator (`"KEY DEAD"`, `"NO CREDIT"`,
+ *     `"KEY MISSING"`, `"MODEL NOT FOUND"`). A refactor that "just
+ *     uppercases the state" and leaves the underscore (the
+ *     "mechanical mapping" drift class) produces `"KEY_DEAD"` which
+ *     the agent's single-token-word recognizers (`\bKEY DEAD\b`) do
+ *     not match, silently breaking every multi-word state at once.
+ *
+ *  3. **Three-word expansion for `model_not_found`.** The longest
+ *     label is `"MODEL NOT FOUND"` — three words, enforcing that the
+ *     helper must actually split ALL underscores, not just the first
+ *     one. A refactor that replaces only the FIRST `_` (`.replace("_",
+ *     " ")` instead of `.replace(/_/g, " ")` or the hand-written
+ *     switch) silently produces `"MODEL NOT_FOUND"` and breaks only
+ *     the three-word state while leaving all two-word states
+ *     (`key_dead`, `no_credit`, `key_missing`) still rendering
+ *     correctly — a particularly insidious drift because a casual
+ *     spot-check on key_dead would never catch it.
+ *
+ * Args:
+ *   state: One of the six `ProviderHealthState` enum values.
+ *
+ * Returns:
+ *   The agent-facing uppercase label.
+ */
+export function healthStateLabel(state: ProviderHealthState): string {
   switch (state) {
     case "quota": return "QUOTA BACKOFF";
     case "key_dead": return "KEY DEAD";
