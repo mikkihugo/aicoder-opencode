@@ -1570,6 +1570,66 @@ export function expireHealthMaps(
  *
  * Returns:
  *   The next `ProviderHealth` record to store.
+ *
+ * ## Drift surfaces (M106 PDD)
+ *
+ * The four pre-existing pins assert field values across both branches
+ * (preserve-longer, key_missing-infinity, incoming-longer, fresh-record)
+ * but leave three orthogonal invariants unguarded. Each is load-bearing
+ * and each has a plausible refactor that would silently regress it:
+ *
+ * 1. **Preserve branch returns a fresh object, not a shared reference
+ *    to `existing`.** The caller `recordProviderHealth` stores the
+ *    return value back into `providerHealthMap` under the same key
+ *    `existing` was read from. If this helper ever `return existing;`
+ *    then `map.get(providerID) === existing === next` — a later writer
+ *    that mutates `next.retryCount += 1` would retroactively mutate the
+ *    already-committed prior entry through the shared handle. Today
+ *    that path is inert because callers treat the return as immutable,
+ *    but the invariant "the map never holds the literal object passed
+ *    in as `existing`" is what lets reviewers reason about aliasing
+ *    without tracing every caller. A naive optimization like
+ *    `return existing;` in the preserve branch (to skip an allocation)
+ *    would pass a shallow field-equality check but break the aliasing
+ *    invariant. The existing pins fail coincidentally because they
+ *    check `retryCount === existing.retryCount + 1` and the drop-the-
+ *    allocation sabotage also drops the increment — but a more careful
+ *    sabotage like `return { ...existing, retryCount: existing.retryCount + 1 }`
+ *    would restore all fields while still potentially leaking a shared
+ *    reference via `...existing`'s enumerable own-properties. A strict
+ *    `next !== existing` identity pin is the only way to catch the
+ *    bare `return existing;` form directly.
+ *
+ * 2. **Strict `>` (not `>=`) — equal-until takes the NEW path.** The
+ *    condition `existing.until > newUntil` uses strict inequality so
+ *    that when the incoming penalty expires at EXACTLY the same
+ *    timestamp as the existing one, the new `state` wins. This matters
+ *    when two writers (e.g. a route-level zero-token quota and a
+ *    provider-level 429) compute the same `now + 1h` boundary in the
+ *    same tick and the newer classification is genuinely more accurate
+ *    (e.g. `no_credit` refining a preliminary `quota`). Flipping `>`
+ *    to `>=` would silently preserve the stale classification on the
+ *    tie and the operator-visible state label in `healthStateLabel`
+ *    would lag reality by up to the full lockout window. None of the
+ *    four existing pins exercise the tie — they all use clearly-
+ *    unequal untils (`now + 2h` vs `now + 1h`) — so the strict/
+ *    non-strict distinction is currently an unpinned property of the
+ *    source.
+ *
+ * 3. **Input `existing` record is never mutated.** Both branches
+ *    allocate a fresh object literal; neither path writes through
+ *    `existing`. If a future refactor chose `Object.assign(existing,
+ *    { state: newState, until: newUntil, retryCount: ... })` in the
+ *    new-path branch to save an allocation, the field-equality pins
+ *    would all still pass (the return value carries the right fields
+ *    because Object.assign mutates AND returns the first argument),
+ *    but the caller's local reference to `existing` — which
+ *    `recordProviderHealth` captured before calling this helper — would
+ *    now report the new values. Any code that held onto `existing`
+ *    for logging, metric emission, or diff-against-previous would
+ *    misattribute the new state to the prior observation. The only
+ *    way to pin this is to snapshot a field of `existing` before the
+ *    call and assert it is unchanged after.
  */
 export function computeProviderHealthUpdate(
   existing: ProviderHealth | undefined,

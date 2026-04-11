@@ -4170,6 +4170,59 @@ test("computeProviderHealthUpdate_whenNoExistingEntry_createsFreshRecord", () =>
   assert.equal(next.retryCount, 1);
 });
 
+test("computeProviderHealthUpdate_whenPreserveBranchTaken_returnsFreshObjectNotExistingByReference", () => {
+  // M106 PDD surface 1: the preserve-longer branch must allocate a fresh
+  // record. A naive `return existing;` would pass shallow field checks in
+  // some sabotage forms but leak a shared handle that later writers could
+  // mutate retroactively.
+  const now = Date.now();
+  const existing = {
+    state: "no_credit" as const,
+    until: now + 2 * 60 * 60 * 1000,
+    retryCount: 1,
+  };
+
+  const next = computeProviderHealthUpdate(existing, "quota", now + 60 * 60 * 1000);
+
+  assert.ok(next !== existing, "preserve branch must return a fresh object, not the input by reference");
+});
+
+test("computeProviderHealthUpdate_whenExistingUntilEqualsNewUntil_takesNewPathAcceptingNewState", () => {
+  // M106 PDD surface 2: the condition is STRICT `existing.until > newUntil`,
+  // so equal-until means the incoming classification wins. A drift to `>=`
+  // would silently preserve the stale state on ties between two writers
+  // that compute the same `now + 1h` boundary in the same tick.
+  const now = Date.now();
+  const sharedUntil = now + 60 * 60 * 1000;
+  const existing = {
+    state: "quota" as const,
+    until: sharedUntil,
+    retryCount: 2,
+  };
+
+  const next = computeProviderHealthUpdate(existing, "no_credit", sharedUntil);
+
+  assert.equal(next.state, "no_credit", "equal-until must accept incoming state, not preserve existing");
+});
+
+test("computeProviderHealthUpdate_whenNewPathTaken_doesNotMutateInputExistingRecord", () => {
+  // M106 PDD surface 3: neither branch may mutate `existing`. A refactor to
+  // `Object.assign(existing, {...})` in the new-path branch would pass
+  // every field-equality pin (Object.assign returns its first argument with
+  // the right fields) while silently corrupting any caller that held a
+  // pre-call handle to `existing` for logging, diffing, or metric emission.
+  const now = Date.now();
+  const existing = {
+    state: "quota" as const,
+    until: now + 60 * 60 * 1000,
+    retryCount: 3,
+  };
+
+  computeProviderHealthUpdate(existing, "no_credit", now + 2 * 60 * 60 * 1000);
+
+  assert.equal(existing.state, "quota", "new-path must not mutate the input existing record");
+});
+
 test("parsePersistedHealthEntry_whenEntryIsWellFormed_returnsNormalizedRecord", () => {
   const now = Date.now();
   const entry = {
