@@ -3686,6 +3686,89 @@ test("findRegistryEntryByModel_whenRuntimeModelIsNotInRegistry_returnsUndefined"
   assert.equal(match, undefined);
 });
 
+test("findRegistryEntryByModel_whenRuntimeIdIsRawCompositeRegistry_requiresRuntimeNormalization", () => {
+  // M122 asymmetric pin A: isolates the runtime-side `composeRouteKey`
+  // wrap. Runtime id is RAW short form `"glm-5"`, registry row is
+  // COMPOSITE `"ollama-cloud/glm-5"`. A sabotage that drops the
+  // `composeRouteKey({provider: model.providerID, model: model.id})`
+  // call leaves raw `"glm-5"` compared against the normalized registry
+  // `"ollama-cloud/glm-5"` — no match, `undefined` returned. The new
+  // pin asserts the match exists and fires alone on that sabotage
+  // (pin B uses already-composite runtime so the runtime wrap is
+  // idempotent; pin C uses composite-on-both-sides likewise). The
+  // pre-existing M47 "raw runtime + composite registry" pin fires as
+  // additive coverage — acceptable per the PDD protocol.
+  const entries: ModelRegistryEntry[] = [
+    buildModelRegistryEntry("glm-5", ["implementation_worker"], "strong", [
+      { provider: "ollama-cloud", model: "ollama-cloud/glm-5", priority: 1 },
+    ]),
+  ];
+
+  const match = findRegistryEntryByModel(entries, {
+    id: "glm-5",
+    providerID: "ollama-cloud",
+  });
+
+  assert.ok(match);
+  assert.equal(match?.id, "glm-5");
+});
+
+test("findRegistryEntryByModel_whenRuntimeCompositeUnprefixedRegistry_requiresRegistryNormalization", () => {
+  // M122 asymmetric pin B: isolates the registry-side `composeRouteKey`
+  // wrap. Runtime id is already COMPOSITE `"longcat/LongCat-Flash-Chat"`,
+  // registry row is UNPREFIXED `"LongCat-Flash-Chat"`. A sabotage that
+  // drops the inner `composeRouteKey(providerRoute)` call inside the
+  // `.some` predicate leaves raw `"LongCat-Flash-Chat"` compared
+  // against the normalized runtime `"longcat/LongCat-Flash-Chat"` — no
+  // match, `undefined` returned. This is the M47 headline regression
+  // shape, but isolated to the registry-wrap axis: pin A's runtime is
+  // raw so its runtime-wrap drop fires pin A alone, and this pin's
+  // runtime is already composite so the runtime-wrap is a no-op here.
+  const entries: ModelRegistryEntry[] = [
+    buildModelRegistryEntry("longcat-flash-chat", ["oracle"], "strong", [
+      { provider: "longcat", model: "LongCat-Flash-Chat", priority: 1 },
+    ]),
+  ];
+
+  const match = findRegistryEntryByModel(entries, {
+    id: "longcat/LongCat-Flash-Chat",
+    providerID: "longcat",
+  });
+
+  assert.ok(match);
+  assert.equal(match?.id, "longcat-flash-chat");
+});
+
+test("findRegistryEntryByModel_whenTwoEntriesAndSecondContainsMatch_returnsSecondViaFindSemantics", () => {
+  // M122 asymmetric pin C: isolates the `.find(entry =>
+  // entry.provider_order.some(...))` iteration structure. Two registry
+  // entries, the SECOND one contains the matching route. Both sides
+  // are already composite so `composeRouteKey` is idempotent on both
+  // axes — pin A's runtime-wrap drop and pin B's registry-wrap drop
+  // cannot fire this pin because both comparisons resolve to
+  // `"ollama-cloud/m2"` regardless of wrap presence. The only sabotage
+  // that fires this pin is replacing the `.find(.some(...))` nested
+  // iteration with `modelRegistryEntries[0]` (or any structural drift
+  // that returns the first entry without checking its provider_order),
+  // which returns entry "m1" instead of "m2".
+  const entries: ModelRegistryEntry[] = [
+    buildModelRegistryEntry("m1", ["implementation_worker"], "strong", [
+      { provider: "ollama-cloud", model: "ollama-cloud/m1", priority: 1 },
+    ]),
+    buildModelRegistryEntry("m2", ["implementation_worker"], "strong", [
+      { provider: "ollama-cloud", model: "ollama-cloud/m2", priority: 1 },
+    ]),
+  ];
+
+  const match = findRegistryEntryByModel(entries, {
+    id: "ollama-cloud/m2",
+    providerID: "ollama-cloud",
+  });
+
+  assert.ok(match);
+  assert.equal(match?.id, "m2");
+});
+
 test("computeRegistryEntryHealthReport_whenLongcatEntryIsUnprefixed_detectsRouteLevelPenaltyFromCompositeKey", () => {
   // Regression (M30): the longcat-flash-chat registry entry stores
   // `provider_order[0].model = "LongCat-Flash-Chat"` (unprefixed per

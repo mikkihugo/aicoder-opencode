@@ -821,6 +821,105 @@ export function buildEnabledProviderModelSet(
   return rawModelIDs;
 }
 
+/**
+ * Resolve the curated registry entry that owns the runtime `{id, providerID}`
+ * model tuple — the single readers-side funnel for every code path that
+ * needs to go from "what is opencode dispatching right now" to "which
+ * `ModelRegistryEntry` governs this dispatch".
+ *
+ * ## Drift surfaces (M122 PDD)
+ *
+ * The body is five statements but each of the three load-bearing lines
+ * carries one orthogonal invariant, and the five pre-existing M47
+ * cartesian pins exercise every (prefixed/unprefixed) × (runtime/registry)
+ * cell of the four-way matrix without ever isolating WHICH side of the
+ * `composeRouteKey` pair broke on a single-line sabotage. Dropping
+ * `composeRouteKey` on the runtime side fires two M47 pins simultaneously
+ * (the two raw-runtime cells); dropping it on the registry side fires two
+ * DIFFERENT M47 pins (the two unprefixed-registry cells); replacing
+ * `.find(.some(...))` with `[0]` fires only the negative-match pin. Each
+ * sabotage leaves failure messages unable to localise which surface
+ * actually broke — the pin signatures are correlated with the cartesian
+ * axis, not with the code axis. M122 adds three asymmetric pins each
+ * designed to fire on exactly one of the three orthogonal surfaces.
+ *
+ *   (1) **Runtime-side `composeRouteKey` normalization.** The helper
+ *       wraps the opencode runtime tuple `{providerID, id}` into a
+ *       canonical composite key via
+ *       `composeRouteKey({provider: model.providerID, model: model.id})`.
+ *       This is load-bearing for the "raw runtime id + composite
+ *       registry entry" cell: when opencode hands the plugin `{id:
+ *       "glm-5", providerID: "ollama-cloud"}` (the common case — the
+ *       runtime short id is NOT provider-prefixed) and the registry row
+ *       stores `"ollama-cloud/glm-5"` (the common authored form),
+ *       dropping the wrap leaves the raw short id compared against the
+ *       normalized composite and the entry is silently dropped. The
+ *       downstream consequences are wide: the capability-tier
+ *       temperature override, the `## Active model routing context`
+ *       system-prompt injection, every fallback ranking, and every
+ *       health-surface prompt all read through this funnel. The new
+ *       pin constructs the exact common case and asserts the match
+ *       exists — idempotent on the already-composite-runtime cell, so
+ *       it fires alone among the M122 pins when the runtime wrap is
+ *       dropped.
+ *
+ *   (2) **Registry-side `composeRouteKey` normalization.** The helper
+ *       also wraps each `providerRoute` from `entry.provider_order`
+ *       through `composeRouteKey(providerRoute)` inside the `.some`
+ *       predicate. This is load-bearing for the "already-composite
+ *       runtime id + unprefixed registry entry" cell — the shape that
+ *       every `longcat/LongCat-Flash-*` registry row lives in (the
+ *       registry authors them without the `longcat/` prefix because
+ *       the longcat provider takes bare model ids). A sabotage that
+ *       drops the registry-side wrap compares raw `"LongCat-Flash-Chat"`
+ *       against the normalized runtime `"longcat/LongCat-Flash-Chat"`
+ *       and the entry silently drops — exactly the M47 headline
+ *       regression that motivated putting `composeRouteKey` on BOTH
+ *       sides of the comparison. The new pin isolates this surface by
+ *       constructing an already-composite runtime id paired with an
+ *       unprefixed registry entry — idempotent on the runtime-wrap
+ *       axis, so it fires alone on a registry-wrap drop.
+ *
+ *   (3) **`.find(entry => entry.provider_order.some(...))` iteration
+ *       structure.** The outer walk is `.find` (first-match,
+ *       short-circuit, returns the entry), the inner walk is `.some`
+ *       (first-match, boolean, feeds the outer predicate). A plausible
+ *       "simplification" refactor to `modelRegistryEntries[0]` (on the
+ *       theory that "the caller has already pre-filtered to a single
+ *       candidate") silently ignores the provider_order match entirely
+ *       and returns the first entry regardless of whether its routes
+ *       actually contain the requested model. This kind of drift is
+ *       invisible when the registry has one entry (the M47 cartesian
+ *       pins all use single-entry fixtures), which is why the new pin
+ *       uses TWO entries where the SECOND entry is the correct match
+ *       — an `[0]`-style drift returns the wrong entry and the pin
+ *       fires. Composite-on-both-sides inputs so the two
+ *       `composeRouteKey` surfaces are idempotent and cannot mask the
+ *       iteration-structure signal.
+ *
+ * ## Body contract
+ *
+ * Bitwise-identical to pre-M122. Two `composeRouteKey` calls (one
+ * runtime-side, one registry-side inside the `.some`), one `.find(.some)`
+ * nested iteration. Asymmetric pins at
+ * `findRegistryEntryByModel_whenRuntimeIdIsRawCompositeRegistry_requiresRuntimeNormalization`,
+ * `..._whenRuntimeCompositeUnprefixedRegistry_requiresRegistryNormalization`,
+ * and `..._whenTwoEntriesAndSecondContainsMatch_returnsSecondViaFindSemantics`.
+ *
+ * Args:
+ *   modelRegistryEntries: The curated registry rows, as loaded from
+ *     `models.jsonc`. Walked once via `.find` — caller supplies input
+ *     order (author order from the registry file).
+ *   model: Opencode runtime `{id, providerID}` tuple, where `id` may be
+ *     raw-short OR already-composite and `providerID` is the canonical
+ *     opencode provider slug.
+ *
+ * Returns:
+ *   The first matching `ModelRegistryEntry` whose `provider_order`
+ *   contains a route whose `composeRouteKey`-normalized form equals the
+ *   runtime tuple's normalized form, or `undefined` when no entry
+ *   matches.
+ */
 export function findRegistryEntryByModel(
   modelRegistryEntries: ModelRegistryEntry[],
   model: ModelIdentity,
