@@ -6116,6 +6116,55 @@ test("shouldClassifyAsModelNotFound_when404WithUnrelatedMessage_returnsFalse", (
   );
 });
 
+// M133 pin A — keyword match is SUBSTRING (`.includes`), not full-
+// string equality. Live payloads typically wrap the keyword in a
+// longer sentence; a "tighten to `===`" refactor silently stops
+// recognizing wrapped-keyword messages. Uses a 404 paired with a
+// message that embeds the keyword inside heavy context on BOTH sides
+// so the substring axis is the only thing the pin exercises.
+// Orthogonal to B (lowercase already) and C (404 is in the set).
+test("shouldClassifyAsModelNotFound_whenKeywordIsEmbeddedInsideLongerMessage_returnsTrue", () => {
+  assert.equal(
+    shouldClassifyAsModelNotFound(
+      404,
+      "openrouter router rejected: model not found on any upstream provider",
+    ),
+    true,
+  );
+});
+
+// M133 pin B — helper is CASE-SENSITIVE on its message input, by
+// contract. The parameter is named `lowerMessage` and the caller is
+// responsible for pre-lowercasing. A title-case message like
+// `"Model Not Found"` must NOT match because the keyword is
+// lowercase and `.includes` is case-sensitive. A "be robust to
+// case" internal `.toLowerCase()` addition would silently break
+// the caller contract and admit raw title-case payloads.
+// Orthogonal to A (keyword present, substring works) and C (404 is
+// in the set).
+test("shouldClassifyAsModelNotFound_whenMessageIsTitleCase_returnsFalse", () => {
+  assert.equal(
+    shouldClassifyAsModelNotFound(404, "Model Not Found in upstream"),
+    false,
+  );
+});
+
+// M133 pin C — `MODEL_NOT_FOUND_HTTP_STATUS_CODES` is a FINITE set
+// `{0, 404, 500}`, not a range. A "simplify to `code >= 400 && code
+// < 600`" refactor would silently admit 501/502/503 etc. — every
+// 4xx/5xx carrying the keyword in its body would fire a route-level
+// penalty even when the real failure is a proxy/client
+// misconfiguration. Uses 501 specifically: a 5xx code adjacent to
+// 500 that is OUTSIDE the authoritative status set (401/402/403/429)
+// AND outside the accept set. Orthogonal to A (keyword is a clean
+// substring) and B (message is lowercase).
+test("shouldClassifyAsModelNotFound_whenStatusIs501WithKeyword_returnsFalse", () => {
+  assert.equal(
+    shouldClassifyAsModelNotFound(501, "model not found in upstream"),
+    false,
+  );
+});
+
 test("ROUTE_MODEL_NOT_FOUND_DURATION_MS_isStrictlyLongerThan_ROUTE_QUOTA_BACKOFF_DURATION_MS", () => {
   // Semantic pin: a missing-model penalty must outlast a quota penalty,
   // because a quota refills on a clock whereas a missing model is a

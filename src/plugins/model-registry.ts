@@ -3519,6 +3519,69 @@ export function classifyProviderApiError(
  * The helper is pure so it is unit-testable without any live health maps
  * or opencode runtime event payloads.
  *
+ * ## Drift surfaces (M133 PDD)
+ *
+ * The ten existing pins cover the three true-accept paths (404 / 500
+ * / 0 with keyword), the four false-paths where an authoritative
+ * status beats the keyword (401 / 402 / 403 / 429), and two no-keyword
+ * false-paths. Three orthogonal invariants sit below that coverage
+ * and each has a plausible rewrite that silently breaks it:
+ *
+ *  A. **Keyword check is substring (`.includes`), not full-string
+ *     equality.** The canonical `MODEL_NOT_FOUND_KEYWORD` is
+ *     `"model not found"`, and live payloads from openrouter / direct
+ *     providers / proxies typically wrap the keyword inside a longer
+ *     sentence (`"openrouter: model not found in any upstream"`). A
+ *     "tighten to `===` to avoid false positives" refactor would
+ *     silently stop recognizing every wrapped-keyword message — all
+ *     three existing true-accept pins use wrapped forms and would
+ *     fire additively, but none of them isolates the substring
+ *     contract from the happy-path status-code gate. The new pin
+ *     pairs a 404 with a message that embeds the keyword inside
+ *     heavy surrounding context on both sides (`"xxx model not found
+ *     xxx"`) so the substring axis is the ONLY thing the pin
+ *     exercises.
+ *
+ *  B. **The helper is CASE-SENSITIVE on its message input — the
+ *     caller is responsible for pre-lowercasing.** `MODEL_NOT_FOUND_
+ *     KEYWORD` is lowercase and `.includes` is case-sensitive, so a
+ *     message like `"Model Not Found"` (title-case) must NOT match
+ *     because the caller contract is "already lowercased." A
+ *     well-meaning refactor that adds an internal
+ *     `lowerMessage.toLowerCase()` to "be robust to case" would
+ *     silently accept raw title-case payloads — but the real cost
+ *     is that the convention-by-parameter-name erodes: callers stop
+ *     pre-lowercasing, and a future bug where a caller passes a
+ *     locale-sensitive string (Turkish `İ`, etc.) misclassifies
+ *     silently. None of the ten existing pins uses a non-lowercase
+ *     message, so the CASE contract is unpinned.
+ *
+ *  C. **`MODEL_NOT_FOUND_HTTP_STATUS_CODES` is a FINITE set
+ *     (`{0, 404, 500}`), not a range.** The accept set deliberately
+ *     excludes authoritative provider-status codes (401/402/403/429
+ *     — the M35 priority-dominance rule) AND adjacent 4xx/5xx codes
+ *     that have nothing to do with model-not-found semantics
+ *     (400/405/501/502/...). A "simplify the accept check to `code
+ *     >= 400 && code < 600`" refactor would silently also admit 400,
+ *     405, 501, 502, 503, etc. — every 4xx/5xx that happens to
+ *     contain the keyword in its body would fire a route-level
+ *     model-not-found penalty, even when the real failure is a
+ *     proxy misconfiguration (`502 "bad gateway: upstream returned
+ *     model not found"`) or a client bug (`400 "bad request:
+ *     requested model not found in registry"`). The four 401/402/
+ *     403/429 existing false-pins would fire additively on this
+ *     sabotage, but no existing pin exercises a 4xx/5xx status
+ *     OUTSIDE the authoritative set and OUTSIDE the accept set
+ *     (e.g. 501).
+ *
+ * Asymmetric sabotage model: pin A fires on `.includes → ===` (S1),
+ * pin B fires on adding internal `.toLowerCase()` (S2), pin C fires
+ * on `.has()-set → range-check` (S3). Among the three new pins each
+ * sabotage fires exactly one uniquely; some existing pins fire
+ * additively as expected (S1 fires the three true-accept pins, S3
+ * fires the four authoritative-status false-pins) — additive
+ * existing coverage is permitted and documented here.
+ *
  * Args:
  *   statusCode: HTTP status code from the opencode APIError payload, or
  *     0 when absent.
