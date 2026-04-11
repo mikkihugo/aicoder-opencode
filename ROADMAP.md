@@ -172,6 +172,21 @@ Completion Notes (2026-04-11):
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
 
+### M16: Long successful reasoning turns silently marked `timeout` (ROOT CAUSE of strong-model starvation) `✅ COMPLETED`
+
+Completion Notes (2026-04-11):
+- **Symptom**: strong reasoning models (kimi-k2-thinking, minimax-m2.7, cogito-2.1, qwen3-coder:480b) were repeatedly being flagged unhealthy and routed around, even when they worked fine. Root cause was a double classification bug:
+  1. `assistant.message.completed` checked `duration > timeoutMs` and marked the route `timeout` if the turn took longer than `AICODER_ROUTE_HANG_TIMEOUT_MS` (default 60s). Deep reasoning turns with many tool calls routinely run 2–10+ minutes and complete successfully — a completion is by definition not a hang.
+  2. The `setTimeout` hang detector in `chat.params` was set to 60s default, so it fired on every legitimate long turn, scheduled a `timeout` write to `modelRouteHealthMap`, and (after M14) persisted it.
+- **Fix**:
+  - Remove the duration check from `assistant.message.completed` entirely. Add `sessionStartTimeMap.delete(sessionID)` so any late-firing setTimeout finds no start time and no-ops.
+  - Add `sessionStartTimeMap.delete(sessionID)` at the top of the `session.error` handler for the same reason.
+  - Raise default `AICODER_ROUTE_HANG_TIMEOUT_MS` from `60000` → `900000` (15 min). Covers realistic deep-reasoning + tool-chain turns while still catching true network hangs.
+  - `setTimeout(...).unref()` in `chat.params` — health telemetry must not keep the Node event loop alive. Without this, raising the default broke the test suite (`'Promise resolution is still pending but the event loop has already resolved'`, exit 144 after 715s). Also sped the test suite from ~60s to ~13s by letting prior tests' 60s timers exit immediately instead of waiting.
+- **Test**: `assistant_message_completed_after_long_duration_does_not_mark_route_timeout` — simulates a turn that starts, sleeps 20ms, then completes successfully with nonzero tokens while env var pretends the hang threshold was 1ms. Asserts the route stays out of the health map.
+- **Verification**: `npx tsc -p tsconfig.json --noEmit` clean, 122/122 tests pass (121 + 1 new), suite runtime 13s (down from ~60s due to unref fix), dist rebuilt.
+- **Files**: `src/plugins/model-registry.ts`, `src/plugins/model-registry.keyless.test.ts`.
+
 ### M15: `session.error` bare 500 over-classified as `model_not_found` `✅ COMPLETED`
 
 Completion Notes (2026-04-11):

@@ -411,6 +411,72 @@ test("assistant_message_completed_with_zero_tokens_classifies_route_quota_backof
   });
 });
 
+test("assistant_message_completed_after_long_duration_does_not_mark_route_timeout", async () => {
+  // A successful completion is proof of non-hang regardless of wall-clock.
+  // Deep reasoning turns (kimi-k2-thinking et al.) routinely exceed any
+  // ambient timeout but succeed. Previously the completed-handler checked
+  // `duration > timeoutMs` and retroactively marked long-but-successful
+  // turns as `timeout`, silently poisoning the route for an hour.
+  await withIsolatedHome(async (homeDirectory) => {
+    const originalTimeoutValue = process.env.AICODER_ROUTE_HANG_TIMEOUT_MS;
+    process.env.AICODER_ROUTE_HANG_TIMEOUT_MS = "1"; // force "long turn" regime
+
+    await writeAuthFile(homeDirectory, {
+      "ollama-cloud": "token-value",
+    });
+
+    try {
+      await withFreshHealthState(async () => {
+        const { ModelRegistryPlugin } = await import("./model-registry.js");
+        const plugin = await (ModelRegistryPlugin as any)({ directory: process.cwd() });
+
+        // Note: chat.params with timeoutMs < 1000 takes the test-only fast
+        // branch that immediately records timeout — we skip it here and
+        // seed the session maps directly, simulating a running turn.
+        const sessionID = "session-with-long-successful-turn";
+        // Use a private-ish seeding path: call chat.params with a larger
+        // timeoutMs so the fast branch doesn't fire, then flip env for the
+        // completed handler. But that uses setTimeout; simpler: call event
+        // directly with a fabricated completed payload.
+        process.env.AICODER_ROUTE_HANG_TIMEOUT_MS = "100000";
+        await (plugin["chat.params"] as any)(
+          {
+            sessionID,
+            provider: { info: { id: "ollama-cloud" } },
+            model: { id: "kimi-k2-thinking", providerID: "ollama-cloud" },
+          },
+          {},
+        );
+
+        // Simulate: turn ran for longer than any reasonable timeout but
+        // completed successfully (nonzero tokens).
+        await new Promise((r) => setTimeout(r, 20));
+        process.env.AICODER_ROUTE_HANG_TIMEOUT_MS = "1"; // now pretend the timeout was tiny
+
+        await (plugin.event as any)({
+          event: {
+            type: "assistant.message.completed",
+            properties: {
+              sessionID,
+              tokens: { input: 500, output: 1200 },
+            },
+          },
+        });
+
+        const rawStatus = await (plugin.tool as any).get_quota_backoff_status.execute({});
+        const status = JSON.parse(rawStatus as string);
+        assert.equal(status["ollama-cloud/kimi-k2-thinking"], undefined);
+      });
+    } finally {
+      if (originalTimeoutValue === undefined) {
+        delete process.env.AICODER_ROUTE_HANG_TIMEOUT_MS;
+      } else {
+        process.env.AICODER_ROUTE_HANG_TIMEOUT_MS = originalTimeoutValue;
+      }
+    }
+  });
+});
+
 test("chat_params_when_route_hangs_classifies_route_timeout_backoff", async () => {
   await withIsolatedHome(async (homeDirectory) => {
     const originalTimeoutValue = process.env.AICODER_ROUTE_HANG_TIMEOUT_MS;

@@ -1029,6 +1029,10 @@ export const ModelRegistryPlugin: Plugin = async () => {
         const sessionID = sessionError.sessionID;
         if (!sessionID) return;
 
+        // Turn is done (errored); clear its hang-detector start time so any
+        // pending setTimeout from chat.params no-ops on fire.
+        sessionStartTimeMap.delete(sessionID);
+
         const providerID = sessionActiveProviderMap.get(sessionID);
         if (!providerID) return;
 
@@ -1091,27 +1095,15 @@ export const ModelRegistryPlugin: Plugin = async () => {
         const tokens = props.tokens;
         if (!tokens) return;
 
-        // Check for timeout
-        const startTime = sessionStartTimeMap.get(sessionID);
-        if (startTime) {
-          const timeoutMs = parseInt(process.env.AICODER_ROUTE_HANG_TIMEOUT_MS ?? "60000", 10);
-          const duration = Date.now() - startTime;
-
-          if (duration > timeoutMs) {
-            const providerID = sessionActiveProviderMap.get(sessionID);
-            const model = sessionActiveModelMap.get(sessionID);
-            if (providerID && model) {
-              const routeKey = `${providerID}/${model.id}`;
-              const existing = modelRouteHealthMap.get(routeKey);
-              modelRouteHealthMap.set(routeKey, {
-                state: "timeout",
-                until: Date.now() + QUOTA_BACKOFF_DURATION_MS,
-                retryCount: (existing?.retryCount ?? 0) + 1,
-              });
-              void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
-            }
-          }
-        }
+        // Deliberate: do NOT classify based on wall-clock duration here.
+        // A completed turn is by definition not hung — deep reasoning turns
+        // (kimi-k2-thinking, minimax-m2.7, cogito-2.1 with 200+ tool calls)
+        // routinely exceed any ambient timeout but succeed normally. The
+        // setTimeout-based hang detector in chat.params is the only valid
+        // "still running after N seconds" signal; once completion fires we
+        // clear that session's start-time so the late-firing setTimeout
+        // becomes a no-op.
+        sessionStartTimeMap.delete(sessionID);
 
         // Zero tokens on both input and output indicates quota exhaustion
         if (tokens.input === 0 && tokens.output === 0) {
@@ -1153,7 +1145,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
         }
 
         // Schedule a timeout check that runs after the timeout period
-        const timeoutMs = parseInt(process.env.AICODER_ROUTE_HANG_TIMEOUT_MS ?? "60000", 10);
+        const timeoutMs = parseInt(process.env.AICODER_ROUTE_HANG_TIMEOUT_MS ?? "900000", 10);
 
         // For testing purposes with very short timeouts, mark as timeout immediately
         if (timeoutMs < 1000) {
@@ -1170,7 +1162,7 @@ export const ModelRegistryPlugin: Plugin = async () => {
             void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
           }
         } else {
-          setTimeout(() => {
+          const hangTimer = setTimeout(() => {
             const startTime = sessionStartTimeMap.get(input.sessionID);
             if (!startTime) return; // Session already completed
 
@@ -1190,6 +1182,9 @@ export const ModelRegistryPlugin: Plugin = async () => {
               }
             }
           }, timeoutMs + 100); // Check slightly after the timeout threshold
+          // Do not keep the Node event loop alive waiting on a hang timer —
+          // the timer is best-effort health telemetry, not critical work.
+          hangTimer.unref?.();
         }
       } catch {
         return;
