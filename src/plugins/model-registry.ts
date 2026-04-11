@@ -360,14 +360,12 @@ async function loadPersistedProviderHealth(): Promise<{
       const normalized = parsePersistedHealthEntry(rawEntry, now);
       if (normalized === null) continue;
 
-      // persistProviderHealth writes BOTH provider entries (`"iflowcn"`)
-      // and route entries (`"iflowcn/qwen3-coder-plus"`) into one flat
-      // JSON. Route keys always contain `/`; provider IDs never do.
-      // Split them back into the correct maps so route-level backoffs
-      // survive plugin restart and do not zombie-accumulate in the
-      // provider map.
-      const isRouteKey = key.includes("/");
-      if (isRouteKey) {
+      // M83: `classifyPersistedHealthKey` SSoTs the provider-vs-route
+      // classification alongside `composeRouteKey`, so a future edit
+      // to the composite-key delimiter cannot silently desync the
+      // read-side classifier from the write-side key builder. See the
+      // helper docstring for the multi-segment-key drift shape.
+      if (classifyPersistedHealthKey(key) === "route") {
         modelRouteHealthMap.set(key, normalized);
       } else {
         providerHealthMap.set(key, normalized);
@@ -640,6 +638,68 @@ export function composeRouteKey(providerRoute: { provider: string; model: string
     return providerRoute.model;
   }
   return `${providerRoute.provider}/${providerRoute.model}`;
+}
+
+/**
+ * Classify a key from the persisted `providerHealth.json` flat map into
+ * the provider-level vs route-level bucket it belongs to.
+ *
+ * `persistProviderHealth` writes BOTH `providerHealthMap` entries (raw
+ * provider IDs like `"iflowcn"`, `"ollama-cloud"`) and
+ * `modelRouteHealthMap` entries (composite `provider/model` keys
+ * produced by `composeRouteKey`, e.g. `"iflowcn/qwen3-coder-plus"`,
+ * `"openrouter/anthropic/claude-3.5-sonnet"`) into one flat JSON
+ * document. On load, `loadPersistedProviderHealth` must split the flat
+ * map back into the two in-memory maps so route-level backoffs survive
+ * plugin restart without zombie-accumulating in the provider map (and
+ * vice-versa). The classification rule is: route keys are exactly the
+ * composite-form keys `composeRouteKey` produces, and
+ * `composeRouteKey`'s invariant is that every composite form contains
+ * at least one `/`. Provider IDs, by registry convention, never do.
+ *
+ * ## Drift shape this closes
+ *
+ * Prior to this helper `loadPersistedProviderHealth` classified each
+ * key inline with `const isRouteKey = key.includes("/")`. That inline
+ * predicate has two silent drift surfaces:
+ *
+ *   1. `composeRouteKey` and the classifier are linked: they share the
+ *      `/` delimiter convention by implicit coincidence, not by
+ *      shared code. If `composeRouteKey` is ever changed to use a
+ *      different delimiter (`::`, `|`, `#`), the inline `.includes("/")`
+ *      check silently keeps returning `false` for every new-form route
+ *      key — every route penalty gets re-hydrated into the provider
+ *      map, corrupting both halves of the health state on plugin
+ *      restart, with no validation error. Encoding the classification
+ *      as a helper next to `composeRouteKey` co-locates the delimiter
+ *      convention so a future edit to one prompts review of the other.
+ *   2. The inline predicate mis-handles multi-segment route keys. For
+ *      keys like `"openrouter/anthropic/claude-3.5-sonnet"` (three
+ *      segments, two slashes — `composeRouteKey` produces this when
+ *      the opencode runtime model id already contains a `/`, which
+ *      happens for aggregator-routed models on openrouter) the
+ *      `.includes("/")` check correctly returns `true`, but a future
+ *      refactor that "tightens" the predicate to `.split("/").length
+ *      === 2` (a plausible "expect exactly provider + model" narrowing)
+ *      would silently misclassify every multi-segment route key as a
+ *      provider ID. That's the exact class of refactor this helper
+ *      pins against: the unit tests encode the multi-segment case
+ *      explicitly so a tightening attempt fails a concrete assertion
+ *      instead of silently corrupting on-disk state.
+ *
+ * Args:
+ *   persistedKey: One key from the flat persisted-health JSON map —
+ *     either a raw provider ID or a composite route key.
+ *
+ * Returns:
+ *   `"route"` if the key is a composite route key (contains at least
+ *   one `/`), `"provider"` otherwise. Callers use the discriminant to
+ *   decide which of the two in-memory maps receives the parsed entry.
+ */
+export function classifyPersistedHealthKey(
+  persistedKey: string,
+): "provider" | "route" {
+  return persistedKey.includes("/") ? "route" : "provider";
 }
 
 /**

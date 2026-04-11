@@ -53,6 +53,7 @@ import {
   expireHealthMaps,
   filterProviderModelsByRouteHealth,
   findCuratedFallbackRoute,
+  classifyPersistedHealthKey,
   findRegistryEntryByModel,
   loadRegistryAndLookupEntryForInputModel,
   inferTaskComplexity,
@@ -733,6 +734,53 @@ test("serializeHealthEntryForPersistence_whenCalled_preservesStateAndRetryCount"
 
   assert.equal(serialized.state, "no_credit");
   assert.equal(serialized.retryCount, 7);
+});
+
+test("classifyPersistedHealthKey_whenKeyHasNoSlash_returnsProvider", () => {
+  // M83 pin: raw provider IDs (no slash) must classify as "provider".
+  // A sabotage that hardcodes `"route"` for every key fires this pin
+  // alone — pins 2 and 3 still see their expected `"route"` value.
+  assert.equal(classifyPersistedHealthKey("iflowcn"), "provider");
+  assert.equal(classifyPersistedHealthKey("ollama-cloud"), "provider");
+});
+
+test("classifyPersistedHealthKey_whenKeyHasExactlyOneSlash_returnsRoute", () => {
+  // M83 pin: standard 2-segment composite keys (one slash) must
+  // classify as "route". Paired with pin 3 to catch a sabotage that
+  // tightens the predicate to `split("/").length > 2` — that sabotage
+  // would misclassify exactly-one-slash keys as "provider", firing
+  // this pin alone while pin 3 still passes.
+  assert.equal(
+    classifyPersistedHealthKey("iflowcn/qwen3-coder-plus"),
+    "route",
+  );
+  assert.equal(
+    classifyPersistedHealthKey("ollama-cloud/glm-5"),
+    "route",
+  );
+});
+
+test("classifyPersistedHealthKey_whenKeyHasMultipleSlashes_returnsRoute", () => {
+  // M83 pin: multi-segment composite keys (two or more slashes, which
+  // `composeRouteKey` produces when the opencode runtime model id
+  // already contains a `/` — e.g. openrouter aggregator routes) must
+  // still classify as "route". Paired with pin 2 to catch the
+  // inverse sabotage: `split("/").length === 2` would misclassify
+  // multi-segment keys as "provider", firing this pin alone while
+  // pin 2 still passes. Round-trips through `composeRouteKey` to pin
+  // the convention lock-step: if `composeRouteKey` ever changes its
+  // delimiter, the round-trip here breaks before the read-side
+  // classifier can silently diverge in production.
+  assert.equal(
+    classifyPersistedHealthKey("openrouter/anthropic/claude-3.5-sonnet"),
+    "route",
+  );
+  assert.equal(
+    classifyPersistedHealthKey(
+      composeRouteKey({ provider: "openrouter", model: "meta/llama-3-70b" }),
+    ),
+    "route",
+  );
 });
 
 test("loadRegistryAndLookupEntryForInputModel_whenEntryMatches_returnsRegistryAndEntry", async () => {
