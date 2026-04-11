@@ -726,6 +726,72 @@ export function recordRouteHealthPenalty(
 }
 
 /**
+ * Write a provider-level health penalty AND schedule disk persistence as
+ * an atomic pair — the provider-layer analog of `recordRouteHealthPenalty`
+ * (M68).
+ *
+ * Exists because the factory-local `recordProviderHealth` (inside the
+ * `ModelRegistryPlugin` closure) inlined the same set+persist pair as
+ * M68's four route writers:
+ *
+ *   providerHealthMap.set(providerID, computeProviderHealthUpdate(...));
+ *   void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
+ *
+ * The pair is the same durability invariant M68 enumerated: `map.set`
+ * alone keeps the penalty in memory for the current plugin instance but
+ * drops it on plugin reload, plugin crash, or cross-process handoff
+ * (dr-repo and letta-workspace shims share the same on-disk state file).
+ * Pre-M73 the provider-layer pairing was enforced only by convention —
+ * the factory-local helper happened to carry both lines because its
+ * author wrote them together — and there was no regression pin. A
+ * future refactor (a new provider-level state, a new error-classification
+ * branch in `session.error`, a test harness, a shim-level override) that
+ * re-did the `providerHealthMap.set` call alone would silently produce
+ * provider backoffs that work for a few minutes and vanish on the next
+ * bounce. M68 closed this gap at the route layer and left the provider
+ * layer as a TODO; M73 is the symmetric follow-up.
+ *
+ * This helper takes the already-computed `newHealth` entry (callers run
+ * `computeProviderHealthUpdate` themselves so the M43 preserve-longer
+ * merge against the existing entry stays outside this durability-only
+ * boundary — same split M68 used between `buildRouteHealthEntry` and
+ * `recordRouteHealthPenalty`). The factory-local `recordProviderHealth`
+ * becomes a thin wrapper: compute `newUntil` from `durationMs`, run
+ * `computeProviderHealthUpdate`, and delegate here.
+ *
+ * Args:
+ *   providerHealthMap: Runtime provider-keyed health map. Written in place.
+ *   modelRouteHealthMap: Route-keyed health map. Passed through to
+ *     `persistFn` so a provider-penalty write also re-serializes the
+ *     route-level entries (same atomic-snapshot shape as M68).
+ *   providerID: Provider identifier whose entry is being updated.
+ *   newHealth: The pre-merged `ProviderHealth` entry to store. Callers
+ *     produce this by running `computeProviderHealthUpdate(existing,
+ *     state, newUntil)` so the M43 preserve-longer invariant dominates
+ *     before the durability boundary fires.
+ *   persistFn: The persistence side-effect function. In production this
+ *     is the factory-local `persistProviderHealth` (atomic tmp-file
+ *     rename). In tests it can be a spy to verify the pairing.
+ *
+ * Returns:
+ *   `void`. Fire-and-forget: writes the map synchronously, invokes
+ *   `persistFn` without awaiting, returns. Persistence errors are
+ *   swallowed inside `persistProviderHealth` itself, intentional because
+ *   a failed persist must not escalate into a runtime exception that
+ *   crashes the `session.error` event hook.
+ */
+export function recordProviderHealthPenalty(
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  providerID: string,
+  newHealth: ProviderHealth,
+  persistFn: PersistProviderHealthFn,
+): void {
+  providerHealthMap.set(providerID, newHealth);
+  void persistFn(providerHealthMap, modelRouteHealthMap);
+}
+
+/**
  * Return `true` when a provider+model pair must be excluded from fallback
  * routing. Exported so the regex semantics can be unit-tested directly
  * without constructing the plugin closure.
@@ -3293,13 +3359,23 @@ export const ModelRegistryPlugin: Plugin = async () => {
     state: ProviderHealthState,
     durationMs: number,
   ): void {
+    // M73: delegate the durability boundary (set + persist) to
+    // `recordProviderHealthPenalty` so the provider-layer writer shares
+    // the same set+persist pairing helper that M68's
+    // `recordRouteHealthPenalty` enforces at the route layer. The M43
+    // preserve-longer merge still happens HERE via
+    // `computeProviderHealthUpdate` so the module-scope helper stays
+    // pure and durability-only, mirroring M68's
+    // `buildRouteHealthEntry` / `recordRouteHealthPenalty` split.
     const existing = providerHealthMap.get(providerID);
     const newUntil = Date.now() + durationMs;
-    providerHealthMap.set(
+    recordProviderHealthPenalty(
+      providerHealthMap,
+      modelRouteHealthMap,
       providerID,
       computeProviderHealthUpdate(existing, state, newUntil),
+      persistProviderHealth,
     );
-    void persistProviderHealth(providerHealthMap, modelRouteHealthMap);
   }
 
   return {

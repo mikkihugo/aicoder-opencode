@@ -37,6 +37,7 @@ import {
   findLiveRoutePenalty,
   lookupRouteHealthByIdentifiers,
   isAgentVisibleLivePenalty,
+  recordProviderHealthPenalty,
   recordRouteHealthPenalty,
   computeProviderHealthUpdate,
   computeRegistryEntryHealthReport,
@@ -1533,6 +1534,99 @@ test("recordRouteHealthPenalty_whenMapHasExistingEntry_overwritesItBeforePersist
   assert.deepEqual(snapshotAtPersist, newHealth);
   // And the post-call state matches.
   assert.deepEqual(modelRouteHealthMap.get("ollama-cloud/glm-5"), newHealth);
+});
+
+test("recordProviderHealthPenalty_whenCalled_writesHealthToProviderMap", () => {
+  // M73: provider-layer map-set invariant — the helper must write the new
+  // ProviderHealth entry under the exact providerID passed in, overwriting
+  // any prior entry. Symmetric with the M68 route-layer pin.
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const health: ProviderHealth = {
+    state: "no_credit",
+    until: 42_000_000,
+    retryCount: 3,
+  };
+
+  recordProviderHealthPenalty(
+    providerHealthMap,
+    modelRouteHealthMap,
+    "openrouter",
+    health,
+    () => {},
+  );
+
+  assert.deepEqual(providerHealthMap.get("openrouter"), health);
+});
+
+test("recordProviderHealthPenalty_whenCalled_invokesPersistFnWithBothMaps", () => {
+  // M73: persistence-pairing invariant — the helper MUST invoke persistFn
+  // with both the provider map AND the route map after writing the entry.
+  // Any provider-layer writer that does `providerHealthMap.set` without
+  // the persist call silently drops the penalty on plugin reload. A spy
+  // proves the pair is enforced here so future writers cannot forget it
+  // by inlining only half the pattern. Symmetric with the M68 route-layer
+  // persistence-pairing pin.
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    ["iflowcn/kimi-k2-0905", { state: "quota", until: 5_000, retryCount: 1 }],
+  ]);
+  let persistCalls = 0;
+  let observedProviderMap: Map<string, ProviderHealth> | null = null;
+  let observedRouteMap: Map<string, ModelRouteHealth> | null = null;
+
+  recordProviderHealthPenalty(
+    providerHealthMap,
+    modelRouteHealthMap,
+    "openrouter",
+    { state: "quota", until: 2_000, retryCount: 1 },
+    (providerMap, routeMap) => {
+      persistCalls += 1;
+      observedProviderMap = providerMap;
+      observedRouteMap = routeMap;
+    },
+  );
+
+  assert.equal(persistCalls, 1);
+  // Reference equality: the helper must pass the LIVE maps so the
+  // persister serializes the post-write state, not a stale snapshot.
+  // Critically, `modelRouteHealthMap` is passed through unchanged so a
+  // provider-layer write also re-snapshots any pending route-layer
+  // entries — the atomic-snapshot shape M68 established.
+  assert.equal(observedProviderMap, providerHealthMap);
+  assert.equal(observedRouteMap, modelRouteHealthMap);
+});
+
+test("recordProviderHealthPenalty_whenMapHasExistingEntry_overwritesItBeforePersistFires", () => {
+  // M73: write-ordering invariant — the providerHealthMap.set MUST happen
+  // BEFORE the persistFn invocation, otherwise the persister serializes
+  // the pre-write state and the new penalty is dropped on the next
+  // reload. A spy that reads the live map at call time proves the order.
+  // Symmetric with the M68 route-layer write-ordering pin.
+  const providerHealthMap = new Map<string, ProviderHealth>([
+    ["openrouter", { state: "quota", until: 500, retryCount: 1 }],
+  ]);
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const newHealth: ProviderHealth = {
+    state: "key_dead",
+    until: 9_000_000,
+    retryCount: 2,
+  };
+  let snapshotAtPersist: ProviderHealth | undefined;
+
+  recordProviderHealthPenalty(
+    providerHealthMap,
+    modelRouteHealthMap,
+    "openrouter",
+    newHealth,
+    (providerMap, _routeMap) => {
+      snapshotAtPersist = providerMap.get("openrouter");
+    },
+  );
+
+  // By the time the persister fires, the overwrite is already visible.
+  assert.deepEqual(snapshotAtPersist, newHealth);
+  assert.deepEqual(providerHealthMap.get("openrouter"), newHealth);
 });
 
 test("lookupRouteHealthByIdentifiers_whenEntryStoredUnderCompositeKey_returnsEntry", () => {
