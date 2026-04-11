@@ -236,6 +236,49 @@ test("initializeProviderHealthState preserves key_missing across persisted reloa
   });
 });
 
+test("initializeProviderHealthState_whenPersistedKeyMissingButCredentialNowPresent_reconcilesAwayStaleEntry", async () => {
+  // Regression: loadPersistedProviderHealth restores `key_missing` entries
+  // from disk with until=Infinity. The old early-exit
+  // `if (!providerHealthMap.has(providerID))` then skipped the hasKey check
+  // for any restored entry, permanently blocking the provider even after the
+  // user added valid credentials between plugin restarts. This test seeds a
+  // persisted `key_missing` entry, writes an auth.json that DOES contain a
+  // credential for that provider, and asserts the entry is reconciled away.
+  await withIsolatedHome(async (homeDirectory) => {
+    await writeAuthFile(homeDirectory, {
+      iflowcn: { type: "api", key: "real-key" },
+    });
+
+    await withFreshHealthState(async () => {
+      await writeFile(
+        providerHealthStatePath(),
+        JSON.stringify({
+          iflowcn: {
+            state: "key_missing",
+            until: "never",
+            retryCount: 0,
+          },
+        }),
+        "utf8",
+      );
+
+      const { initializeProviderHealthState } = await import("./model-registry.js");
+
+      const runtime = await initializeProviderHealthState([
+        buildModelRegistryEntry("qwen3-coder-plus", ["implementation_worker"], [
+          { provider: "iflowcn", model: "iflowcn/qwen3-coder-plus", priority: 1 },
+        ]),
+      ]);
+
+      assert.equal(
+        runtime.providerHealthMap.get("iflowcn"),
+        undefined,
+        "stale key_missing should be cleared when credential is now present",
+      );
+    });
+  });
+});
+
 test("initializeProviderHealthState_whenPersistedFileContainsRouteKeys_loadsThemIntoModelRouteHealthMap", async () => {
   // Regression: persistProviderHealth writes BOTH provider entries
   // (`"iflowcn"`) and route entries (`"iflowcn/qwen3-coder-plus"`) into

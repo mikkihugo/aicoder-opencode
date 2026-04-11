@@ -833,20 +833,37 @@ async function initializeProviderHealthState(
   const now = Date.now();
   let hasChanges = false;
   for (const providerID of knownProviders) {
-    // Only mark as key_missing if not already in a penalty state
-    if (!providerHealthMap.has(providerID)) {
-      const hasKey =
-        authKeys.get(providerID)?.hasCredential === true ||
-        providerHasEnvVarCredential(providerID);
+    const hasKey =
+      authKeys.get(providerID)?.hasCredential === true ||
+      providerHasEnvVarCredential(providerID);
 
-      if (!hasKey) {
-        providerHealthMap.set(providerID, {
-          state: "key_missing",
-          until: Number.POSITIVE_INFINITY,
-          retryCount: 0,
-        });
+    const existing = providerHealthMap.get(providerID);
+
+    if (existing?.state === "key_missing") {
+      // Reconcile stale `key_missing` state from disk: if a credential
+      // is NOW present (user added an API key or oauth token between
+      // plugin restarts), clear the entry so the provider becomes
+      // usable again. Previously `key_missing` had until=Infinity and
+      // was restored by loadPersistedProviderHealth — once set, it
+      // permanently blocked the provider until someone manually edited
+      // providerHealth.json, because the old early-exit (`if
+      // (!providerHealthMap.has(providerID))`) skipped the hasKey
+      // check whenever an entry already existed.
+      if (hasKey) {
+        providerHealthMap.delete(providerID);
         hasChanges = true;
       }
+      continue;
+    }
+
+    // Only mark as key_missing if not already in a penalty state
+    if (!existing && !hasKey) {
+      providerHealthMap.set(providerID, {
+        state: "key_missing",
+        until: Number.POSITIVE_INFINITY,
+        retryCount: 0,
+      });
+      hasChanges = true;
     }
   }
 
