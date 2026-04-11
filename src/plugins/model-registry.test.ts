@@ -979,6 +979,92 @@ test("computeRegistryEntryHealthReport_whenLongcatEntryIsUnprefixed_detectsRoute
   assert.equal(report.scope, "route");
 });
 
+test("selectBestModelForRoleAndTask_whenLongTaskPromptContainsBestForToken_keepsMatchingCandidate", () => {
+  // Headline regression (M46): the task-filter substring direction was
+  // reversed. `bf.toLowerCase().includes(lowerTask)` asked "does the
+  // short best_for label contain the entire long prompt" — virtually
+  // never true on real traffic, so the `best` branch filtered out
+  // every candidate on every realistic prompt and control always fell
+  // through to the last-resort scan (bypassing tier + billing ranking).
+  // Correct direction: does the task prompt mention the best_for
+  // label. This test pins that a realistic multi-sentence prompt that
+  // mentions "coding" as one word matches a candidate whose best_for
+  // includes "coding".
+  const now = Date.now();
+  const candidate: ModelRegistryEntry = {
+    id: "qwen3-coder",
+    enabled: true,
+    description: "qwen3-coder",
+    capability_tier: "strong",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: ["coding", "refactor"],
+    not_for: [],
+    default_roles: ["implementation_worker"],
+    provider_order: [
+      { provider: "ollama-cloud", model: "ollama-cloud/qwen3-coder", priority: 1 },
+    ],
+    notes: [],
+  };
+
+  const best = selectBestModelForRoleAndTask(
+    [candidate],
+    new Map(),
+    new Map(),
+    now,
+    null,
+    "Please investigate the streaming cancellation bug in our coding agent's token counter and land a minimal fix with a regression test.",
+    null,
+  );
+
+  assert.ok(best);
+  assert.equal(best.id, "qwen3-coder");
+});
+
+test("selectBestModelForRoleAndTask_whenTaskPromptMentionsNoBestForTokenOrRole_returnsNull", () => {
+  // Negative regression (M46): symmetric pin that the task filter
+  // STILL filters when there's genuinely no overlap. Previously the
+  // test suite couldn't tell if the filter was always-on or always-off
+  // because the existing happy-path tests passed via fall-through to
+  // last-resort. With the reversed direction, a prompt with no overlap
+  // against best_for or default_roles must return null — letting
+  // recommendTaskModelRoute's last-resort branch take over cleanly.
+  const now = Date.now();
+  const candidate: ModelRegistryEntry = {
+    id: "qwen3-coder",
+    enabled: true,
+    description: "qwen3-coder",
+    capability_tier: "strong",
+    cost_tier: "free",
+    billing_mode: "free",
+    latency_tier: "standard",
+    concurrency: 1,
+    quota_visibility: "system-observed",
+    best_for: ["coding", "refactor"],
+    not_for: [],
+    default_roles: ["implementation_worker"],
+    provider_order: [
+      { provider: "ollama-cloud", model: "ollama-cloud/qwen3-coder", priority: 1 },
+    ],
+    notes: [],
+  };
+
+  const best = selectBestModelForRoleAndTask(
+    [candidate],
+    new Map(),
+    new Map(),
+    now,
+    null,
+    "deploy the staging kubernetes cluster and rotate the database credentials",
+    null,
+  );
+
+  assert.equal(best, null);
+});
+
 test("selectBestModelForRoleAndTask_whenCandidateHasDeadVisibleRoutes_ranksLowerThanCandidateWithLiveRoutes", () => {
   // Regression (M31): ranking previously only counted provider-level
   // unhealthy routes. Two candidates at the same capability tier and

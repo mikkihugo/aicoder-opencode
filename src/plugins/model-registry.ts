@@ -1711,10 +1711,22 @@ export function selectBestModelForRoleAndTask(
     if (role && !entry.default_roles.includes(role)) return false;
 
     if (task) {
+      // Substring direction: the task is the (usually long) free-text
+      // description from the caller — `task.description ?? task.prompt`
+      // in `recommendTaskModelRoute`, often tens to hundreds of words.
+      // `best_for` entries and `default_roles` are short canonical
+      // labels ("coding", "architect", "long_context"). The old check
+      // `bf.toLowerCase().includes(lowerTask)` asked "does the short
+      // label contain the entire prompt" — virtually never true on real
+      // traffic — so the `best` branch silently filtered out every
+      // candidate on every non-toy prompt and control always fell
+      // through to `recommendTaskModelRoute`'s last-resort scan,
+      // bypassing tier + billing preference ranking. Reverse the
+      // direction: ask whether the task mentions the label.
       const lowerTask = task.toLowerCase();
       const matchesTask = entry.best_for.some((bf) =>
-        bf.toLowerCase().includes(lowerTask),
-      ) || entry.default_roles.some((r) => r.toLowerCase().includes(lowerTask));
+        lowerTask.includes(bf.toLowerCase()),
+      ) || entry.default_roles.some((r) => lowerTask.includes(r.toLowerCase()));
       if (!matchesTask) return false;
     }
 
