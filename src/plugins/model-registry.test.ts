@@ -15,6 +15,7 @@ import {
   findFirstHealthyVisibleRoute,
   findPreferredHealthyRoute,
   isAgentVisibleHealthState,
+  hasAgentVisiblePenalty,
   hasUsableCredential,
   isZeroTokenQuotaSignal,
   parseAgentFrontmatter,
@@ -851,6 +852,178 @@ test("buildProviderHealthSystemPrompt_whenQuotaAndKeyMissingMixed_omitsKeyMissin
     false,
     "key_missing label must not leak into agent-visible system prompt",
   );
+});
+
+test("hasAgentVisiblePenalty_whenBothMapsEmpty_returnsFalse", () => {
+  assert.equal(hasAgentVisiblePenalty(new Map(), new Map(), Date.now()), false);
+});
+
+test("hasAgentVisiblePenalty_whenOnlyKeyMissingEntries_returnsFalse", () => {
+  // Post-M58 cold-start shape: every uncredentialed curated provider
+  // lands in providerHealthMap with state=key_missing and until=Infinity.
+  // The caller must treat this as "nothing worth surfacing" so the
+  // agent-visible system-prompt builders can skip their work.
+  const now = Date.now();
+  const providerHealthMap = new Map([
+    [
+      "iflowcn",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+    [
+      "kimi-for-coding",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+  ]);
+  assert.equal(hasAgentVisiblePenalty(providerHealthMap, new Map(), now), false);
+});
+
+test("hasAgentVisiblePenalty_whenTransientProviderPenaltyLive_returnsTrue", () => {
+  // Any single live transient penalty in either map must flip the
+  // guard. Asserts each of the five transient states individually so a
+  // future additional transient state has to come through this test
+  // rather than being silently filtered out.
+  const now = Date.now();
+  const states = ["quota", "key_dead", "no_credit", "model_not_found", "timeout"] as const;
+  for (const state of states) {
+    const providerHealthMap = new Map([
+      ["opencode", { state, until: now + 60_000, retryCount: 1 }],
+    ]);
+    assert.equal(
+      hasAgentVisiblePenalty(providerHealthMap, new Map(), now),
+      true,
+      `transient state ${state} must be agent-visible`,
+    );
+  }
+});
+
+test("hasAgentVisiblePenalty_whenOnlyRouteLevelPenaltyLive_returnsTrue", () => {
+  // Route-level penalties count. M27 fix at a different call site: a
+  // zero-token-quota signal lands in modelRouteHealthMap only, and the
+  // agent needs to see the availability impact even though the
+  // provider map is clean.
+  const now = Date.now();
+  const modelRouteHealthMap = new Map([
+    [
+      "opencode/glm-5.1",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  assert.equal(
+    hasAgentVisiblePenalty(new Map(), modelRouteHealthMap, now),
+    true,
+  );
+});
+
+test("hasAgentVisiblePenalty_whenAllTransientEntriesAreExpired_returnsFalse", () => {
+  // Expired entries (until <= now) must not count. Without this guard
+  // the experimental.chat.system.transform hook would push a stale
+  // "alternative models" section even though expireHealthMaps has
+  // already finished sweeping.
+  const now = Date.now();
+  const providerHealthMap = new Map([
+    ["opencode", { state: "quota" as const, until: now - 1, retryCount: 1 }],
+  ]);
+  const modelRouteHealthMap = new Map([
+    [
+      "iflowcn/glm-5.1",
+      { state: "timeout" as const, until: now - 1, retryCount: 1 },
+    ],
+  ]);
+  assert.equal(
+    hasAgentVisiblePenalty(providerHealthMap, modelRouteHealthMap, now),
+    false,
+  );
+});
+
+test("hasAgentVisiblePenalty_whenKeyMissingAndLiveQuotaMixed_returnsTrue", () => {
+  // Mixed case: one permanent key_missing entry, one live transient
+  // quota entry. Must return true — the quota is agent-visible even
+  // though the key_missing is not.
+  const now = Date.now();
+  const providerHealthMap = new Map([
+    [
+      "kimi-for-coding",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+    ["opencode", { state: "quota" as const, until: now + 60_000, retryCount: 1 }],
+  ]);
+  assert.equal(hasAgentVisiblePenalty(providerHealthMap, new Map(), now), true);
+});
+
+test("buildAvailableModelsSystemPrompt_whenOnlyKeyMissingPenaltiesExist_returnsNull", () => {
+  // Headline integration pin for M60. Post-M58 the factory installs a
+  // key_missing entry for every uncredentialed curated provider. The
+  // pre-M60 guard `size === 0 && size === 0` was dead wiring
+  // (providerHealthMap is always non-empty), so the function fell
+  // through to a full registry walk and emitted an
+  // "Alternative models by role" section into the agent-visible system
+  // prompt on every single turn — even on a freshly-booted plugin
+  // with nothing actually wrong. Post-M60, `hasAgentVisiblePenalty`
+  // gates the block: when every entry is permanent plumbing, return null.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [{ provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 }],
+  );
+  const providerHealthMap = new Map([
+    [
+      "iflowcn",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+    [
+      "kimi-for-coding",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+  ]);
+  const prompt = buildAvailableModelsSystemPrompt(
+    [entry],
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+  assert.equal(
+    prompt,
+    null,
+    "alternative-models block must not fire when every health entry is permanent plumbing",
+  );
+});
+
+test("buildAvailableModelsSystemPrompt_whenQuotaAndKeyMissingMixed_returnsAlternatives", () => {
+  // Sibling pin for M60. One live transient quota (there IS a real
+  // problem) plus a bunch of permanent key_missing entries. The
+  // alternative-models block SHOULD fire — the agent needs to know
+  // what else is routable while the quota backoff is in effect.
+  const now = Date.now();
+  const entry: ModelRegistryEntry = buildModelRegistryEntry(
+    "glm-5.1",
+    ["architect"],
+    "frontier",
+    [{ provider: "opencode", model: "opencode/glm-5.1-free", priority: 1 }],
+  );
+  const providerHealthMap = new Map([
+    [
+      "iflowcn",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+    [
+      "kimi-for-coding",
+      { state: "key_missing" as const, until: Number.POSITIVE_INFINITY, retryCount: 0 },
+    ],
+  ]);
+  const prompt = buildAvailableModelsSystemPrompt(
+    [entry],
+    providerHealthMap,
+    new Map(),
+    now,
+  );
+  assert.notEqual(
+    prompt,
+    null,
+    "alternative-models block must fire when a live transient penalty exists",
+  );
+  assert.match(prompt as string, /architect: glm-5\.1/);
 });
 
 test("buildAvailableModelsSystemPrompt_whenPrimaryRouteIsHiddenPaid_walksToVisibleSibling", () => {

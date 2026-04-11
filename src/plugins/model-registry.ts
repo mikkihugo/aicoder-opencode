@@ -1436,6 +1436,69 @@ export function isAgentVisibleHealthState(state: ProviderHealthState): boolean {
   return state !== "key_missing";
 }
 
+/**
+ * Return `true` iff at least one health map contains a non-expired entry
+ * whose state is agent-visible (i.e. not `key_missing`).
+ *
+ * Exists because multiple agent-visible-prompt builders guard their work
+ * with a `providerHealthMap.size === 0 && modelRouteHealthMap.size === 0`
+ * early exit. That guard was written pre-M58, when the only way a
+ * provider landed in the map was a live failure. Post-M58 (commit
+ * `9b125b5`), `initializeProviderHealthState` installs a `key_missing`
+ * entry with `until: Number.POSITIVE_INFINITY` for every uncredentialed
+ * curated provider at boot — typically 15–25 entries on a default
+ * install. `providerHealthMap.size === 0` is therefore effectively never
+ * true in production, and the early exit is dead wiring.
+ *
+ * M59 partially patched this by filtering `key_missing` inside
+ * `buildProviderHealthSystemPrompt`, so that builder returns `null` when
+ * nothing is agent-visible. But its sibling `buildAvailableModelsSystemPrompt`
+ * still trips through a full registry walk on every turn and emits an
+ * "Alternative models by role" section into the system prompt — a block
+ * whose entire purpose is "there's a problem, here's what you can try
+ * instead." When the ONLY entries in the health maps are key_missing
+ * (permanent plumbing, not a transient failure the agent can route
+ * around), there IS no problem the agent needs alternatives for, and
+ * the block is pure system-prompt noise: it fires on every turn of a
+ * freshly-booted plugin with nothing actually wrong.
+ *
+ * The `experimental.chat.system.transform` hook has the same dead guard
+ * at the hook-level early exit. Both sites should consult this helper
+ * instead of the raw `.size` check so the "nothing worth surfacing"
+ * short-circuit fires whenever every entry is permanent plumbing.
+ *
+ * Args:
+ *   providerHealthMap: Live provider-keyed health map.
+ *   modelRouteHealthMap: Live composite-route-keyed health map.
+ *   now: Wall-clock ms — entries with `until <= now` are treated as
+ *     already-expired and ignored.
+ *
+ * Returns:
+ *   `true` if at least one entry in either map satisfies
+ *   `health.until > now && isAgentVisibleHealthState(health.state)`,
+ *   `false` otherwise. Empty maps return `false`. Maps that only contain
+ *   `key_missing` entries return `false`. Maps that contain only expired
+ *   entries return `false`. Any single live transient penalty anywhere
+ *   returns `true`.
+ */
+export function hasAgentVisiblePenalty(
+  providerHealthMap: Map<string, ProviderHealth>,
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  now: number,
+): boolean {
+  for (const health of providerHealthMap.values()) {
+    if (health.until > now && isAgentVisibleHealthState(health.state)) {
+      return true;
+    }
+  }
+  for (const health of modelRouteHealthMap.values()) {
+    if (health.until > now && isAgentVisibleHealthState(health.state)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function healthStateLabel(state: ProviderHealthState): string {
   switch (state) {
     case "quota": return "QUOTA BACKOFF";
@@ -1569,10 +1632,19 @@ export function buildAvailableModelsSystemPrompt(
   modelRouteHealthMap: Map<string, ModelRouteHealth>,
   now: number,
 ): string | null {
-  // Fire whenever EITHER map has entries. Route-only penalties (from
-  // M27) need the fallback "what else is available" view just as much
-  // as provider-level ones.
-  if (providerHealthMap.size === 0 && modelRouteHealthMap.size === 0) {
+  // Fire only when at least one AGENT-VISIBLE penalty exists. Pre-M58
+  // the narrow `size === 0` check was sufficient because the only way
+  // an entry reached either map was through a live failure, but post-M58
+  // `providerHealthMap` always contains a `key_missing` entry for every
+  // uncredentialed curated provider (typically 15–25 on a default
+  // install). `size === 0` is effectively never true, so every single
+  // agent turn used to fall through to a full registry walk and push an
+  // "Alternative models by role" section into the system prompt even
+  // when nothing was actually wrong — the block's entire purpose is
+  // "here's what to try when something breaks" and key_missing isn't
+  // something the agent can route around. See `hasAgentVisiblePenalty`
+  // docstring for the full rationale.
+  if (!hasAgentVisiblePenalty(providerHealthMap, modelRouteHealthMap, now)) {
     return null;
   }
 
@@ -3002,13 +3074,17 @@ export const ModelRegistryPlugin: Plugin = async () => {
           output.system.push(buildRoutingContextSystemPrompt(modelRegistryEntry));
         }
 
-        // Only inject health/available-models sections when there are active
-        // penalties. Route-level penalties count too — previously this guard
-        // was `providerHealthMap.size === 0` which skipped the entire block
-        // whenever only `modelRouteHealthMap` had entries, silently hiding
-        // route-specific failures (model_not_found, route-level quota from
-        // zero-token completion, route-level timeout from hang detector).
-        if (providerHealthMap.size === 0 && modelRouteHealthMap.size === 0) {
+        // Only inject health/available-models sections when there are
+        // AGENT-VISIBLE active penalties. Route-level penalties count too —
+        // the original pre-M27 guard was `providerHealthMap.size === 0`
+        // which silently hid route-level failures, and the pre-M60 guard
+        // `size === 0 && size === 0` became dead wiring post-M58 when
+        // `key_missing` entries started permanently populating
+        // providerHealthMap for every uncredentialed curated provider
+        // (typically 15–25 on a default install). Using
+        // `hasAgentVisiblePenalty` restores the original intent: skip the
+        // entire block whenever nothing the agent can act on is active.
+        if (!hasAgentVisiblePenalty(providerHealthMap, modelRouteHealthMap, now)) {
           return;
         }
 
