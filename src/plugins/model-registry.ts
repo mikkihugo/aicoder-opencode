@@ -948,6 +948,66 @@ export function buildRoutingContextSystemPrompt(modelRegistryEntry: ModelRegistr
  *
  * This helper normalizes in one place so the write-vs-read key shape can
  * never drift again. Kept as a pure function for direct unit testing.
+ *
+ * ## Drift surfaces (M115 PDD)
+ *
+ * One pre-existing pin (three-assertion, `_whenRegistryEntryIsUnprefixed_
+ * producesCompositeKey`) covers three happy branches: unprefixed longcat
+ * wraps, already-composite ollama-cloud passes through, multi-segment
+ * openrouter aggregator passes through. It doesn't exercise three
+ * orthogonal invariants that each correspond to a plausible "defensive
+ * simplification" refactor:
+ *
+ * 1. **Prefix-collision safety: the `startsWith` check uses
+ *    `${provider}/` WITH the trailing slash.** Without the trailing
+ *    slash, a provider/model pair whose model id *begins with* the
+ *    provider name but is NOT actually prefixed by `provider/` would
+ *    be misclassified as already-composite and pass through verbatim.
+ *    Concrete case: provider `"llama"` with model `"llama3-8b"` —
+ *    `"llama3-8b".startsWith("llama")` is `true` but `"llama3-8b"
+ *    .startsWith("llama/")` is `false`. The trailing slash forces a
+ *    boundary check so only true prefixes short-circuit. A refactor
+ *    that "simplified" to `startsWith(provider)` for "fewer allocs"
+ *    would turn the `llama`/`llama3-8b` case into a bare-key write
+ *    that `classifyPersistedHealthKey` misclassifies as `provider`,
+ *    collapsing the route penalty into a provider-wide ban. The
+ *    pre-existing pin uses longcat / ollama-cloud / openrouter
+ *    combinations where no name-collision exists, so this surface is
+ *    unpinned.
+ *
+ * 2. **Mismatched-prefix composites wrap, not pass through.** The
+ *    check is `startsWith(${provider}/)` — not a generic "has any
+ *    slash". A model id that happens to be composite but whose prefix
+ *    is a DIFFERENT provider (e.g. provider `"cloudflare-ai-gateway"`
+ *    with model `"openrouter/xiaomi/mimo"`, which arises when the
+ *    registry threads an aggregator-resolved id through a
+ *    cloudflare-fronted gateway) must still be wrapped to the
+ *    CURRENT provider's namespace, producing
+ *    `"cloudflare-ai-gateway/openrouter/xiaomi/mimo"` — otherwise the
+ *    penalty recorded under the gateway's provider id would land on
+ *    the wrong composite key and be invisible to the gateway's health
+ *    readers. A refactor to `.includes("/")` or `.split("/").length
+ *    >= 2` as a "simpler composite detector" would pass the
+ *    pre-existing pin (all three assertions have either no slash or
+ *    the matching provider prefix) but would return the mismatched
+ *    composite verbatim. Pin: explicit mismatched-prefix wrap case.
+ *
+ * 3. **Idempotency fixed-point: applying the helper twice equals
+ *    applying it once.** Writers and readers routinely round-trip keys
+ *    through the helper (lookupRouteHealthByIdentifiers →
+ *    buildRouteHealthEntry → composeRouteKey again), so
+ *    `composeRouteKey({provider, model: composeRouteKey({provider,
+ *    model})}) === composeRouteKey({provider, model})` must hold for
+ *    every input. A refactor that dropped the `startsWith` short-
+ *    circuit entirely (always wrapping) would break idempotency: the
+ *    first call produces `"openrouter/xiaomi/mimo"`, the second call
+ *    on that result produces `"openrouter/openrouter/xiaomi/mimo"`.
+ *    The pre-existing pin's three assertions all assert single-call
+ *    outputs — they never compose the helper with itself. A dedicated
+ *    idempotency pin catches any refactor that breaks the fixed-point
+ *    contract, including the "always wrap" and "always slash-split"
+ *    simplifications that surfaces 1 and 2 independently catch for
+ *    their specific branches.
  */
 export function composeRouteKey(providerRoute: { provider: string; model: string }): string {
   if (providerRoute.model.startsWith(`${providerRoute.provider}/`)) {

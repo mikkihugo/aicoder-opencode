@@ -2413,6 +2413,69 @@ test("composeRouteKey_whenRegistryEntryIsUnprefixed_producesCompositeKey", () =>
   );
 });
 
+test("composeRouteKey_whenProviderNameIsPrefixOfModelIdWithoutSlash_wrapsInsteadOfPassingThrough", () => {
+  // M115 pin: the `startsWith(${provider}/)` check MUST include the
+  // trailing slash — otherwise a provider whose name is a literal
+  // prefix of a sibling model id (e.g. provider `"llama"` with model
+  // `"llama3-8b"`) would be misclassified as already-composite and
+  // pass through verbatim, producing a bare-key write that
+  // `classifyPersistedHealthKey` misclassifies as a provider id.
+  // The pre-existing pin's three cases (longcat/LongCat, ollama-
+  // cloud/glm-5, openrouter/xiaomi/mimo) have no name-collision, so
+  // this surface is only caught by an explicit collision pin.
+  assert.equal(
+    composeRouteKey({ provider: "llama", model: "llama3-8b" }),
+    "llama/llama3-8b",
+  );
+});
+
+test("composeRouteKey_whenModelHasMismatchedProviderPrefix_wrapsInCurrentProviderNamespace", () => {
+  // M115 pin: a model id that is composite but whose prefix is a
+  // DIFFERENT provider (aggregator-resolved id threaded through a
+  // gateway) must still be wrapped in the CURRENT provider's
+  // namespace, NOT passed through as the foreign composite. A
+  // refactor to `.includes("/")` or `.split("/").length >= 2` as a
+  // "simpler composite detector" would return the foreign composite
+  // verbatim and the penalty recorded under the current provider's
+  // id would land on the wrong composite key — invisible to the
+  // current provider's health readers. The pre-existing pin never
+  // tests a mismatched prefix.
+  assert.equal(
+    composeRouteKey({
+      provider: "cloudflare-ai-gateway",
+      model: "openrouter/xiaomi/mimo-v2-pro",
+    }),
+    "cloudflare-ai-gateway/openrouter/xiaomi/mimo-v2-pro",
+  );
+});
+
+test("composeRouteKey_whenAppliedTwice_isIdempotentFixedPoint", () => {
+  // M115 pin: writers and readers routinely round-trip route keys
+  // through the helper (lookupRouteHealthByIdentifiers →
+  // buildRouteHealthEntry → composeRouteKey again). The idempotency
+  // contract — applying the helper twice equals applying it once —
+  // must hold for every input shape or those round trips diverge.
+  // A refactor that dropped the `startsWith` short-circuit (always
+  // wrap) would break idempotency by double-prefixing on the second
+  // call. The pre-existing pin's assertions all check single-call
+  // outputs and never compose the helper with itself.
+  const inputs: { provider: string; model: string }[] = [
+    { provider: "longcat", model: "LongCat-Flash-Chat" },
+    { provider: "ollama-cloud", model: "ollama-cloud/glm-5" },
+    { provider: "openrouter", model: "xiaomi/mimo-v2-pro" },
+    { provider: "openrouter", model: "openrouter/xiaomi/mimo-v2-pro" },
+  ];
+  for (const input of inputs) {
+    const once = composeRouteKey(input);
+    const twice = composeRouteKey({ provider: input.provider, model: once });
+    assert.equal(
+      twice,
+      once,
+      `composeRouteKey must be idempotent for ${JSON.stringify(input)}`,
+    );
+  }
+});
+
 test("isAgentVisibleLivePenalty_whenEntryLiveAndAgentVisible_returnsTrue", () => {
   // M69: canonical happy path — a live transient penalty that the agent
   // can route around (quota, key_dead, no_credit, model_not_found, timeout)
