@@ -6743,6 +6743,111 @@ test("filterProviderModelsByRouteHealth_whenEntryPasses_preservesOriginalModelVa
   );
 });
 
+// M103: drift pins for `expireHealthMaps` — the pre-existing pins cover
+// the mixed expired+live sweep on both maps and the infinity preservation
+// case, but leave three independent drift surfaces unprotected: the
+// `<= now` provider boundary (inclusive), the `<= now` route boundary
+// (inclusive), and the preserved-entry retryCount invariant on the
+// non-expired branch. Each new pin is fired uniquely by exactly one
+// sabotage on a distinct surface of the helper body.
+
+test("expireHealthMaps_whenProviderUntilExactlyEqualsNow_dropsEntryAtInclusiveBoundary", () => {
+  // Pins: provider-map boundary comparison is `<= now`, not `< now`.
+  // An entry whose `until === now` must be dropped on the same tick —
+  // the penalty window closes the moment wall-clock reaches the
+  // stamped deadline, not one tick later. Pre-existing pin 1 uses
+  // `now - 1` so a `<= now` → `< now` drift is not caught there.
+  const now = Date.now();
+  const providerHealthMap = new Map([
+    ["iflowcn", { state: "quota" as const, until: now, retryCount: 1 }],
+  ]);
+  const modelRouteHealthMap = new Map([
+    // Non-expired route so the route loop has work to do (prevents
+    // an accidental early-return sabotage from passing this pin via
+    // an empty-route shortcut).
+    [
+      "openrouter/still-live",
+      { state: "timeout" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+
+  expireHealthMaps(providerHealthMap, modelRouteHealthMap, now);
+
+  assert.equal(
+    providerHealthMap.has("iflowcn"),
+    false,
+    "provider entry with until === now must be dropped at the inclusive boundary",
+  );
+});
+
+test("expireHealthMaps_whenRouteUntilExactlyEqualsNow_dropsEntryAtInclusiveBoundary", () => {
+  // Pins: route-map boundary comparison is `<= now`, independently
+  // of the provider-map boundary. The two loops have two separate
+  // `<=` comparisons, and a partial refactor could drift just one
+  // of them. Pre-existing pin 1 uses `now - 1` on the route side
+  // so a `<= now` → `< now` drift on only the route loop is
+  // invisible without this dedicated pin.
+  const now = Date.now();
+  const providerHealthMap = new Map([
+    // Non-expired provider so the provider loop has work (mirror of pin A).
+    [
+      "ollama-cloud",
+      { state: "quota" as const, until: now + 60_000, retryCount: 1 },
+    ],
+  ]);
+  const modelRouteHealthMap = new Map([
+    [
+      "iflowcn/qwen3-coder-plus",
+      { state: "model_not_found" as const, until: now, retryCount: 1 },
+    ],
+  ]);
+
+  expireHealthMaps(providerHealthMap, modelRouteHealthMap, now);
+
+  assert.equal(
+    modelRouteHealthMap.has("iflowcn/qwen3-coder-plus"),
+    false,
+    "route entry with until === now must be dropped at the inclusive boundary",
+  );
+});
+
+test("expireHealthMaps_whenProviderEntryIsNotExpired_preservesRetryCountForEscalationLadder", () => {
+  // Pins: non-expired entries are preserved UNCHANGED. The helper
+  // has no `else` clause — surviving entries must be walked over
+  // and left byte-identical. `retryCount` in particular must
+  // survive, because `computeProviderHealthUpdate` reads the
+  // existing retryCount to compute the next-penalty escalation
+  // duration on the next penalty hit. A refactor that adds an
+  // `else { set(...) }` clause "to normalise" preserved entries
+  // (e.g. resetting retryCount to zero on every sweep) would
+  // silently flatten the penalty escalation ladder on every
+  // `experimental.chat.system.transform` invocation. Pre-existing
+  // pins assert `.has(...)` on surviving entries but never read
+  // retryCount back, so this drift is structurally uncovered.
+  const now = Date.now();
+  const providerHealthMap = new Map([
+    [
+      "iflowcn",
+      { state: "quota" as const, until: now + 60 * 60 * 1000, retryCount: 5 },
+    ],
+  ]);
+
+  expireHealthMaps(providerHealthMap, new Map(), now);
+
+  const preserved = providerHealthMap.get("iflowcn");
+  assert.ok(preserved, "non-expired entry must still be present");
+  assert.equal(
+    preserved.retryCount,
+    5,
+    "retryCount on preserved entry must be byte-identical — escalation state must not be reset",
+  );
+  assert.equal(
+    preserved.state,
+    "quota",
+    "state on preserved entry must be byte-identical",
+  );
+});
+
 test("filterProviderModelsByRouteHealth_whenCalled_doesNotMutateInputProviderModels", () => {
   // Pins: `providerModels` is read-only. The `provider.models` hook
   // hands us the opencode-owned map by reference; a refactor that

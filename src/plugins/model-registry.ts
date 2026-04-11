@@ -1401,6 +1401,56 @@ export function isFallbackBlocked(providerID: string, modelID: string): boolean 
  * memory OR in the persisted `providerHealth.json` file (which is
  * rewritten from these maps whenever an error event fires).
  *
+ * Three independent drift surfaces in this tiny body that are NOT
+ * covered by the pre-existing mixed-expiry and infinity-preservation
+ * pins:
+ *
+ *  1. **Provider boundary is `<= now` (inclusive).** An entry with
+ *     `until === now` is treated as expired and deleted — the
+ *     penalty window closes the moment wall-clock reaches the
+ *     stamped deadline, not one tick later. A refactor to `< now`
+ *     (an easy "strictly expired" mis-read of the semantics) would
+ *     leak boundary-exact entries: the penalty window would extend
+ *     one tick past its nominal end, and on a fast-retry code path
+ *     the just-expired provider would still look dead to
+ *     `isProviderHealthy` (which uses the same `<= now` convention
+ *     at `src/plugins/model-registry.ts`), causing a stale-penalty
+ *     phantom. Pre-existing pin 1 uses `now - 1` deadlines so the
+ *     `< now` drift still expires those entries; the boundary pin
+ *     is the only way to catch the inclusivity invariant.
+ *
+ *  2. **Route boundary is `<= now` (inclusive) — independently of
+ *     the provider boundary.** The two loops have two independent
+ *     `<= now` comparisons, and both must stay inclusive. A drift
+ *     on just the route loop (e.g. a partial refactor that only
+ *     touches the second comparison) would leak route-map
+ *     boundary-exact entries while leaving provider-map expiry
+ *     correct — a split-brain state where route-level penalties
+ *     linger one tick past their deadline while provider-level
+ *     penalties expire promptly. Pre-existing pin 1 uses `now - 1`
+ *     on both maps, so neither drift is caught structurally; the
+ *     route boundary needs its own dedicated pin that is disjoint
+ *     from the provider boundary pin.
+ *
+ *  3. **Non-expired entries are preserved UNCHANGED — the helper
+ *     touches nothing on the surviving branch.** There is no
+ *     `else` clause; entries whose `until > now` are walked over
+ *     and left byte-identical. `retryCount` in particular must
+ *     survive, because `computeProviderHealthUpdate` reads the
+ *     existing `retryCount` on the next penalty hit to compute the
+ *     next-penalty duration (retry escalation). A refactor that
+ *     added an `else { set(...) }` clause "to normalise" preserved
+ *     entries — e.g. resetting `retryCount` to zero on every sweep,
+ *     capping it, or rebuilding the object with `{ ...health }` —
+ *     would silently undo escalation state on every
+ *     `experimental.chat.system.transform` invocation (once per
+ *     chat turn). The penalty escalation ladder would flatten to
+ *     "always first-attempt duration" because every previous
+ *     retryCount would be zeroed before the next penalty hit.
+ *     Pre-existing pins assert `.has(...)` on surviving entries
+ *     but never read `retryCount` back, so this drift class has
+ *     zero structural coverage.
+ *
  * Args:
  *   providerHealthMap: In-place map of provider-id → health (mutated).
  *   modelRouteHealthMap: In-place map of composite-route → health (mutated).
