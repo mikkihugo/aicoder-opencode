@@ -10,6 +10,11 @@ maintenance_launcher:
   mode: maintenance
   executable_path: /home/mhugo/.npm-global/bin/opencode
 
+maintenance_model_routes:
+  - opencode-go/glm-5.1
+  - kimi-for-coding/kimi-k2-thinking
+  - minimax/MiniMax-M2.7
+
 notes:
   - aicoder-opencode is the control plane and supervises itself as a target.
   - maintenance and workflow skills live in targets/aicoder-opencode/overlay/.

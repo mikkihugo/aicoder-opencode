@@ -1,5 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "default_agent": "implementation_lead",
   "watcher": {
     "ignore": [
       ".git/**",
@@ -9,16 +10,18 @@
       "dist/**"
     ]
   },
-  "plugin": [
-    "file:./.opencode/plugins/model-registry.ts"
-  ],
   "server": {
     "port": 8080,
   },
+  "plugin": [
+    "file:./.opencode/plugins/model-registry"
+  ],
   "instructions": [
     "./AGENTS.md",
     "./docs/ARCHITECTURE.md",
     "./docs/TARGET_MODEL.md",
+    "./docs/OPENCODE_AGENT_POLICY.md",
+    "./docs/AGENT_ROLES.md",
     "./.agents/skills/control-plane-development-base/SKILL.md",
     "./.agents/skills/control-plane-maintenance-base/SKILL.md",
     "./targets/aicoder-opencode/overlay/.agents/skills/aicoder-unblock-and-patch/SKILL.md",
