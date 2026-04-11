@@ -1023,6 +1023,70 @@ export function lookupRouteHealthByIdentifiers(
  *   The `ModelRouteHealth` entry when one exists AND `until > now`
  *   (penalty still active). `null` when the entry is absent or its
  *   penalty window has already elapsed.
+ *
+ * ## Drift surfaces (M110 PDD)
+ *
+ * The four pre-existing pins (empty map, expired-at-boundary, live
+ * entry, composite-idempotence) assert exclusively on return-value
+ * shape via `deepEqual` / `equal`. They do NOT assert HOW the return
+ * value is produced, the map state after the call, or the exact
+ * return-type discriminant. Three orthogonal surfaces remain unpinned:
+ *
+ * 1. **Return-by-reference, not a defensive copy.** The live-entry
+ *    path returns the exact `ModelRouteHealth` object that
+ *    `recordRouteHealthPenalty` / `recordModelNotFoundRouteHealthByIdentifiers`
+ *    installed into the map. Callers rely on this identity to detect
+ *    "same penalty as last check" without deep-comparing — the
+ *    `computeRegistryEntryHealthReport` reader captures the reference
+ *    at tool-call time so a later retry-count bump by
+ *    `buildRouteHealthEntry` is visible through the same handle. A
+ *    future regression that spread `{...routeHealth}` for "safety" (a
+ *    plausible defensive refactor) would break reference equality
+ *    while still passing every pre-existing `deepEqual` pin. This is
+ *    the M104 #1 surface mirrored to the route level — the parallel
+ *    dual-map twin pattern. Pin: strict `===` identity check against
+ *    the inserted object.
+ *
+ * 2. **Read-only map — no mutation on expired hit.** The expired
+ *    branch returns `null` via the combined `!routeHealth || routeHealth.until <= now`
+ *    short-circuit and leaves the map untouched. Deletion is the job
+ *    of `expireHealthMaps` (called once per chat turn by
+ *    `experimental.chat.system.transform`), NOT findLive*. Keeping
+ *    findLive read-only matters because callers read the same map
+ *    many times per turn for different routes; if findLive deleted
+ *    the expired entry on first touch, the retryCount escalation
+ *    ladder would reset mid-turn whenever an unrelated caller happened
+ *    to probe an expired entry before the next real penalty, AND
+ *    parallel provider-map readers would see an inconsistent dual-map
+ *    snapshot. A regression that "helpfully" cleaned up on read
+ *    would still pass the existing `result === null` return-value
+ *    assertion in pin #2. This is the M104 #2 surface mirrored to
+ *    the route level. Pin: after an expired-entry call, the map
+ *    still contains the expired entry at its original composite key.
+ *
+ * 3. **Multi-segment non-prefixed model is wrapped, not passed
+ *    through.** The pre-existing composite-idempotence pin (#4) uses
+ *    `{provider: "ollama-cloud", model: "ollama-cloud/glm-5"}` — the
+ *    model already carries the exact provider prefix, so
+ *    `composeRouteKey` leaves it alone. The INVERSE case — a model
+ *    that already contains `/` but whose leading segment is NOT the
+ *    provider ID — is unpinned. This matters for openrouter
+ *    aggregator routes: when the runtime opencode session passes
+ *    `{provider: "openrouter", model: "anthropic/claude-3.5-sonnet"}`,
+ *    the stored key must be `"openrouter/anthropic/claude-3.5-sonnet"`
+ *    (three segments, two slashes) — `composeRouteKey` wraps because
+ *    `"anthropic/claude-3.5-sonnet".startsWith("openrouter/")` is
+ *    false. A plausible "simplification" refactor to
+ *    `if (providerRoute.model.includes("/")) return providerRoute.model;`
+ *    (incorrectly treating "already has a slash" as "already composite")
+ *    would silently skip the wrap and produce the bare `"anthropic/claude-3.5-sonnet"`
+ *    key, which misses the stored `"openrouter/anthropic/claude-3.5-sonnet"`
+ *    entry. Pin #4 (prefix-matches case) would still pass the
+ *    refactor because both the old and new branches leave the model
+ *    untouched. The inverse case is the only one that discriminates.
+ *    `classifyPersistedHealthKey`'s docstring explicitly flags this
+ *    class of refactor as a load-bearing silent drift; this pin
+ *    tripwires it at the `findLiveRoutePenalty` reader boundary.
  */
 export function findLiveRoutePenalty(
   modelRouteHealthMap: Map<string, ModelRouteHealth>,

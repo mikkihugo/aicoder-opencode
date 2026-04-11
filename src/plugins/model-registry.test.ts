@@ -2791,6 +2791,88 @@ test("findLiveRoutePenalty_whenModelIsAlreadyCompositePrefixed_doesNotDoubleNest
   assert.deepEqual(result, { state: "model_not_found", until: 9_000_000, retryCount: 1 });
 });
 
+test("findLiveRoutePenalty_whenEntryLive_returnsTheInsertedObjectByReferenceIdentity", () => {
+  // M110 drift pin 1/3 — return-by-reference, NOT a defensive copy.
+  // Callers rely on reference identity to detect "same penalty as last
+  // check" without deep-comparing, and to see later retry-count bumps
+  // through the captured handle. A `{...routeHealth}` spread for
+  // "safety" would still pass the pre-existing deepEqual pin but break
+  // `===` identity. Parallel twin of the M104 provider-level surface.
+  const insertedEntry: ModelRouteHealth = {
+    state: "quota",
+    until: 9_000_000,
+    retryCount: 4,
+  };
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    ["ollama-cloud/glm-5", insertedEntry],
+  ]);
+  const result = findLiveRoutePenalty(
+    modelRouteHealthMap,
+    "ollama-cloud",
+    "glm-5",
+    1_000_000,
+  );
+  assert.equal(result, insertedEntry);
+});
+
+test("findLiveRoutePenalty_whenEntryExpired_leavesMapUntouched", () => {
+  // M110 drift pin 2/3 — read-only on expired hit. Deletion is the
+  // job of `expireHealthMaps`, NOT findLive. A "helpful" cleanup-on-
+  // read regression would still pass pin #2 (which only asserts the
+  // null return) but would reset the retry-count escalation ladder
+  // mid-turn. Parallel twin of the M104 provider-level surface.
+  const expiredEntry: ModelRouteHealth = {
+    state: "quota",
+    until: 1_000_000,
+    retryCount: 2,
+  };
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    ["ollama-cloud/glm-5", expiredEntry],
+  ]);
+  const result = findLiveRoutePenalty(
+    modelRouteHealthMap,
+    "ollama-cloud",
+    "glm-5",
+    1_000_000,
+  );
+  assert.equal(result, null);
+  // The expired entry MUST still be in the map under its original key.
+  assert.equal(modelRouteHealthMap.size, 1);
+  assert.equal(modelRouteHealthMap.get("ollama-cloud/glm-5"), expiredEntry);
+});
+
+test("findLiveRoutePenalty_whenMultiSegmentModelWithoutMatchingPrefix_wrapsIntoCompositeKey", () => {
+  // M110 drift pin 3/3 — multi-segment non-prefixed model MUST be
+  // wrapped, not passed through. Openrouter aggregator routes present
+  // model ids like `"anthropic/claude-3.5-sonnet"` under
+  // `provider="openrouter"`; the stored key is
+  // `"openrouter/anthropic/claude-3.5-sonnet"` (three segments). The
+  // pre-existing composite-idempotence pin uses a model whose prefix
+  // already matches the provider, so wrap vs no-wrap looks identical.
+  // A `if (model.includes("/")) return model;` simplification of
+  // `composeRouteKey` would silently miss the stored entry for the
+  // inverse case. This pin is the tripwire.
+  const openrouterAggregatorEntry: ModelRouteHealth = {
+    state: "model_not_found",
+    until: 9_000_000,
+    retryCount: 1,
+  };
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>([
+    ["openrouter/anthropic/claude-3.5-sonnet", openrouterAggregatorEntry],
+  ]);
+  const result = findLiveRoutePenalty(
+    modelRouteHealthMap,
+    "openrouter",
+    "anthropic/claude-3.5-sonnet",
+    1_000_000,
+  );
+  assert.deepEqual(result, {
+    state: "model_not_found",
+    until: 9_000_000,
+    retryCount: 1,
+  });
+});
+
 test("findLiveProviderPenalty_whenMapEmpty_returnsNull", () => {
   // M71 boundary pin: no entry → null regardless of `now`.
   const providerHealthMap = new Map<string, ProviderHealth>();
