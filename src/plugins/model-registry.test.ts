@@ -50,6 +50,7 @@ import {
   recordProviderHealthPenalty,
   recordRouteHealthByIdentifiers,
   recordRouteHealthPenalty,
+  renderAvailableModelsSystemPromptBody,
   computeProviderHealthUpdate,
   computeRegistryEntryHealthReport,
   expireHealthMaps,
@@ -5911,4 +5912,52 @@ test("recommendTaskModelRoute_whenComplexityTierFullyDownButSiblingTierHealthy_d
 
   assert.equal(decision.selectedModelRoute, "opencode/glm-4.7-free");
   assert.match(decision.reasoning, /outside complexity tier/);
+});
+
+// M92 pin A — role-row cap: the slice cap on rendered roles must stay
+// at `MAX_AVAILABLE_MODELS_ROLES_RENDERED` (8). A caller that lowers the
+// cap (e.g. back to an inline `.slice(0, 3)`) or raises it (no cap at
+// all) drifts from the system-prompt contract and flips this pin.
+test("renderAvailableModelsSystemPromptBody_whenMapExceedsCap_rendersExactlyEightRoleRows", () => {
+  const roleToModels = new Map<string, string[]>();
+  for (let index = 0; index < 12; index += 1) {
+    roleToModels.set(`role_${index}`, [`model_${index} (paid_api)`]);
+  }
+
+  const rendered = renderAvailableModelsSystemPromptBody(roleToModels);
+
+  assert.ok(rendered !== null);
+  const allLines = rendered.split("\n");
+  // The section has one header line plus one line per rendered role.
+  // Count total lines minus the header rather than filtering by bullet
+  // char so pin B (row format) can fail independently of this pin.
+  assert.equal(allLines.length - 1, 8);
+});
+
+// M92 pin B — row format: every rendered row must be exactly
+// `- ${role}: ${models.join(", ")}`. A caller that switches the bullet
+// char, the colon, or the join separator flips this pin without
+// touching the cap pin or the null-sentinel pin.
+test("renderAvailableModelsSystemPromptBody_whenSingleRoleWithTwoModels_rendersExactBulletFormat", () => {
+  const roleToModels = new Map<string, string[]>([
+    ["planner", ["alpha-model (free)", "beta-model (paid_api)"]],
+  ]);
+
+  const rendered = renderAvailableModelsSystemPromptBody(roleToModels);
+
+  assert.ok(rendered !== null);
+  const rowLines = rendered.split("\n").filter((line) => line.startsWith("- "));
+  assert.deepEqual(rowLines, [
+    "- planner: alpha-model (free), beta-model (paid_api)",
+  ]);
+});
+
+// M92 pin C — empty-input null sentinel: an empty map must return
+// `null`, not an empty string and not a header-only section. The outer
+// caller relies on `null` to filter the section out of the final
+// assembled prompt without leaving a blank header behind.
+test("renderAvailableModelsSystemPromptBody_whenMapIsEmpty_returnsNullNotEmptyString", () => {
+  const rendered = renderAvailableModelsSystemPromptBody(new Map());
+
+  assert.equal(rendered, null);
 });

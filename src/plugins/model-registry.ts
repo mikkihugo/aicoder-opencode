@@ -28,6 +28,7 @@ const MODEL_REGISTRY_LOAD_ERROR_MESSAGE =
 const ACTIVE_MODEL_ROUTING_CONTEXT_HEADER = "## Active model routing context";
 const PROVIDER_QUOTA_STATUS_HEADER = "## Provider health status";
 const AVAILABLE_MODELS_HEADER = "## Available models by role/task";
+const MAX_AVAILABLE_MODELS_ROLES_RENDERED = 8;
 const NO_FALLBACK_MODEL_CONFIGURED_MESSAGE = "no fallback configured";
 
 const PROVIDER_HEALTH_STATE_FILE = path.join(
@@ -3657,6 +3658,58 @@ export function buildProviderHealthSystemPrompt(
 }
 
 /**
+ * Render the body of the "Available models by role/task" system-prompt
+ * section from an already-filtered role-to-models map.
+ *
+ * This helper owns three drift-prone surfaces that the caller must never
+ * re-inline, because each has bitten us before at parallel call sites:
+ *
+ *  1. **Role-row cap.** The number of role rows we render is bounded by
+ *     `MAX_AVAILABLE_MODELS_ROLES_RENDERED`. The raw literal `8` used to
+ *     live inline at the call site; every time we added a new role we
+ *     risked exceeding the cap silently, or if the cap was tweaked by
+ *     one call site but not a sibling the two sections drifted.
+ *  2. **Row format.** Every row is `- ${role}: ${models.join(", ")}`.
+ *     Any drift (bullet char, separator, colon spacing) is invisible
+ *     to the caller but visible to the agent, and a drifted format
+ *     becomes an unparsable instruction the agent silently ignores.
+ *  3. **Empty-input null sentinel.** An empty map means "nothing to
+ *     say" — the caller relies on `null` (not an empty string) so the
+ *     section-assembler can `.filter(Boolean)` it out cleanly. Returning
+ *     `""` instead of `null` used to cause a stray section header with
+ *     a blank body to leak into the final prompt.
+ *
+ * Note on call-site empty-check: the outer
+ * `buildAvailableModelsSystemPrompt` still uses
+ * `hasAgentVisiblePenalty(...)` as a fast-path null gate before walking
+ * the registry. The empty-map check here is the *post-walk* gate — it
+ * fires when all registered entries were filtered out for route health
+ * and no role rows survived, which is a different condition from the
+ * pre-walk penalty gate.
+ *
+ * Args:
+ *   roleToModels: Map from canonical role name to an ordered list of
+ *     already-formatted `"${id} (${billing_mode})"` strings. The caller
+ *     is responsible for applying per-role model caps before calling
+ *     this helper; this helper only caps *which roles* are rendered.
+ *
+ * Returns:
+ *   The fully assembled section string (header + rows), or `null` when
+ *   the input map is empty.
+ */
+export function renderAvailableModelsSystemPromptBody(
+  roleToModels: Map<string, string[]>,
+): string | null {
+  if (roleToModels.size === 0) {
+    return null;
+  }
+  const lines = Array.from(roleToModels.entries())
+    .slice(0, MAX_AVAILABLE_MODELS_ROLES_RENDERED)
+    .map(([role, models]) => `- ${role}: ${models.join(", ")}`);
+  return [AVAILABLE_MODELS_HEADER, ...lines].join("\n");
+}
+
+/**
  * Build a role+task filtered view of currently healthy models for the system prompt.
  * Only injected when at least one provider has a health penalty.
  */
@@ -3721,15 +3774,7 @@ export function buildAvailableModelsSystemPrompt(
     }
   }
 
-  if (roleToModels.size === 0) {
-    return null;
-  }
-
-  const lines = Array.from(roleToModels.entries())
-    .slice(0, 8)
-    .map(([role, models]) => `- ${role}: ${models.join(", ")}`);
-
-  return [AVAILABLE_MODELS_HEADER, ...lines].join("\n");
+  return renderAvailableModelsSystemPromptBody(roleToModels);
 }
 
 /**
