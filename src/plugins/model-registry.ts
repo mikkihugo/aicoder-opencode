@@ -1648,6 +1648,27 @@ export function findLiveProviderPenalty(
   return health;
 }
 
+function providerIDFromRouteKey(routeKey: string): string {
+  const slashIndex = routeKey.indexOf("/");
+  return slashIndex === -1 ? routeKey : routeKey.slice(0, slashIndex);
+}
+
+function countLiveTimeoutRoutesForProvider(
+  modelRouteHealthMap: Map<string, ModelRouteHealth>,
+  providerID: string,
+  now: number,
+): number {
+  let liveTimeoutRouteCount = 0;
+  const providerRoutePrefix = `${providerID}/`;
+  for (const [routeKey, health] of modelRouteHealthMap.entries()) {
+    if (!routeKey.startsWith(providerRoutePrefix)) continue;
+    if (health.state !== "timeout") continue;
+    if (health.until <= now) continue;
+    liveTimeoutRouteCount += 1;
+  }
+  return liveTimeoutRouteCount;
+}
+
 /**
  * Type of the persistence side-effect function injected into
  * `recordRouteHealthPenalty`. Matches the signature of the factory-local
@@ -2538,6 +2559,9 @@ export function computeProviderHealthUpdate(
  * the helper and the closure.
  */
 export const ROUTE_QUOTA_BACKOFF_DURATION_MS = 60 * 60 * 1000; // 1h
+export const ROUTE_TIMEOUT_BACKOFF_DURATION_MS = 20 * 60 * 1000; // 20m
+export const PROVIDER_TIMEOUT_BACKOFF_DURATION_MS = 30 * 60 * 1000; // 30m
+export const PROVIDER_TIMEOUT_ESCALATION_ROUTE_THRESHOLD = 2;
 export const PROVIDER_KEY_DEAD_DURATION_MS = 2 * 60 * 60 * 1000; // 2h
 export const PROVIDER_NO_CREDIT_DURATION_MS = 2 * 60 * 60 * 1000; // 2h
 // `model_not_found` is structurally longer-lived than `quota`: a quota
@@ -3585,13 +3609,13 @@ export function buildModelNotFoundRouteHealth(
 
 /**
  * Decide whether an `assistant.message.completed` event's `tokens`
- * payload represents the canonical "silent quota exhaustion" signal
- * that should fire a route-level `quota` penalty.
+ * payload represents the canonical "silent empty completion" signal
+ * that should fire a route-level failure penalty.
  *
  * History: the `assistant.message.completed` handler tested
- * `tokens.input === 0 && tokens.output === 0` and unconditionally
- * penalized the route with a 1h quota backoff on match. That predicate
- * is too narrow: it covers only the two primary billing axes and
+ * `tokens.input === 0 && tokens.output === 0` and treated that as a
+ * route failure. That predicate is too narrow: it covers only the two
+ * primary billing axes and
  * ignores every other token counter opencode may expose (`reasoning`
  * for deep-thinking models, nested `cache.read` / `cache.write`, and
  * future counters added by upstream providers).
@@ -3645,7 +3669,8 @@ export function buildModelNotFoundRouteHealth(
  *    `TypeError: Cannot convert undefined or null to object` from
  *    inside the `assistant.message.completed` hook — which the plugin
  *    catches via `logPluginHookFailure` and swallows, but the effect
- *    is that the quota classifier silently no-ops on any event whose
+ *    is that the empty-completion classifier silently no-ops on any
+ *    event whose
  *    `tokens` field contains a null nested record. A refactor that
  *    "simplified" the guard to `typeof value === "object"` (dropping
  *    the `value &&` half because "typeof already handles objects")
@@ -3660,11 +3685,11 @@ export function buildModelNotFoundRouteHealth(
  *    including itself), so a NaN reasoning counter hits the `return
  *    false` path. The current semantic is "any ambiguous top-level
  *    number is conservatively treated as real activity and the
- *    quota penalty is NOT applied." A defensive refactor that added
+ *    route-failure penalty is NOT applied." A defensive refactor that added
  *    `Number.isFinite(value) && value !== 0` to "skip NaN because it
  *    represents a missing counter" would flip the behavior: NaN
  *    fields would be ignored, and a session whose only non-zero
- *    counter was NaN would be classified as silent quota exhaustion
+ *    counter was NaN would be classified as silent empty completion
  *    and quarantine a healthy route. None of the existing pins uses
  *    NaN at any position — the `!== 0` semantic over NaN is unpinned.
  *
@@ -4837,7 +4862,7 @@ export function finalizeHungSessionStateAndRecordPenalty(
  *  3. If either the provider-id or model is missing for the session,
  *     classification is impossible and no penalty is recorded.
  *  4. Otherwise, build a fresh `ModelRouteHealth` entry with state
- *     `"timeout"` and `QUOTA_BACKOFF_DURATION_MS` lifetime, delegating to
+ *     `"timeout"` and `ROUTE_TIMEOUT_BACKOFF_DURATION_MS` lifetime, delegating to
  *     `buildRouteHealthEntry` so the route key is canonicalized via
  *     `composeRouteKey` and retry count is carried forward.
  *
@@ -4905,7 +4930,7 @@ export function finalizeHungSessionStateAndRecordPenalty(
  *     longer merge invariant dominates.** The 5th positional arg to
  *     `buildRouteHealthEntry` is the prior route-health record (when
  *     one exists) — the M43 builder compares `existing.until` against
- *     the freshly-computed `now + ROUTE_QUOTA_BACKOFF_DURATION_MS` and
+ *     the freshly-computed `now + ROUTE_TIMEOUT_BACKOFF_DURATION_MS` and
  *     keeps whichever window is longer. A refactor that passes
  *     `undefined` as the `existing` arg (on the theory that "this is
  *     a fresh timeout penalty, the builder will create a new entry")
@@ -4941,7 +4966,7 @@ export function evaluateSessionHangForTimeoutPenalty(
     providerID,
     model.id,
     "timeout",
-    ROUTE_QUOTA_BACKOFF_DURATION_MS,
+    ROUTE_TIMEOUT_BACKOFF_DURATION_MS,
     lookupRouteHealthByIdentifiers(modelRouteHealthMap, providerID, model.id),
     now,
   );
@@ -8331,6 +8356,9 @@ export const ModelRegistryPlugin: Plugin = async () => {
   // (e.g. `evaluateSessionHangForTimeoutPenalty`) reference the
   // module-scope constants directly.
   const QUOTA_BACKOFF_DURATION_MS = ROUTE_QUOTA_BACKOFF_DURATION_MS;
+  const TIMEOUT_BACKOFF_DURATION_MS = ROUTE_TIMEOUT_BACKOFF_DURATION_MS;
+  const PROVIDER_TIMEOUT_DURATION_MS = PROVIDER_TIMEOUT_BACKOFF_DURATION_MS;
+  const PROVIDER_TIMEOUT_ROUTE_THRESHOLD = PROVIDER_TIMEOUT_ESCALATION_ROUTE_THRESHOLD;
 
   function recordProviderHealth(
     providerID: string,
@@ -8354,6 +8382,16 @@ export const ModelRegistryPlugin: Plugin = async () => {
       computeProviderHealthUpdate(existing, state, newUntil),
       persistProviderHealth,
     );
+  }
+
+  function maybeEscalateProviderTimeoutFromRoutes(providerID: string, now: number): void {
+    if (
+      countLiveTimeoutRoutesForProvider(modelRouteHealthMap, providerID, now) <
+      PROVIDER_TIMEOUT_ROUTE_THRESHOLD
+    ) {
+      return;
+    }
+    recordProviderHealth(providerID, "timeout", PROVIDER_TIMEOUT_DURATION_MS);
   }
 
   return {
@@ -8634,7 +8672,11 @@ export const ModelRegistryPlugin: Plugin = async () => {
           sessionActiveModelMap,
         );
 
-        // Zero tokens across every counter indicates silent quota exhaustion.
+        // Zero tokens across every counter indicates a silent empty
+        // completion. That is a hard route-local failure, but not a
+        // trustworthy provider-wide quota signal: recent failures have
+        // included empty `reason=other` finishes and zero-token OAuth
+        // responses that were not 429s.
         // See `isZeroTokenQuotaSignal` docstring for why the narrow
         // `input===0 && output===0` predicate was wrong: it ignored side-
         // channel counters (`reasoning` for deep-thinking models, nested
@@ -8642,6 +8684,25 @@ export const ModelRegistryPlugin: Plugin = async () => {
         // could be silently penalized as quota-exhausted the moment any
         // future opencode release started populating those fields.
         if (isZeroTokenQuotaSignal(tokens)) {
+          // M148: a zero-token completion is a hard failure — the upstream
+          // returned an empty assistant turn (silent quota exhaustion, rate
+          // limit without status, or a provider hiccup that drained the
+          // request without producing content). The existing behaviour only
+          // fires the route penalty when provider/model are already bound;
+          // after the M147 chat.params guard early-returns for unresolved
+          // provider, the session hang state is never populated and the
+          // penalty silently drops. Log the signal unconditionally so
+          // operators can see it in telemetry even when we can't attribute
+          // it to a specific route.
+          console.error(
+            "[model-registry] zero-token completion detected",
+            JSON.stringify({
+              sessionID,
+              providerID: providerID ?? null,
+              modelID: model?.id ?? null,
+              hasRouteAttribution: Boolean(providerID && model),
+            }),
+          );
           if (!providerID || !model) return;
 
           recordRouteHealthByIdentifiers(
@@ -8649,11 +8710,12 @@ export const ModelRegistryPlugin: Plugin = async () => {
             providerHealthMap,
             providerID,
             model.id,
-            "quota",
-            QUOTA_BACKOFF_DURATION_MS,
+            "timeout",
+            TIMEOUT_BACKOFF_DURATION_MS,
             Date.now(),
             persistProviderHealth,
           );
+          maybeEscalateProviderTimeoutFromRoutes(providerID, Date.now());
         }
         return;
       }
@@ -8669,10 +8731,24 @@ export const ModelRegistryPlugin: Plugin = async () => {
         // short-circuits on missing start-time), dropping the model or
         // provider write would leave the detector firing with undefined
         // bindings and silently losing the timeout penalty.
+        //
+        // M147: opencode occasionally invokes chat.params before the
+        // provider has been resolved, so `input.provider` arrives as
+        // `undefined` and the raw `.info.id` deref throws TypeError and
+        // wedges the entire hook chain (17×/15min on aicoder backend).
+        // Guard by extracting the provider/model identifiers up front
+        // and no-op the hang-detector arming when either is missing —
+        // the session will still be routed, we just skip hang tracking
+        // for that particular call rather than crash the whole plugin.
+        const guardedProviderID = input.provider?.info?.id;
+        const guardedModel = input.model;
+        if (!guardedProviderID || !guardedModel) {
+          return;
+        }
         bindSessionHangState(
           input.sessionID,
-          input.provider.info.id,
-          { id: input.model.id, providerID: input.model.providerID },
+          guardedProviderID,
+          { id: guardedModel.id, providerID: guardedModel.providerID },
           Date.now(),
           sessionStartTimeMap,
           sessionActiveProviderMap,
@@ -8706,8 +8782,8 @@ export const ModelRegistryPlugin: Plugin = async () => {
         // implicit `<` boundary, and triple-nested gate). The
         // identifier narrowing still lives at the call site so the
         // `recordRouteHealthByIdentifiers` arguments stay visible.
-        const immediateProviderID = input.provider.info.id;
-        const immediateModel = input.model;
+        const immediateProviderID = guardedProviderID;
+        const immediateModel = guardedModel;
         if (
           shouldRecordImmediateTimeoutPenalty(
             timeoutMs,
@@ -8721,10 +8797,11 @@ export const ModelRegistryPlugin: Plugin = async () => {
             immediateProviderID,
             immediateModel.id,
             "timeout",
-            QUOTA_BACKOFF_DURATION_MS,
+            TIMEOUT_BACKOFF_DURATION_MS,
             Date.now(),
             persistProviderHealth,
           );
+          maybeEscalateProviderTimeoutFromRoutes(immediateProviderID, Date.now());
         } else {
           // Capture only primitive `sessionID` plus the outer Map refs so
           // the closure does NOT retain a reference to the full `input`
@@ -8748,16 +8825,28 @@ export const ModelRegistryPlugin: Plugin = async () => {
             // session.error or assistant.message.completed, so this
             // hang-timer firing is the ONLY cleanup opportunity for
             // their session tuples.
-            finalizeHungSessionStateAndRecordPenalty(
+            const hungRoutePenalty = finalizeHungSessionState(
               capturedSessionID,
               sessionStartTimeMap,
               sessionActiveProviderMap,
               sessionActiveModelMap,
               modelRouteHealthMap,
-              providerHealthMap,
               capturedTimeoutMs,
               Date.now(),
+            );
+            if (hungRoutePenalty === null) {
+              return;
+            }
+            recordRouteHealthPenalty(
+              modelRouteHealthMap,
+              providerHealthMap,
+              hungRoutePenalty.routeKey,
+              hungRoutePenalty.health,
               persistProviderHealth,
+            );
+            maybeEscalateProviderTimeoutFromRoutes(
+              providerIDFromRouteKey(hungRoutePenalty.routeKey),
+              Date.now(),
             );
           }, timeoutMs + 100); // Check slightly after the timeout threshold
           // Do not keep the Node event loop alive waiting on a hang timer —

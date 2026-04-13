@@ -1,16 +1,20 @@
 #!/home/mhugo/.nix-profile/bin/node
 
 import http from "node:http";
+import { execFile as execFileCallback } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { promisify } from "node:util";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 3012;
-const STATUS_TIMEOUT_MS = 2000;
-const API_TIMEOUT_MS = 5000;
+const STATUS_TIMEOUT_MS = 6000;
+const API_TIMEOUT_MS = 8000;
 const LLM_STATS_CACHE_TTL_MS = 30000;
 const LLM_STATS_FETCH_BATCH_SIZE = 4;
 const EMPTY_STRING = "";
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const NO_STORE_CACHE_CONTROL = "no-store, max-age=0";
+const execFile = promisify(execFileCallback);
 const BACKENDS = [
   {
     id: "aicoder",
@@ -34,6 +38,42 @@ const BACKENDS = [
     directory: "/home/mhugo/code/letta-workspace",
   },
 ];
+const MAINTENANCE_TIMER_WHITELIST = [
+  "aicoder-opencode-maintenance.timer",
+  "dr-repo-maintenance.timer",
+  "letta-workspace-maintenance.timer",
+];
+const MAIN_SERVICE_BY_BACKEND_ID = {
+  aicoder: "aicoder-opencode-main.service",
+  dr: "dr-repo-main.service",
+  letta: "letta-workspace-main.service",
+};
+const BACKEND_PORT_BY_ID = {
+  aicoder: 8080,
+  dr: 8082,
+  letta: 8084,
+};
+const SYSTEMCTL_TIMER_PROPERTIES = [
+  "ActiveState",
+  "UnitFileState",
+  "Result",
+  "LastTriggerUSec",
+  "NextElapseUSecRealtime",
+  "NextElapseUSecMonotonic",
+  "LastTriggerUSecMonotonic",
+].join(",");
+// Monotonic duration tokens from `systemctl show` look like:
+//   "2d 23h 57min 17.216520s" · "3min 5s" · "17.216520s" · "1h 2min"
+// Realtime units supported: d, h, min, s, ms, us.
+const SYSTEMCTL_MONOTONIC_TOKEN_PATTERN = /(\d+(?:\.\d+)?)(d|h|min|ms|us|s)/g;
+const MONOTONIC_UNIT_TO_SECONDS = {
+  d: 86400,
+  h: 3600,
+  min: 60,
+  s: 1,
+  ms: 1 / 1000,
+  us: 1 / 1_000_000,
+};
 
 const bindHost = process.env.OPENCODE_TRIAD_DASHBOARD_HOST?.trim() || DEFAULT_HOST;
 const parsedPort = Number.parseInt(process.env.OPENCODE_TRIAD_DASHBOARD_PORT ?? EMPTY_STRING, 10);
@@ -91,6 +131,7 @@ function summarizeMessages(messages, loadedSessionCount) {
   let toolPartCount = 0;
   let reasoningPartCount = 0;
   let latestRouteLabel = "none yet";
+  let latestRouteTimestamp = 0;
 
   for (const message of Array.isArray(messages) ? messages : []) {
     const info = message?.info ?? {};
@@ -118,7 +159,16 @@ function summarizeMessages(messages, loadedSessionCount) {
     }
 
     const routeLabel = buildRouteLabel(info.providerID, info.modelID);
-    latestRouteLabel = routeLabel;
+    // Track chronological latest instead of iteration-order latest — otherwise
+    // whichever session happens to land last in the flattened stream wins,
+    // and a long-abandoned session can freeze `latestRouteLabel` forever.
+    const messageTimestamp =
+      (typeof info.time?.completed === "number" ? info.time.completed : 0) ||
+      (typeof info.time?.created === "number" ? info.time.created : 0);
+    if (messageTimestamp >= latestRouteTimestamp) {
+      latestRouteTimestamp = messageTimestamp;
+      latestRouteLabel = routeLabel;
+    }
     routeCountsByLabel.set(routeLabel, (routeCountsByLabel.get(routeLabel) ?? 0) + 1);
   }
 
@@ -139,6 +189,7 @@ function summarizeMessages(messages, loadedSessionCount) {
     toolPartCount,
     reasoningPartCount,
     latestRouteLabel,
+    latestRouteTimestamp,
     topRouteLabel,
     routeCountsByLabel,
     providerIDs,
@@ -204,7 +255,7 @@ async function fetchBackendJson(backend, requestPath, options = {}) {
 
 async function probeBackend(backend) {
   try {
-    const response = await fetchBackend(backend, "/", { method: "GET", timeoutMs: STATUS_TIMEOUT_MS });
+    const response = await fetchBackend(backend, "/app", { method: "GET", timeoutMs: STATUS_TIMEOUT_MS });
     return {
       id: backend.id,
       title: backend.title,
@@ -226,6 +277,306 @@ async function probeBackend(backend) {
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/**
+ * Parse `systemctl --user show <unit> --property=X,Y,Z` output.
+ * Returns an object of Property -> Value strings.
+ */
+function parseSystemctlShowOutput(stdout) {
+  const properties = {};
+  for (const line of stdout.split("\n")) {
+    const equalsIndex = line.indexOf("=");
+    if (equalsIndex === -1) continue;
+    const key = line.slice(0, equalsIndex);
+    const value = line.slice(equalsIndex + 1);
+    properties[key] = value;
+  }
+  return properties;
+}
+
+/**
+ * Convert systemd timestamp strings like "Mon 2026-04-13 10:00:16 CEST"
+ * (the default `systemctl show` format) to ISO string or null.
+ * V8's Date.parse does not accept the weekday prefix or most TZ abbreviations,
+ * so we extract the YYYY-MM-DD HH:MM:SS portion and parse it as local time.
+ */
+const SYSTEMCTL_TIMESTAMP_PATTERN = /(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/;
+
+function parseSystemctlTimestamp(value) {
+  if (!value || value === "n/a" || value === "0") return null;
+  const match = value.match(SYSTEMCTL_TIMESTAMP_PATTERN);
+  if (!match) return null;
+  const [, year, month, day, hours, minutes, seconds] = match;
+  const localDate = new Date(
+    Number.parseInt(year, 10),
+    Number.parseInt(month, 10) - 1,
+    Number.parseInt(day, 10),
+    Number.parseInt(hours, 10),
+    Number.parseInt(minutes, 10),
+    Number.parseInt(seconds, 10),
+  );
+  const timestamp = localDate.getTime();
+  if (Number.isNaN(timestamp)) return null;
+  return localDate.toISOString();
+}
+
+/**
+ * Parse a systemctl monotonic duration string like "2d 23h 57min 17.216520s"
+ * into a total number of seconds (float). Returns null when no tokens match.
+ */
+function parseSystemctlMonotonicDuration(value) {
+  if (!value || value.trim() === EMPTY_STRING) return null;
+  let totalSeconds = 0;
+  let matched = false;
+  for (const match of value.matchAll(SYSTEMCTL_MONOTONIC_TOKEN_PATTERN)) {
+    const amount = Number.parseFloat(match[1]);
+    const unit = match[2];
+    const multiplier = MONOTONIC_UNIT_TO_SECONDS[unit];
+    if (!Number.isFinite(amount) || multiplier === undefined) continue;
+    totalSeconds += amount * multiplier;
+    matched = true;
+  }
+  return matched ? totalSeconds : null;
+}
+
+/**
+ * Read CLOCK_BOOTTIME epoch seconds from /proc/stat once. systemd reports
+ * monotonic timestamps as "time since boot", so wall-clock next-fire =
+ * btime + monotonic_seconds. Returns null if /proc/stat is unreadable.
+ *
+ * NOTE: does not correct for suspend/resume drift — monotonic clock freezes
+ * during S3 suspend but btime does not, so a post-resume read can drift by
+ * the suspended duration. For an always-on workstation this is fine.
+ */
+let cachedBootTimeEpochSeconds = null;
+function readBootTimeEpochSeconds() {
+  if (cachedBootTimeEpochSeconds !== null) return cachedBootTimeEpochSeconds;
+  try {
+    const statText = readFileSync("/proc/stat", "utf8");
+    const match = statText.match(/^btime (\d+)/m);
+    if (!match) return null;
+    cachedBootTimeEpochSeconds = Number.parseInt(match[1], 10);
+    return cachedBootTimeEpochSeconds;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Convert a systemd monotonic duration + /proc/stat btime into an ISO string.
+ * Used as a fallback when `NextElapseUSecRealtime` is empty — which happens
+ * for timers defined with `OnBootSec=`/`OnUnitActiveSec=` rather than
+ * `OnCalendar=`, because systemd stores their schedule in monotonic time only.
+ */
+function convertMonotonicDurationToIsoString(monotonicValue) {
+  const bootTimeEpochSeconds = readBootTimeEpochSeconds();
+  if (bootTimeEpochSeconds === null) return null;
+  const monotonicSeconds = parseSystemctlMonotonicDuration(monotonicValue);
+  if (monotonicSeconds === null) return null;
+  const epochMilliseconds = Math.round((bootTimeEpochSeconds + monotonicSeconds) * 1000);
+  if (!Number.isFinite(epochMilliseconds)) return null;
+  return new Date(epochMilliseconds).toISOString();
+}
+
+async function readMaintenanceTimerStatus(unit) {
+  try {
+    const { stdout } = await execFile("systemctl", [
+      "--user",
+      "show",
+      unit,
+      `--property=${SYSTEMCTL_TIMER_PROPERTIES}`,
+    ]);
+    const props = parseSystemctlShowOutput(stdout);
+    // Monotonic timers (OnBootSec/OnUnitActiveSec) leave NextElapseUSecRealtime
+    // empty and only populate NextElapseUSecMonotonic — fall back to that so
+    // the sidebar stops rendering "next: never" for healthy periodic timers.
+    const nextFireAt =
+      parseSystemctlTimestamp(props.NextElapseUSecRealtime) ??
+      convertMonotonicDurationToIsoString(props.NextElapseUSecMonotonic);
+    return {
+      unit,
+      enabled: props.UnitFileState === "enabled",
+      active: props.ActiveState === "active",
+      activeState: props.ActiveState ?? "unknown",
+      lastResult: props.Result ?? "unknown",
+      lastFireAt: parseSystemctlTimestamp(props.LastTriggerUSec),
+      nextFireAt,
+    };
+  } catch (error) {
+    return {
+      unit,
+      enabled: false,
+      active: false,
+      activeState: "error",
+      lastResult: "error",
+      lastFireAt: null,
+      nextFireAt: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function readMainServicePid(serviceName) {
+  try {
+    const { stdout } = await execFile("systemctl", ["--user", "show", serviceName, "--property=MainPID"]);
+    const props = parseSystemctlShowOutput(stdout);
+    const pid = Number.parseInt(props.MainPID ?? "0", 10);
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the parent PID of a process via `ps -o ppid= -p <pid>`.
+ * Returns null when the process is missing or ps is unavailable.
+ */
+async function readProcessParentPid(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  try {
+    const { stdout } = await execFile("ps", ["-o", "ppid=", "-p", String(pid)]);
+    const parsedPid = Number.parseInt(stdout.trim(), 10);
+    return Number.isFinite(parsedPid) && parsedPid > 0 ? parsedPid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read listening TCP ports owned by `.opencode` processes via `ss -tlnp`.
+ * Returns a Map of port -> pid (primary pid, the first one).
+ */
+async function readListeningOpencodePorts() {
+  const portToPid = new Map();
+  try {
+    const { stdout } = await execFile("ss", ["-tlnp"]);
+    for (const line of stdout.split("\n")) {
+      if (!line.includes(".opencode")) continue;
+      // Example:
+      // LISTEN 0 512 127.0.0.1:8082 0.0.0.0:* users:((".opencode",pid=73710,fd=18))
+      const portMatch = line.match(/127\.0\.0\.1:(\d+)/);
+      const pidMatch = line.match(/pid=(\d+)/);
+      if (portMatch && pidMatch) {
+        const port = Number.parseInt(portMatch[1], 10);
+        const pid = Number.parseInt(pidMatch[1], 10);
+        if (Number.isFinite(port) && Number.isFinite(pid)) {
+          portToPid.set(port, pid);
+        }
+      }
+    }
+  } catch {
+    // ss not available — return empty map
+  }
+  return portToPid;
+}
+
+/**
+ * Compute latest session activity (ISO) and session count for a backend,
+ * reusing the session list already fetched by listBackendSessions.
+ */
+function computeBackendActivity(sessions) {
+  let latest = 0;
+  for (const session of sessions) {
+    const updated = session?.time?.updated ?? 0;
+    if (typeof updated === "number" && updated > latest) latest = updated;
+  }
+  return {
+    sessionCount: sessions.length,
+    lastActivityAt: latest > 0 ? new Date(latest).toISOString() : null,
+    idleSeconds: latest > 0 ? Math.floor((Date.now() - latest) / 1000) : null,
+  };
+}
+
+async function readBackendOpsSessionState(backend) {
+  try {
+    const sessions = await listBackendSessions(backend);
+    return {
+      sessions,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      sessions: [],
+      error: error instanceof Error ? error.message : "session list failed",
+    };
+  }
+}
+
+async function collectOpsStatus() {
+  const [timerStatuses, listeningPorts, ...mainPidsAndSessions] = await Promise.all([
+    Promise.all(MAINTENANCE_TIMER_WHITELIST.map(readMaintenanceTimerStatus)),
+    readListeningOpencodePorts(),
+    ...BACKENDS.map(async (backend) => {
+      const [mainPid, sessionState] = await Promise.all([
+        readMainServicePid(MAIN_SERVICE_BY_BACKEND_ID[backend.id]),
+        readBackendOpsSessionState(backend),
+      ]);
+      return { backend, mainPid, sessionState };
+    }),
+  ]);
+
+  const listeningParentPidEntries = await Promise.all(
+    Array.from(listeningPorts.entries()).map(async ([port, pid]) => [port, await readProcessParentPid(pid)]),
+  );
+  const listeningParentPidByPort = new Map(listeningParentPidEntries);
+  const managedServicePids = new Set(
+    mainPidsAndSessions.map(({ mainPid }) => mainPid).filter((mainPid) => mainPid != null),
+  );
+
+  const backendOps = mainPidsAndSessions.map(({ backend, mainPid, sessionState }) => {
+    const port = BACKEND_PORT_BY_ID[backend.id] ?? null;
+    const listeningPid = port != null ? listeningPorts.get(port) ?? null : null;
+    const listeningParentPid = port != null ? listeningParentPidByPort.get(port) ?? null : null;
+    const isManagedByService =
+      mainPid != null &&
+      listeningPid != null &&
+      (listeningPid === mainPid || listeningParentPid === mainPid);
+    const activity = computeBackendActivity(sessionState.sessions);
+    return {
+      id: backend.id,
+      title: backend.title,
+      port,
+      listening: listeningPid != null,
+      listeningPid,
+      managedPid: mainPid,
+      managed: isManagedByService,
+      sessionCount: activity.sessionCount,
+      lastActivityAt: activity.lastActivityAt,
+      idleSeconds: activity.idleSeconds,
+      error: sessionState.error,
+    };
+  });
+
+  const knownBackendPorts = new Set(Object.values(BACKEND_PORT_BY_ID));
+  const strayServers = [];
+  for (const [port, pid] of listeningPorts.entries()) {
+    const parentPid = listeningParentPidByPort.get(port) ?? null;
+    const managed =
+      managedServicePids.has(pid) || (parentPid != null && managedServicePids.has(parentPid));
+    if (knownBackendPorts.has(port) && managed) continue;
+    if (!managed) {
+      strayServers.push({ port, pid, managed: false });
+    }
+  }
+
+  return {
+    generatedAt: Date.now(),
+    backends: backendOps,
+    timers: timerStatuses,
+    strayServers,
+  };
+}
+
+async function runMaintenanceTimerAction(unit, action) {
+  if (!MAINTENANCE_TIMER_WHITELIST.includes(unit)) {
+    throw new Error(`unit not in whitelist: ${unit}`);
+  }
+  if (action !== "start" && action !== "stop") {
+    throw new Error(`unsupported action: ${action}`);
+  }
+  await execFile("systemctl", ["--user", action, unit]);
+  return readMaintenanceTimerStatus(unit);
 }
 
 async function readBackendConfig(backend) {
@@ -352,10 +703,19 @@ async function collectBackendLlmStats(backend) {
   try {
     const listedSessions = await listBackendSessions(backend);
     const sessions = Array.isArray(listedSessions) ? listedSessions : [];
+    // Wrap per-session reads so a single failing session (e.g. mid-write race,
+    // transient 500) no longer tanks the entire backend's stats via Promise.all
+    // rejection — a failed read just contributes zero messages.
     const sessionMessages = await mapInBatches(
       sessions,
       LLM_STATS_FETCH_BATCH_SIZE,
-      async (session) => readBackendMessages(backend, session.id),
+      async (session) => {
+        try {
+          return await readBackendMessages(backend, session.id);
+        } catch {
+          return [];
+        }
+      },
     );
     const flattenedMessages = sessionMessages.flatMap((messages) => (Array.isArray(messages) ? messages : []));
     const stats = summarizeMessages(flattenedMessages, sessions.length);
@@ -369,6 +729,7 @@ async function collectBackendLlmStats(backend) {
       _providerIDs: stats.providerIDs,
       _modelIDs: stats.modelIDs,
       _routeCountsByLabel: stats.routeCountsByLabel,
+      _latestRouteTimestamp: stats.latestRouteTimestamp,
     };
   } catch (error) {
     return {
@@ -402,6 +763,7 @@ async function collectLlmStatsSummary() {
     let toolPartCount = 0;
     let reasoningPartCount = 0;
     let latestRouteLabel = "none yet";
+    let latestRouteTimestamp = 0;
 
     for (const backend of backends) {
       assistantMessageCount += backend.stats.assistantMessageCount;
@@ -409,8 +771,15 @@ async function collectLlmStatsSummary() {
       toolPartCount += backend.stats.toolPartCount;
       reasoningPartCount += backend.stats.reasoningPartCount;
 
-      if (backend.stats.latestRouteLabel !== "none yet") {
+      // Compare by chronological timestamp — otherwise the last backend
+      // iterated silently overwrites the true most-recent route label.
+      const backendLatestTimestamp = backend._latestRouteTimestamp ?? 0;
+      if (
+        backend.stats.latestRouteLabel !== "none yet" &&
+        backendLatestTimestamp >= latestRouteTimestamp
+      ) {
         latestRouteLabel = backend.stats.latestRouteLabel;
+        latestRouteTimestamp = backendLatestTimestamp;
       }
 
       for (const providerID of backend._providerIDs ?? []) {
@@ -424,6 +793,7 @@ async function collectLlmStatsSummary() {
       delete backend._providerIDs;
       delete backend._modelIDs;
       delete backend._routeCountsByLabel;
+      delete backend._latestRouteTimestamp;
     }
 
     let topRouteLabel = "none yet";
@@ -1237,11 +1607,39 @@ const server = http.createServer(async (request, response) => {
     }
   }
 
-  response.writeHead(200, {
-    "content-type": "text/html; charset=utf-8",
-    "cache-control": NO_STORE_CACHE_CONTROL,
+  if (requestURL.pathname === "/api/ops/status") {
+    try {
+      sendJson(response, 200, await collectOpsStatus());
+      return;
+    } catch (error) {
+      sendJson(response, 500, {
+        error: "ops status failed",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+  }
+
+  const timerActionMatch = requestURL.pathname.match(/^\/api\/ops\/timers\/([^/]+)\/(start|stop)$/);
+  if (timerActionMatch && request.method === "POST") {
+    const unit = timerActionMatch[1];
+    const action = timerActionMatch[2];
+    try {
+      const status = await runMaintenanceTimerAction(unit, action);
+      sendJson(response, 200, { unit, action, status });
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const statusCode = message.startsWith("unit not in whitelist") ? 400 : 502;
+      sendJson(response, statusCode, { error: "timer action failed", detail: message });
+      return;
+    }
+  }
+
+  sendJson(response, 404, {
+    error: "unknown api route",
+    path: requestURL.pathname,
   });
-  response.end(renderDashboard());
 });
 
 server.listen(bindPort, bindHost, () => {

@@ -244,14 +244,9 @@
       ],
       "provider_order": [
         {
-          "provider": "iflowcn",
-          "model": "iflowcn/qwen3.5:397b",
-          "priority": 1
-        },
-        {
           "provider": "ollama-cloud",
           "model": "ollama-cloud/qwen3.5:397b",
-          "priority": 2
+          "priority": 1
         }
       ],
       "notes": [
@@ -317,14 +312,9 @@
       ],
       "provider_order": [
         {
-          "provider": "iflowcn",
-          "model": "iflowcn/deepseek-v3.2",
-          "priority": 1
-        },
-        {
           "provider": "ollama-cloud",
           "model": "ollama-cloud/deepseek-v3.2",
-          "priority": 2
+          "priority": 1
         }
       ],
       "notes": [
@@ -357,13 +347,13 @@
       ],
       "provider_order": [
         {
-          "provider": "iflowcn",
-          "model": "iflowcn/qwen3-coder-plus",
+          "provider": "ollama-cloud",
+          "model": "ollama-cloud/qwen3-coder-next",
           "priority": 1
         },
         {
           "provider": "ollama-cloud",
-          "model": "ollama-cloud/qwen3-coder-next",
+          "model": "ollama-cloud/qwen3-coder:480b",
           "priority": 2
         }
       ],
@@ -372,8 +362,8 @@
       ]
     },
     {
-      "id": "qwen-3.5-coder",
-      "description": "OAuth-backed Qwen coding lane for implementation and review work.",
+      "id": "qwen-3.6-plus",
+      "description": "OAuth-backed Qwen 3.6 Plus lane for free implementation and review work.",
       "capability_tier": "strong",
       "cost_tier": "free",
       "billing_mode": "subscription",
@@ -398,12 +388,12 @@
       "provider_order": [
         {
           "provider": "qwen",
-          "model": "qwen/qwen-3.5-coder",
+          "model": "qwen/qwen-3.6-plus",
           "priority": 1
         }
       ],
       "notes": [
-        "Use when Qwen OAuth is connected and you want a code-focused alternate without per-token billing."
+        "Use when Qwen OAuth is connected and you want a strong free Qwen alternate without per-token billing."
       ]
     },
     {
@@ -429,83 +419,13 @@
       ],
       "provider_order": [
         {
-          "provider": "iflowcn",
-          "model": "iflowcn/kimi-k2-0905",
-          "priority": 1
-        },
-        {
           "provider": "kimi-for-coding",
           "model": "kimi-for-coding/kimi-k2-thinking",
-          "priority": 2
+          "priority": 1
         }
       ],
       "notes": [
         "Use when you want Kimi-family pressure without leaning on paid or quota-backed routes."
-      ]
-    },
-    {
-      "id": "qwen3-235b-thinking",
-      "description": "Free deep-thinking large-model combatant lane.",
-      "capability_tier": "frontier",
-      "cost_tier": "free",
-      "billing_mode": "free",
-      "latency_tier": "slow",
-      "concurrency": 1,
-      "quota_visibility": "manual",
-      "best_for": [
-        "deep_review",
-        "alternate_architecture_pressure",
-        "hard_reasoning"
-      ],
-      "not_for": [
-        "routine_coding",
-        "fast_helpers"
-      ],
-      "default_roles": [
-        "deep_combatant",
-        "alternate_architect"
-      ],
-      "provider_order": [
-        {
-          "provider": "iflowcn",
-          "model": "iflowcn/qwen3-235b-a22b-thinking-2507",
-          "priority": 1
-        }
-      ],
-      "notes": [
-        "Free large-model pressure lane when you want depth without spending frontier paid quota."
-      ]
-    },
-    {
-      "id": "qwen3-vl-plus",
-      "description": "Free multimodal lane for screenshots, diagrams, and visual review.",
-      "capability_tier": "strong",
-      "cost_tier": "free",
-      "billing_mode": "free",
-      "latency_tier": "medium",
-      "concurrency": 1,
-      "quota_visibility": "manual",
-      "best_for": [
-        "vision",
-        "ui_review",
-        "diagram_interpretation"
-      ],
-      "not_for": [
-        "main_text_only_coder",
-        "fast_bulk_helpers"
-      ],
-      "default_roles": [
-        "multimodal_reviewer"
-      ],
-      "provider_order": [
-        {
-          "provider": "iflowcn",
-          "model": "iflowcn/qwen3-vl-plus",
-          "priority": 1
-        }
-      ],
-      "notes": [
-        "Use only when the task actually benefits from image understanding."
       ]
     },
     {

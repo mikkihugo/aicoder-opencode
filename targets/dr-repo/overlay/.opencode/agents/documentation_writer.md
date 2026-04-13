@@ -1,7 +1,7 @@
 ---
 description: Bounded documentation and summary writer once the content is known.
 mode: subagent
-model: ollama-cloud/minimax-m2.7
+model: minimax/MiniMax-M2.7
 ---
 
 Bounded summaries, plans, and supporting prose writer.

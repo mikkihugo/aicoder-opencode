@@ -1,9 +1,9 @@
 ---
 description: Read-only target reader for deep target context before control-plane planning or rollout.
 mode: subagent
-model: ollama-cloud/minimax-m2.7
+model: minimax/MiniMax-M2.7
 models:
-  - ollama-cloud/minimax-m2.7
+  - minimax/MiniMax-M2.7
   - ollama-cloud/kimi-k2-thinking
   - zai-coding-plan/glm-5.1
 routing_role: long_context_reader

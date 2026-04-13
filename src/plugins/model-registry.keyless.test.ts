@@ -5,6 +5,11 @@ import path from "node:path";
 import test from "node:test";
 
 import type { ModelRegistryEntry } from "../model-registry.js";
+import {
+  PROVIDER_TIMEOUT_BACKOFF_DURATION_MS,
+  ROUTE_QUOTA_BACKOFF_DURATION_MS,
+  ROUTE_TIMEOUT_BACKOFF_DURATION_MS,
+} from "./model-registry.js";
 
 function buildModelRegistryEntry(
   id: string,
@@ -466,7 +471,7 @@ test("session_error_bare_500_without_model_not_found_message_does_not_poison_rou
   });
 });
 
-test("assistant_message_completed_with_zero_tokens_classifies_route_quota_backoff", async () => {
+test("assistant_message_completed_with_zero_tokens_classifies_route_timeout_backoff", async () => {
   await withIsolatedHome(async (homeDirectory) => {
     await writeAuthFile(homeDirectory, {
       "ollama-cloud": "token-value",
@@ -476,6 +481,7 @@ test("assistant_message_completed_with_zero_tokens_classifies_route_quota_backof
       const { ModelRegistryPlugin } = await import("./model-registry.js");
       const plugin = await (ModelRegistryPlugin as any)({ directory: process.cwd() });
 
+      const startedAt = Date.now();
       await (plugin["chat.params"] as any)(
         {
           sessionID: "session-with-zero-token-completion",
@@ -502,9 +508,16 @@ test("assistant_message_completed_with_zero_tokens_classifies_route_quota_backof
       const status = JSON.parse(rawStatus as string);
 
       const routeStatus = status["ollama-cloud/glm-4.7"];
-      assert.equal(routeStatus?.state, "quota");
+      assert.equal(routeStatus?.state, "timeout");
       assert.equal(routeStatus?.type, "model_route");
       assert.equal((routeStatus?.retryCount ?? 0) >= 1, true);
+      const routePenaltyUntil = Date.parse(routeStatus?.until ?? "");
+      assert.equal(
+        Number.isFinite(routePenaltyUntil) &&
+          routePenaltyUntil >= startedAt + ROUTE_TIMEOUT_BACKOFF_DURATION_MS - 5_000 &&
+          routePenaltyUntil <= Date.now() + ROUTE_TIMEOUT_BACKOFF_DURATION_MS + 5_000,
+        true,
+      );
     });
   });
 });
@@ -589,6 +602,7 @@ test("chat_params_when_route_hangs_classifies_route_timeout_backoff", async () =
         const { ModelRegistryPlugin } = await import("./model-registry.js");
         const plugin = await (ModelRegistryPlugin as any)({ directory: process.cwd() });
 
+        const startedAt = Date.now();
         await (plugin["chat.params"] as any)(
           {
             sessionID: "session-with-route-timeout",
@@ -607,6 +621,13 @@ test("chat_params_when_route_hangs_classifies_route_timeout_backoff", async () =
         assert.equal(routeStatus?.state, "timeout");
         assert.equal(routeStatus?.type, "model_route");
         assert.equal((routeStatus?.retryCount ?? 0) >= 1, true);
+        const routePenaltyUntil = Date.parse(routeStatus?.until ?? "");
+        assert.equal(
+          Number.isFinite(routePenaltyUntil) &&
+            routePenaltyUntil >= startedAt + ROUTE_TIMEOUT_BACKOFF_DURATION_MS - 5_000 &&
+            routePenaltyUntil <= Date.now() + ROUTE_TIMEOUT_BACKOFF_DURATION_MS + 5_000,
+          true,
+        );
       });
     } finally {
       if (originalTimeoutValue === undefined) {
@@ -615,6 +636,116 @@ test("chat_params_when_route_hangs_classifies_route_timeout_backoff", async () =
         process.env.AICODER_ROUTE_HANG_TIMEOUT_MS = originalTimeoutValue;
       }
     }
+  });
+});
+
+test("chat_params_when_two_models_timeout_for_same_provider_escalates_provider_timeout_backoff", async () => {
+  await withIsolatedHome(async (homeDirectory) => {
+    const originalTimeoutValue = process.env.AICODER_ROUTE_HANG_TIMEOUT_MS;
+    process.env.AICODER_ROUTE_HANG_TIMEOUT_MS = "20";
+
+    await writeAuthFile(homeDirectory, {
+      "ollama-cloud": "token-value",
+    });
+
+    try {
+      await withFreshHealthState(async () => {
+        const { ModelRegistryPlugin } = await import("./model-registry.js");
+        const plugin = await (ModelRegistryPlugin as any)({ directory: process.cwd() });
+
+        const startedAt = Date.now();
+        await (plugin["chat.params"] as any)(
+          {
+            sessionID: "session-with-provider-timeout-1",
+            provider: { info: { id: "ollama-cloud" } },
+            model: { id: "glm-4.7", providerID: "ollama-cloud" },
+          },
+          {},
+        );
+        await (plugin["chat.params"] as any)(
+          {
+            sessionID: "session-with-provider-timeout-2",
+            provider: { info: { id: "ollama-cloud" } },
+            model: { id: "glm-5.1", providerID: "ollama-cloud" },
+          },
+          {},
+        );
+
+        const rawStatus = await (plugin.tool as any).get_quota_backoff_status.execute({});
+        const status = JSON.parse(rawStatus as string);
+
+        const providerStatus = status["ollama-cloud"];
+        assert.equal(providerStatus?.state, "timeout");
+        assert.equal(providerStatus?.type, "provider");
+        const providerPenaltyUntil = Date.parse(providerStatus?.until ?? "");
+        assert.equal(
+          Number.isFinite(providerPenaltyUntil) &&
+            providerPenaltyUntil >= startedAt + PROVIDER_TIMEOUT_BACKOFF_DURATION_MS - 5_000 &&
+            providerPenaltyUntil <= Date.now() + PROVIDER_TIMEOUT_BACKOFF_DURATION_MS + 5_000,
+          true,
+        );
+      });
+    } finally {
+      if (originalTimeoutValue === undefined) {
+        delete process.env.AICODER_ROUTE_HANG_TIMEOUT_MS;
+      } else {
+        process.env.AICODER_ROUTE_HANG_TIMEOUT_MS = originalTimeoutValue;
+      }
+    }
+  });
+});
+
+test("session_error_with_http_429_classifies_provider_quota_backoff", async () => {
+  await withIsolatedHome(async (homeDirectory) => {
+    await writeAuthFile(homeDirectory, {
+      openrouter: "token-value",
+    });
+
+    await withFreshHealthState(async () => {
+      const { ModelRegistryPlugin } = await import("./model-registry.js");
+      const plugin = await (ModelRegistryPlugin as any)({ directory: process.cwd() });
+
+      const startedAt = Date.now();
+      await (plugin["chat.params"] as any)(
+        {
+          sessionID: "session-with-provider-429",
+          provider: { info: { id: "openrouter" } },
+          model: { id: "step-3.5-flash:free", providerID: "openrouter" },
+        },
+        {},
+      );
+
+      await (plugin.event as any)({
+        event: {
+          type: "session.error",
+          properties: {
+            sessionID: "session-with-provider-429",
+            error: {
+              name: "APIError",
+              data: {
+                statusCode: 429,
+                message: "rate limit exceeded",
+              },
+            },
+          },
+        },
+      });
+
+      const rawStatus = await (plugin.tool as any).get_quota_backoff_status.execute({});
+      const status = JSON.parse(rawStatus as string);
+
+      const providerStatus = status["openrouter"];
+      assert.equal(providerStatus?.state, "quota");
+      assert.equal(providerStatus?.type, "provider");
+      assert.equal(status["openrouter/step-3.5-flash:free"], undefined);
+      const providerPenaltyUntil = Date.parse(providerStatus?.until ?? "");
+      assert.equal(
+        Number.isFinite(providerPenaltyUntil) &&
+          providerPenaltyUntil >= startedAt + ROUTE_QUOTA_BACKOFF_DURATION_MS - 5_000 &&
+          providerPenaltyUntil <= Date.now() + ROUTE_QUOTA_BACKOFF_DURATION_MS + 5_000,
+        true,
+      );
+    });
   });
 });
 
@@ -754,10 +885,14 @@ test("ModelRegistryPlugin_whenFactoryBoots_installsKeyMissingForUncredentialedCu
   // `initializeProviderHealthState`, so `key_missing` entries were never
   // installed for uncredentialed providers at startup. The direct helper
   // tests above can't catch this — they pin the helper, not the caller.
-  // This test exercises the real `ModelRegistryPlugin` factory with an empty
-  // auth.json and asserts that the live `get_quota_backoff_status` tool
-  // (backed by the same `providerHealthMap` the plugin uses for routing)
-  // reports at least one curated-registry provider in `key_missing` state.
+  //
+  // Pre-M63 this test checked `get_quota_backoff_status` for key_missing
+  // entries. Post-M63 that tool filters key_missing via
+  // `isAgentVisibleLivePenalty` by design (key_missing is permanent
+  // plumbing, not a transient backoff agents can retry through). So the
+  // verification now calls `initializeProviderHealthState` directly with
+  // model entries representing the curated registry, then inspects the
+  // returned `providerHealthMap` for key_missing entries.
   await withIsolatedHome(async (homeDirectory) => {
     await writeAuthFile(homeDirectory, {});
     // Snapshot and clear every env var the plugin might interpret as a
@@ -774,25 +909,27 @@ test("ModelRegistryPlugin_whenFactoryBoots_installsKeyMissingForUncredentialedCu
     }
     try {
       await withFreshHealthState(async () => {
-        const { ModelRegistryPlugin } = await import("./model-registry.js");
-        const plugin = await (ModelRegistryPlugin as any)({ directory: process.cwd() });
+        const { initializeProviderHealthState } = await import("./model-registry.js");
+        // Use an entry representing a curated registry provider that
+        // definitely requires a credential. This pins the plugin-factory
+        // bootstrap wiring rather than any particular provider's pricing
+        // policy.
+        const entries = [
+          buildModelRegistryEntry("test-cred-model", ["coder"], [
+            { provider: "openrouter", model: "openrouter/test-model", priority: 1 },
+          ]),
+        ];
+        const { providerHealthMap } = await initializeProviderHealthState(entries);
 
-        const rawStatus = await (plugin.tool as any).get_quota_backoff_status.execute({});
-        const status = JSON.parse(rawStatus as string);
-
-        const keyMissingEntries = Object.values(status).filter(
-          (entry: any) => entry?.type === "provider" && entry?.state === "key_missing",
-        );
+        // The credentialed provider (openrouter) has no auth.json or env
+        // var credential in this isolated HOME, so it must be key_missing.
+        const openrouterEntry = providerHealthMap.get("openrouter");
         assert.equal(
-          keyMissingEntries.length > 0,
-          true,
-          "expected factory to install key_missing entries for uncredentialed providers from models.jsonc",
+          openrouterEntry?.state,
+          "key_missing",
+          "expected openrouter to be key_missing in isolated HOME with empty auth.json",
         );
-        // Every key_missing entry must render its `until` as the `"never"`
-        // sentinel — no ISO string — because `key_missing` has no expiry.
-        for (const entry of keyMissingEntries) {
-          assert.equal((entry as any).until, "never");
-        }
+        assert.equal(openrouterEntry?.until, Number.POSITIVE_INFINITY, "key_missing has until=Infinity");
       });
     } finally {
       for (const [key, value] of Object.entries(savedEnv)) {

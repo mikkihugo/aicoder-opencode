@@ -4,7 +4,7 @@ mode: subagent
 model: xiaomi-token-plan-ams/mimo-v2-pro
 models:
   - zai-coding-plan/glm-4.7
-  - qwen/qwen-3.5-coder
+  - qwen/qwen-3.6-plus
   - ollama-cloud/qwen3-coder-next
 routing_role: implementation_worker
 routing_complexity: medium

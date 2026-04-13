@@ -31,11 +31,11 @@ test("loadModelRegistry_whenRegistryExists_returnsCuratedModels", async () => {
   assert.equal(modelRegistry.models.length > 0, true);
 });
 
-test("loadModelRegistry_whenQwenOauthRouteIsCurated_includesQwenThreePointFiveCoder", async () => {
+test("loadModelRegistry_whenQwenOauthRouteIsCurated_includesQwenThreePointSixPlus", async () => {
   const modelRegistry = await loadModelRegistry(CONTROL_PLANE_ROOT_DIRECTORY);
-  const qwenModelEntry = modelRegistry.models.find((entry) => entry.id === "qwen-3.5-coder");
+  const qwenModelEntry = modelRegistry.models.find((entry) => entry.id === "qwen-3.6-plus");
 
-  assert.equal(qwenModelEntry?.provider_order[0]?.model, "qwen/qwen-3.5-coder");
+  assert.equal(qwenModelEntry?.provider_order[0]?.model, "qwen/qwen-3.6-plus");
 });
 
 test("parseModelSelectionOptions_whenFlagsProvided_returnsParsedFilters", () => {

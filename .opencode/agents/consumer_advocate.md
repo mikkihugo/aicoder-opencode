@@ -1,7 +1,7 @@
 ---
 description: Read-only consumer advocate for customer, operator, admin, and installer workflow friction.
 mode: subagent
-model: iflowcn/qwen3-coder-plus
+model: ollama-cloud/qwen3-coder-next
 permission:
   edit: deny
   bash:

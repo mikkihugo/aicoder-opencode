@@ -1,7 +1,7 @@
 ---
 description: Read-only roadmap and execution-state keeper for milestones, sequencing, and stale-next-step detection.
 mode: subagent
-model: iflowcn/qwen3-coder-plus
+model: ollama-cloud/qwen3-coder-next
 permission:
   edit: deny
   bash:

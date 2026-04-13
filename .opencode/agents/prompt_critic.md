@@ -5,7 +5,7 @@ model: ollama-cloud/kimi-k2-thinking
 models:
   - ollama-cloud/kimi-k2-thinking
   - zai-coding-plan/glm-5.1
-  - ollama-cloud/minimax-m2.7
+  - minimax/MiniMax-M2.7
 routing_role: deep_reviewer
 routing_complexity: large
 permission:

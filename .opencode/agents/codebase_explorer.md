@@ -1,7 +1,7 @@
 ---
 description: Fast read-only codebase mapper for ownership, search, and execution paths.
 mode: subagent
-model: iflowcn/qwen3-coder-plus
+model: ollama-cloud/qwen3-coder-next
 models:
   - zai-coding-plan/glm-4.7-flash
   - zai-coding-plan/glm-4.7

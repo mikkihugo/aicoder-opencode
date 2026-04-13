@@ -1,7 +1,7 @@
 ---
 description: Read-only external-doc and reference researcher.
 mode: subagent
-model: ollama-cloud/minimax-m2.7
+model: minimax/MiniMax-M2.7
 permission:
   edit: deny
   bash:

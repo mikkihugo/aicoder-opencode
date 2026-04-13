@@ -1,7 +1,7 @@
 ---
 description: Read-only verification specialist for regression checks and proof of completion.
 mode: subagent
-model: iflowcn/qwen3-coder-plus
+model: ollama-cloud/qwen3-coder-next
 models:
   - ollama-cloud/qwen3-coder-next
   - zai-coding-plan/glm-5.1

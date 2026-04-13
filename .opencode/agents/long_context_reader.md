@@ -1,10 +1,10 @@
 ---
 description: Read-only broad-context subsystem reader for cross-component evidence gathering.
 mode: subagent
-model: ollama-cloud/minimax-m2.7
+model: minimax/MiniMax-M2.7
 models:
   - opencode-go/mimo-v2-pro
-  - ollama-cloud/minimax-m2.7
+  - minimax/MiniMax-M2.7
   - ollama-cloud/kimi-k2-thinking
 routing_role: long_context_reader
 routing_complexity: large

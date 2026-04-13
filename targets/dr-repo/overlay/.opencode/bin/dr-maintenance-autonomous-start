@@ -275,9 +275,15 @@ PY
 }
 
 session_has_stale_assistant_run() {
+  # Heartbeat-based staleness: an assistant run is stale only if (a) the last
+  # assistant message has no finish marker AND (b) the session-level time.updated
+  # hasn't advanced for `stale_after_seconds`. Because opencode bumps time.updated
+  # on every message/part write, a genuinely long-running (25 min) tool call stays
+  # alive as long as it keeps streaming — we no longer kill real work just because
+  # the message was *created* long ago.
   local session_id="$1"
   local stale_after_seconds="$2"
-  python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" "$session_id" "$stale_after_seconds" <<'PY'
+  python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" "$REPO_ROOT" "$session_id" "$stale_after_seconds" <<'PY'
 import base64
 import json
 import sys
@@ -285,42 +291,74 @@ import time
 import urllib.request
 import urllib.error
 from pathlib import Path
+from urllib.parse import quote
 
 server_url = sys.argv[1].rstrip("/")
 username = sys.argv[2]
 password_path = Path(sys.argv[3])
-session_id = sys.argv[4]
-stale_after_seconds = int(sys.argv[5])
-request = urllib.request.Request(f"{server_url}/session/{session_id}/message")
+repo_root = sys.argv[4]
+session_id = sys.argv[5]
+stale_after_seconds = int(sys.argv[6])
 
+auth_header = None
 if password_path.exists():
     password = password_path.read_text(encoding="utf-8").strip()
     if password:
         token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
-        request.add_header("Authorization", f"Basic {token}")
+        auth_header = f"Basic {token}"
+
+
+def fetch_json(path):
+    request = urllib.request.Request(f"{server_url}{path}")
+    if auth_header is not None:
+        request.add_header("Authorization", auth_header)
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8"))
+
 
 try:
-    with urllib.request.urlopen(request, timeout=30) as response:
-        messages = json.loads(response.read().decode("utf-8"))
+    messages = fetch_json(f"/session/{session_id}/message")
 except urllib.error.URLError:
     raise SystemExit(1)
 
-now_ms = int(time.time() * 1000)
+last_assistant = None
 for message in reversed(messages):
     info = message.get("info") or {}
     if info.get("role") != "assistant":
         continue
+    last_assistant = info
+    break
 
-    finish = info.get("finish")
-    if isinstance(finish, str) and finish:
-        raise SystemExit(1)
-
-    created_ms = ((info.get("time") or {}).get("created"))
-    if isinstance(created_ms, (int, float)) and now_ms - int(created_ms) >= stale_after_seconds * 1000:
-        print("assistant-stale")
-        raise SystemExit(0)
-
+if last_assistant is None:
     raise SystemExit(1)
+
+finish = last_assistant.get("finish")
+if isinstance(finish, str) and finish:
+    raise SystemExit(1)
+
+# An unfinished assistant run exists. Use session.time.updated as heartbeat.
+try:
+    sessions = fetch_json(f"/session?directory={quote(repo_root, safe='/')}")
+except urllib.error.URLError:
+    raise SystemExit(1)
+
+this_session = next((s for s in sessions if s.get("id") == session_id), None)
+if this_session is None:
+    raise SystemExit(1)
+
+updated_ms = (this_session.get("time") or {}).get("updated")
+if not isinstance(updated_ms, (int, float)):
+    # No heartbeat signal available — fall back to message created time so we
+    # never silently pass; belt-and-braces against server shape drift.
+    created_ms = (last_assistant.get("time") or {}).get("created")
+    if not isinstance(created_ms, (int, float)):
+        raise SystemExit(1)
+    updated_ms = created_ms
+
+now_ms = int(time.time() * 1000)
+if now_ms - int(updated_ms) >= stale_after_seconds * 1000:
+    print("assistant-stale")
+    raise SystemExit(0)
 
 raise SystemExit(1)
 PY
