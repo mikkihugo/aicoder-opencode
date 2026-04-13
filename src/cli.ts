@@ -225,6 +225,165 @@ async function validateTargetConfiguration(targetConfiguration: TargetConfigurat
 }
 
 /**
+ * Discover canonical shared plugin names from src/plugins/.
+ *
+ * Shared plugins are .ts files in src/plugins/ that are not test files or TUI helpers.
+ *
+ * Returns:
+ *   Sorted array of plugin base names (e.g. ["control-plane-specialist-routing", "model-registry"]).
+ */
+export async function discoverSharedPluginNames(): Promise<string[]> {
+  const pluginDirectory = path.join(CONTROL_PLANE_ROOT_DIRECTORY, "src", "plugins");
+  const entries = await readdir(pluginDirectory);
+  return entries
+    .filter((entry) => entry.endsWith(".ts"))
+    .filter((entry) => !entry.endsWith(".test.ts"))
+    .filter((entry) => !entry.endsWith(".keyless.test.ts"))
+    .filter((entry) => !entry.endsWith("-tui.ts"))
+    .map((entry) => entry.replace(/\.ts$/, ""))
+    .sort();
+}
+
+/**
+ * One result from plugin shim validation.
+ */
+type PluginShimValidationResult = {
+  pluginName: string;
+  status: "in-sync" | "missing-shim" | "path-style-warning" | "duplicate";
+  message: string;
+};
+
+/**
+ * Validate shared plugin shim sync for one target.
+ *
+ * Checks whether each canonical shared plugin in src/plugins/ has a corresponding
+ * overlay shim in the target that exports from the compiled dist output.
+ *
+ * Args:
+ *   targetConfiguration: Target whose overlay plugin shims should be validated.
+ *
+ * Returns:
+ *   Array of validation results — one per shared plugin, plus extras for duplicates.
+ */
+export async function validateTargetPluginShims(
+  targetConfiguration: TargetConfiguration,
+): Promise<PluginShimValidationResult[]> {
+  const sharedPluginNames = await discoverSharedPluginNames();
+  const overlayPluginDirectory = path.join(
+    CONTROL_PLANE_ROOT_DIRECTORY,
+    "targets",
+    targetConfiguration.name,
+    "overlay",
+    ".opencode",
+    "plugins",
+  );
+
+  const results: PluginShimValidationResult[] = [];
+
+  // Check if overlay plugin directory exists at all
+  let overlayEntries: string[] = [];
+  try {
+    overlayEntries = await readdir(overlayPluginDirectory);
+  } catch {
+    // Directory doesn't exist — every shared plugin is missing a shim
+    for (const pluginName of sharedPluginNames) {
+      results.push({
+        pluginName,
+        status: "missing-shim",
+        message: `no overlay plugin directory at targets/${targetConfiguration.name}/overlay/.opencode/plugins/`,
+      });
+    }
+    return results;
+  }
+
+  // Build a map of what's in the overlay
+  const shimFiles = overlayEntries.filter((entry) => entry.endsWith(".ts") || entry.endsWith(".js"));
+  const shimDirectories = [];
+  for (const entry of overlayEntries) {
+    try {
+      const entryStat = await stat(path.join(overlayPluginDirectory, entry));
+      if (entryStat.isDirectory()) {
+        shimDirectories.push(entry);
+      }
+    } catch {
+      // skip
+    }
+  }
+
+  for (const pluginName of sharedPluginNames) {
+    const distRef = `dist/plugins/${pluginName}.js`;
+    const matchingShims: Array<{ path: string; style: string }> = [];
+
+    // Check for file-based shims (e.g. aicoder-model-registry.ts)
+    for (const file of shimFiles) {
+      const filePath = path.join(overlayPluginDirectory, file);
+      try {
+        const content = await readFile(filePath, "utf8");
+        if (content.includes(distRef)) {
+          const isAbsolute = content.includes(`/aicoder-opencode/${distRef}`);
+          const hasRelative = content.includes("../");
+          matchingShims.push({
+            path: file,
+            style: isAbsolute ? "absolute" : hasRelative ? "relative" : "unknown",
+          });
+        }
+      } catch {
+        // skip unreadable files
+      }
+    }
+
+    // Check for directory-based shims (e.g. model-registry/index.ts)
+    for (const dir of shimDirectories) {
+      const indexTs = path.join(overlayPluginDirectory, dir, "index.ts");
+      try {
+        const content = await readFile(indexTs, "utf8");
+        if (content.includes(distRef)) {
+          const isAbsolute = content.includes(`/aicoder-opencode/${distRef}`);
+          const hasRelative = content.includes("../");
+          matchingShims.push({
+            path: `${dir}/index.ts`,
+            style: isAbsolute ? "absolute" : hasRelative ? "relative" : "unknown",
+          });
+        }
+      } catch {
+        // skip — no index.ts or unreadable
+      }
+    }
+
+    if (matchingShims.length === 0) {
+      results.push({
+        pluginName,
+        status: "missing-shim",
+        message: `no shim found exporting from ${distRef}`,
+      });
+    } else if (matchingShims.length > 1) {
+      results.push({
+        pluginName,
+        status: "duplicate",
+        message: `${matchingShims.length} shims found: ${matchingShims.map((s) => `${s.path} (${s.style})`).join(", ")}`,
+      });
+    } else {
+      const shim = matchingShims[0]!;
+      if (shim.style === "absolute") {
+        results.push({
+          pluginName,
+          status: "path-style-warning",
+          message: `shim ${shim.path} uses absolute path (should be relative for portability)`,
+        });
+      } else {
+        results.push({
+          pluginName,
+          status: "in-sync",
+          message: `shim ${shim.path} exports from ${distRef}`,
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
  * Read the target-specific instruction document from the control plane.
  *
  * Args:
@@ -517,6 +676,7 @@ function printUsageAndExit(): never {
   process.stdout.write(
     [
       "usage: aicoder-opencode [list-targets|show-target <name>|show-target-instructions <name>|validate-target <name>",
+      "|validate-target-plugins <name>",
       "|print-product-launch <name> [-- <args...>]|launch-product <name> [-- <args...>]",
       "|debug-product-sandbox <name> [-- <command...>]|check-doom-loop <name> [threshold]",
       "|list-models [--free] [--provider <provider>] [--enabled]",
@@ -597,6 +757,32 @@ async function main(): Promise<void> {
     await validateTargetConfiguration(targetConfiguration);
     process.stdout.write(`${targetName}: ok\n`);
     return;
+  }
+
+  if (commandName === "validate-target-plugins") {
+    const targetName = process.argv[3];
+    if (!targetName) {
+      printUsageAndExit();
+    }
+    const targetConfiguration = await loadTargetConfiguration(targetName);
+    const results = await validateTargetPluginShims(targetConfiguration);
+    const hasIssues = results.some(
+      (result) => result.status !== "in-sync",
+    );
+    for (const result of results) {
+      const prefix = result.status === "in-sync"
+        ? "  ok:   "
+        : result.status === "missing-shim"
+          ? "  FAIL: "
+          : result.status === "duplicate"
+            ? "  WARN: "
+            : "  warn: ";
+      process.stdout.write(`${prefix}${result.pluginName} — ${result.message}\n`);
+    }
+    if (!hasIssues) {
+      process.stdout.write(`${targetName}: all shared plugins in sync\n`);
+    }
+    process.exit(hasIssues ? 1 : 0);
   }
 
   if (commandName === "print-product-launch") {

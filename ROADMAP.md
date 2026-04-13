@@ -141,10 +141,18 @@ Completion Notes (2026-04-11):
 - Prereq: M8 (create letta-workspace overlay).
 - Also think about: a `--check` mode that verifies symlinks haven't been tampered with, and a CI check that flags drift between the live file and the overlay.
 
-### M7: Shared plugin propagation verification `⬜ PENDING`
+### M7: Shared plugin propagation verification `✅ COMPLETED`
 
-- Verify that overlay shims in `targets/*/overlay/.opencode/plugins/` are in sync with `src/plugins/`
-- Add a CI check or validation command
+Completion Notes (2026-04-13):
+- Added `validate-target-plugins` CLI command to `src/cli.ts`
+- Added `discoverSharedPluginNames()` — scans `src/plugins/*.ts` excluding test/TUI files
+- Added `validateTargetPluginShims()` — checks each shared plugin has a shim exporting from `dist/plugins/<name>.js`
+- Detects: missing shims, duplicate shims, path-style inconsistencies (relative vs absolute)
+- Added `parseCommand` case for `validate-target-plugins` in `src/cli/arg-parser.ts`
+- Added 3 unit tests (parseCommand) + 3 integration tests (dr-repo, letta-workspace, nonexistent)
+- Added Makefile targets: `validate-plugins-dr-repo`, `validate-plugins-letta-workspace`, `validate-plugins`
+- Findings: dr-repo has duplicate model-registry shims (relative + absolute), missing control-plane-specialist-routing shim; letta-workspace has zero plugin shims
+- All 580 tests pass, type check clean
 
 ### M13: Env-var credential fallback in `loadAuthKeys` `✅ COMPLETED`
 

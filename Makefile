@@ -1,4 +1,4 @@
-.PHONY: help install build check targets show-dr-repo show-letta-workspace show-dr-repo-instructions show-letta-workspace-instructions validate-dr-repo validate-letta-workspace print-dr-repo-launch debug-dr-repo-sandbox doom-loop-dr-repo show-aicoder-opencode show-aicoder-opencode-instructions validate-aicoder-opencode self-check openportal-start openportal-stop openportal-status openportal-list openportal-clean opencode-db-maintenance-start opencode-db-maintenance-status opencode-db-checkpoint-now opencode-db-backup-now opencode-db-vacuum
+.PHONY: help install build check targets show-dr-repo show-letta-workspace show-dr-repo-instructions show-letta-workspace-instructions validate-dr-repo validate-letta-workspace print-dr-repo-launch debug-dr-repo-sandbox doom-loop-dr-repo show-aicoder-opencode show-aicoder-opencode-instructions validate-aicoder-opencode self-check openportal-start openportal-stop openportal-status openportal-list openportal-clean opencode-db-maintenance-start opencode-db-maintenance-status opencode-db-checkpoint-now opencode-db-backup-now opencode-db-vacuum validate-plugins-dr-repo validate-plugins-letta-workspace validate-plugins
 
 # Prefer bun when installed, fall back to npm/npx.
 RUNNER := $(shell command -v bun >/dev/null 2>&1 && echo "bun" || echo "npm")
@@ -22,6 +22,9 @@ help:
 	@echo "  make show-aicoder-opencode              - Show aicoder-opencode target config"
 	@echo "  make show-aicoder-opencode-instructions - Show aicoder-opencode instruction doc"
 	@echo "  make validate-aicoder-opencode          - Validate aicoder-opencode target paths"
+	@echo "  make validate-plugins-dr-repo           - Validate dr-repo plugin shim sync"
+	@echo "  make validate-plugins-letta-workspace   - Validate letta-workspace plugin shim sync"
+	@echo "  make validate-plugins                   - Validate plugin shim sync for all targets"
 	@echo "  make self-check                         - Run build + tests on the control plane"
 	@echo "  make openportal-start                  - Start the control-plane OpenPortal instance"
 	@echo "  make openportal-stop                   - Stop the control-plane OpenPortal instance"
@@ -81,6 +84,16 @@ show-aicoder-opencode-instructions:
 
 validate-aicoder-opencode:
 	@$(NPX_CMD) tsx src/cli.ts validate-target aicoder-opencode
+
+validate-plugins-dr-repo:
+	@$(NPX_CMD) tsx src/cli.ts validate-target-plugins dr-repo
+
+validate-plugins-letta-workspace:
+	@$(NPX_CMD) tsx src/cli.ts validate-target-plugins letta-workspace
+
+validate-plugins:
+	@echo "=== dr-repo ===" && $(NPX_CMD) tsx src/cli.ts validate-target-plugins dr-repo; \
+	echo "=== letta-workspace ===" && $(NPX_CMD) tsx src/cli.ts validate-target-plugins letta-workspace
 
 self-check:
 	@$(RUNNER) run check

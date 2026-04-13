@@ -231,6 +231,16 @@ test("parseCommand_whenValidateTarget_returnsValidateTarget", () => {
   assert.deepEqual(result, { command: "validate-target", targetName: "dr-repo" });
 });
 
+test("parseCommand_whenValidateTargetPlugins_returnsValidateTargetPlugins", () => {
+  const result = parseCommand(["node", "cli.js", "validate-target-plugins", "dr-repo"]);
+  assert.deepEqual(result, { command: "validate-target-plugins", targetName: "dr-repo" });
+});
+
+test("parseCommand_whenValidateTargetPluginsNoTarget_returnsHelp", () => {
+  const result = parseCommand(["node", "cli.js", "validate-target-plugins"]);
+  assert.deepEqual(result, { command: "help" });
+});
+
 test("parseCommand_whenPrintProductLaunch_returnsWithArgs", () => {
   const result = parseCommand(["node", "cli.js", "print-product-launch", "dr-repo", "--", "--help"]);
   assert.deepEqual(result, {
@@ -497,4 +507,26 @@ test("integration_dbMaintenance_allTargets_includesSummaryCounts", async () => {
   assert.equal(typeof result.summary.failed, "number");
   assert.ok(result.summary.succeeded >= 0);
   assert.ok(result.summary.failed >= 0);
+});
+
+// ─── validate-target-plugins ───────────────────────────────────────────
+
+test("integration_validatePlugins_drRepo_reportsShimStatus", async () => {
+  const { stdout, exitCode } = await runCli("validate-target-plugins", "dr-repo");
+  // dr-repo has model-registry shims — expect at least one ok or warn line
+  assert.ok(stdout.length > 0);
+  // Should mention model-registry
+  assert.ok(stdout.includes("model-registry"), `expected model-registry in output: ${stdout}`);
+});
+
+test("integration_validatePlugins_lettaWorkspace_reportsMissingShims", async () => {
+  const { stdout, exitCode } = await runCli("validate-target-plugins", "letta-workspace");
+  // letta-workspace has no plugin shims — should report FAIL for shared plugins
+  assert.equal(exitCode, 1);
+  assert.ok(stdout.includes("FAIL"), `expected FAIL in output: ${stdout}`);
+});
+
+test("integration_validatePlugins_nonexistent_exitsWithError", async () => {
+  const { exitCode } = await runCli("validate-target-plugins", "nonexistent-target-xyz");
+  assert.notEqual(exitCode, 0);
 });

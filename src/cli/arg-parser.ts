@@ -12,6 +12,7 @@ export type ParsedCommand =
   | { command: "show-target"; targetName: string }
   | { command: "show-target-instructions"; targetName: string }
   | { command: "validate-target"; targetName: string }
+  | { command: "validate-target-plugins"; targetName: string }
   | { command: "print-product-launch"; targetName: string; launcherArguments: string[] }
   | { command: "launch-product"; targetName: string; launcherArguments: string[] }
   | { command: "debug-product-sandbox"; targetName: string; debugCommand: string[] }
@@ -196,6 +197,12 @@ export function parseCommand(argv: string[]): ParsedCommand {
       const targetName = requireTargetName(argv, 3);
       if (!targetName) return { command: "help" };
       return { command: "validate-target", targetName };
+    }
+
+    case "validate-target-plugins": {
+      const targetName = requireTargetName(argv, 3);
+      if (!targetName) return { command: "help" };
+      return { command: "validate-target-plugins", targetName };
     }
 
     case "print-product-launch": {
