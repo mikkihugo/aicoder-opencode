@@ -1719,6 +1719,122 @@ export type PersistProviderHealthFn = (
  *   — best-effort cleanup of tmp files on failure, intentional because a
  *   failed persist must not escalate into a runtime exception that crashes
  *   the event hook).
+ *
+ * ## Drift surfaces (M147 PDD)
+ *
+ * The pre-existing M68 pins assert three shape-level invariants: the
+ * `routeHealth.get(routeKey)` deep-equals the written entry, the
+ * `persistFn` spy records `persistCalls === 1` with reference equality on
+ * both maps, and the overwrite-before-persist ordering holds via a
+ * snapshot-at-persist-time `deepEqual`. All three assert on DEEP value
+ * shape only — `deepEqual` tolerates defensive clones, case-folded keys,
+ * and incidental cross-map writes, so three orthogonal write-contract
+ * invariants below sit entirely below the existing coverage. Each gets
+ * exactly one new asymmetric pin so a sabotage fires uniquely among the
+ * M147 pins.
+ *
+ * 1. **Key-exactness: the `routeKey` argument is stored verbatim, no
+ *    case-folding or normalization.** The helper writes
+ *    `modelRouteHealthMap.set(routeKey, health)` with the caller's string
+ *    as-is. Callers compose the key via `composeRouteKey` (M30) which
+ *    preserves the exact provider-side casing the registry author
+ *    specified — including the mixed-case `LongCat-Flash-Chat` family
+ *    (`"longcat/LongCat-Flash-Chat"`, `"longcat/LongCat-Flash-Thinking"`,
+ *    `"longcat/LongCat-Flash-Lite"`), which is the SHIPPING registry
+ *    convention for the LongCat ScMoE models. A plausible "defensive
+ *    normalization" refactor to `modelRouteHealthMap.set(routeKey.
+ *    toLowerCase(), health)` (justified as "avoid lookup misses from case
+ *    drift") silently writes the LongCat penalties under
+ *    `"longcat/longcat-flash-chat"` while `findLiveRoutePenalty` and
+ *    `isRouteCurrentlyHealthy` probe via `composeRouteKey` against the
+ *    ORIGINAL mixed-case form — every reader misses every write, LongCat
+ *    penalties never take effect, and the LongCat routes ship as
+ *    perpetually healthy even under active quota. The M68 pins all use
+ *    already-lowercase keys (`"iflowcn/dead-model"`,
+ *    `"iflowcn/kimi-k2-0905"`, `"ollama-cloud/glm-5"`) so toLowerCase is
+ *    a no-op for every existing assertion and slips through green. Pin A
+ *    writes under a mixed-case `"longcat/LongCat-Flash-Chat"` key and
+ *    asserts `modelRouteHealthMap.has` against the EXACT mixed-case form
+ *    AND the negation on the lowercased form — the sabotage fails both
+ *    halves while the three M68 pins stay green.
+ *
+ * 2. **Reference identity: `health` is stored by reference, not cloned.**
+ *    The stored value is the exact object handed to the helper. Callers
+ *    rely on this identity downstream — `findLiveRoutePenalty` and
+ *    `findLiveProviderPenalty`'s M110/M104 drift-surface #1 pins already
+ *    encode the same reference-return contract on the READ side, and
+ *    `computeRegistryEntryHealthReport` captures the returned reference
+ *    at tool-call time so a subsequent retryCount bump by
+ *    `buildRouteHealthEntry` is visible through the previously-captured
+ *    handle. A plausible "immutability hygiene" refactor to
+ *    `modelRouteHealthMap.set(routeKey, {...health})` or
+ *    `modelRouteHealthMap.set(routeKey, structuredClone(health))`
+ *    preserves deep-equality (so every M68 pin still passes) but breaks
+ *    the write→read reference round-trip the M104/M110 pair relies on.
+ *    The stored entry drifts away from the caller's handle, and any
+ *    mutation the caller applies to the original (retryCount bumps,
+ *    merge updates via `buildRouteHealthEntry`) no longer propagates to
+ *    the map — a silent divergence that ships green under every deep-
+ *    equality pin. Pin B asserts `modelRouteHealthMap.get(routeKey) ===
+ *    health` with strict reference identity; the spread/clone sabotage
+ *    fires this pin alone because M68 pin 1's `deepEqual` is satisfied
+ *    by the clone.
+ *
+ * 3. **Map-selection exclusivity: `providerHealthMap` is NOT written.**
+ *    The helper writes exactly one map — the route map. The provider
+ *    map is threaded through to `persistFn` as a pass-through so the
+ *    disk snapshot is atomic across both halves (M68 pin 2 already
+ *    asserts this pass-through), but the helper itself never mutates
+ *    the provider map. A plausible "belt-and-suspenders" refactor that
+ *    adds `providerHealthMap.set(routeKey, health as unknown as
+ *    ProviderHealth)` alongside the route write (justified as "keep
+ *    both halves of the dual-map in sync") cross-pollutes the provider
+ *    map with a route-shaped key, which `classifyPersistedHealthKey`
+ *    then misclassifies on the next `loadPersistedProviderHealth`
+ *    round-trip — the route key `"iflowcn/kimi-k2-0905"` contains `/`
+ *    so the classifier routes it BACK to the route map on reload, but
+ *    the provider map still carries the zombie entry for the in-memory
+ *    lifetime of the plugin process. `findLiveProviderPenalty` then
+ *    probes for `"iflowcn"` and gets `null` (correct) but any caller
+ *    that iterates `providerHealthMap.entries()` (the system-prompt
+ *    builders, `collectAgentVisibleLivePenalties`, the tool payload
+ *    assembly) sees the zombie route-shaped entry in the provider
+ *    bucket, mis-labels it as a provider-scope penalty, and surfaces
+ *    a confusing "Provider iflowcn/kimi-k2-0905 [MODEL NOT FOUND]"
+ *    line to the agent. M68 pin 1 only asserts the route map receives
+ *    the entry — it says nothing about whether the provider map ALSO
+ *    receives a write. Pin C asserts `providerHealthMap.size === 0`
+ *    after a call into an empty provider map; the cross-map-write
+ *    sabotage fires this pin alone because every M68 assertion still
+ *    holds (the route write happened, the persistFn spy still sees
+ *    both maps, the ordering is still correct).
+ *
+ * Asymmetric partition — each sabotage fires exactly one new pin:
+ *   - S1 (`routeKey.toLowerCase()`): Pin A uses a mixed-case
+ *     `"longcat/LongCat-Flash-Chat"` key; the sabotage writes to the
+ *     lowercased form so `.has(mixedCase)` fails. Pin B uses an
+ *     already-lowercase key so `.toLowerCase()` is a no-op — the
+ *     reference-identity assertion still holds. Pin C still passes
+ *     because the provider map is untouched regardless of case.
+ *   - S2 (`{...health}`): Pin B fires — the clone breaks strict
+ *     identity. Pin A still passes because the mixed-case key is
+ *     preserved exactly (the clone has no bearing on the key). Pin C
+ *     still passes because the provider map is untouched.
+ *   - S3 (add `providerHealthMap.set(routeKey, ...)`): Pin C fires —
+ *     `providerHealthMap.size` is no longer 0. Pin A still passes
+ *     (route key preserved). Pin B still passes (route map entry is
+ *     reference-equal to the original `health`).
+ *
+ * Pin fixtures are kept disjoint so S1 only fires Pin A (via a
+ * mixed-case route key that Pin B's lowercase fixture cannot reach),
+ * S2 only fires Pin B (via a reference-identity assertion that Pin A
+ * and Pin C cannot trip), and S3 only fires Pin C (via a provider-map
+ * size assertion that Pin A and Pin B do not make). Pre-existing M68
+ * pins fire additively under S1 only if the sabotage happens to affect
+ * their lowercase keys (it does not — `.toLowerCase()` is a no-op on
+ * already-lowercase strings), stay green under S2 (deepEqual tolerates
+ * clones), and stay green under S3 (route write still happens, persist
+ * spy still fires correctly).
  */
 export function recordRouteHealthPenalty(
   modelRouteHealthMap: Map<string, ModelRouteHealth>,

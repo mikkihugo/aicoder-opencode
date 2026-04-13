@@ -3327,6 +3327,107 @@ test("recordRouteHealthPenalty_whenMapHasExistingEntry_overwritesItBeforePersist
   assert.deepEqual(modelRouteHealthMap.get("ollama-cloud/glm-5"), newHealth);
 });
 
+test("recordRouteHealthPenalty_whenRouteKeyIsMixedCase_storesUnderExactKeyWithoutCaseFolding", () => {
+  // M147 Pin A — key-exactness invariant. The `routeKey` argument must
+  // be stored verbatim. A defensive `.toLowerCase()` normalization would
+  // silently rewrite LongCat's mixed-case registry keys
+  // (`"longcat/LongCat-Flash-Chat"`) to the lowercased form, while
+  // `composeRouteKey`-using readers probe the ORIGINAL mixed-case —
+  // every LongCat penalty write would land in a key no reader ever
+  // queries. The M68 pins all use already-lowercase fixtures so
+  // toLowerCase ships green against them.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  const mixedCaseRouteKey = "longcat/LongCat-Flash-Chat";
+  const loweredRouteKey = "longcat/longcat-flash-chat";
+  const health: ModelRouteHealth = {
+    state: "quota",
+    until: 42_000_000,
+    retryCount: 1,
+  };
+
+  recordRouteHealthPenalty(
+    modelRouteHealthMap,
+    providerHealthMap,
+    mixedCaseRouteKey,
+    health,
+    () => {},
+  );
+
+  // The write must land under the EXACT mixed-case key.
+  assert.equal(modelRouteHealthMap.has(mixedCaseRouteKey), true);
+  // And MUST NOT appear under the lowercased form — asserting the
+  // negation catches any defensive case-folding that silently rewrites
+  // the key.
+  assert.equal(modelRouteHealthMap.has(loweredRouteKey), false);
+});
+
+test("recordRouteHealthPenalty_whenCalled_storesHealthByReferenceNotClone", () => {
+  // M147 Pin B — reference-identity invariant. The `health` argument
+  // must be stored by reference, not cloned. A `{...health}` spread or
+  // `structuredClone(health)` call would preserve deepEqual (so every
+  // M68 pin still passes) but break the write→read identity round-trip
+  // that `findLiveRoutePenalty`/M110 and `findLiveProviderPenalty`/M104
+  // rely on — callers that capture the returned handle at tool-call
+  // time would no longer see subsequent in-place mutations
+  // (`buildRouteHealthEntry` retryCount bumps, merge updates) because
+  // the map holds a divorced copy.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  const health: ModelRouteHealth = {
+    state: "model_not_found",
+    until: 9_000_000,
+    retryCount: 2,
+  };
+
+  recordRouteHealthPenalty(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "iflowcn/kimi-k2-0905",
+    health,
+    () => {},
+  );
+
+  const storedHealth = modelRouteHealthMap.get("iflowcn/kimi-k2-0905");
+  // Strict reference identity — `deepEqual` would tolerate a spread
+  // clone, which is exactly the sabotage class this pin catches.
+  assert.equal(storedHealth, health);
+});
+
+test("recordRouteHealthPenalty_whenCalled_doesNotMutateProviderHealthMap", () => {
+  // M147 Pin C — map-selection exclusivity. The helper writes exactly
+  // one map (the route map). The provider map is threaded through to
+  // `persistFn` as a pass-through but MUST NOT receive any write. A
+  // "belt-and-suspenders" refactor that also wrote the route-shaped
+  // key into `providerHealthMap` would cross-pollute the provider
+  // bucket: `classifyPersistedHealthKey` still routes the key back to
+  // the route map on reload, but every in-memory iterator over
+  // `providerHealthMap.entries()` (system-prompt builders,
+  // `collectAgentVisibleLivePenalties`, tool payloads) would see the
+  // zombie route-shaped entry in the provider bucket and surface a
+  // confusing "Provider iflowcn/kimi-k2-0905 [MODEL NOT FOUND]" line
+  // to the agent.
+  const modelRouteHealthMap = new Map<string, ModelRouteHealth>();
+  const providerHealthMap = new Map<string, ProviderHealth>();
+  const health: ModelRouteHealth = {
+    state: "timeout",
+    until: 5_000_000,
+    retryCount: 0,
+  };
+
+  recordRouteHealthPenalty(
+    modelRouteHealthMap,
+    providerHealthMap,
+    "iflowcn/qwen3-coder-plus",
+    health,
+    () => {},
+  );
+
+  // Provider map started empty and must stay empty — no cross-map
+  // write from the route-layer helper.
+  assert.equal(providerHealthMap.size, 0);
+});
+
 test("recordProviderHealthPenalty_whenCalled_writesHealthToProviderMap", () => {
   // M73: provider-layer map-set invariant — the helper must write the new
   // ProviderHealth entry under the exact providerID passed in, overwriting
