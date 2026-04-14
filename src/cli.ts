@@ -28,6 +28,7 @@ import {
   parseOpencodeDatabaseMaintenanceMode,
   vacuumOpencodeDatabase,
 } from "./opencode-database-maintenance.js";
+import { checkTargetAssets, installTargetAssets } from "./cli/install-command.js";
 
 const CONTROL_PLANE_ROOT_DIRECTORY = process.cwd();
 const TARGET_CONFIGURATION_DIRECTORY = path.join(
@@ -677,6 +678,7 @@ function printUsageAndExit(): never {
     [
       "usage: aicoder-opencode [list-targets|show-target <name>|show-target-instructions <name>|validate-target <name>",
       "|validate-target-plugins <name>",
+      "|install <name> [--check]",
       "|print-product-launch <name> [-- <args...>]|launch-product <name> [-- <args...>]",
       "|debug-product-sandbox <name> [-- <command...>]|check-doom-loop <name> [threshold]",
       "|list-models [--free] [--provider <provider>] [--enabled]",
@@ -783,6 +785,62 @@ async function main(): Promise<void> {
       process.stdout.write(`${targetName}: all shared plugins in sync\n`);
     }
     process.exit(hasIssues ? 1 : 0);
+  }
+
+  if (commandName === "install") {
+    const targetName = process.argv[3];
+    if (!targetName) {
+      printUsageAndExit();
+    }
+    const dryRun = process.argv.includes("--check");
+    const targetConfiguration = await loadTargetConfiguration(targetName);
+
+    if (dryRun) {
+      const results = await checkTargetAssets(
+        CONTROL_PLANE_ROOT_DIRECTORY,
+        targetName,
+        targetConfiguration.root,
+      );
+      let hasErrors = false;
+      for (const result of results) {
+        if (result.error) {
+          hasErrors = true;
+          process.stdout.write(`  FAIL: ${result.kind} — ${result.error}\n`);
+        } else if (result.symlinkCorrect) {
+          process.stdout.write(`  ok:   ${result.kind} — symlink correct\n`);
+        } else if (!result.sourceExists) {
+          process.stdout.write(`  skip: ${result.kind} — source does not exist\n`);
+        } else {
+          process.stdout.write(`  warn: ${result.kind} — not installed\n`);
+          hasErrors = true;
+        }
+      }
+      process.exit(hasErrors ? 1 : 0);
+    }
+
+    const results = await installTargetAssets(
+      CONTROL_PLANE_ROOT_DIRECTORY,
+      targetName,
+      targetConfiguration.root,
+      false,
+    );
+    for (const result of results) {
+      const parts: string[] = [];
+      if (result.copied) {
+        parts.push("copied");
+      }
+      if (result.symlinkCreated) {
+        parts.push("symlink created");
+      }
+      if (!result.copied && !result.symlinkCreated && result.symlinkCorrect) {
+        parts.push("already installed");
+      } else if (!result.copied && !result.symlinkCreated) {
+        parts.push("no action");
+      }
+      process.stdout.write(`  ${result.kind}: ${parts.join(", ")}\n`);
+    }
+    process.stdout.write(`${targetName}: install complete\n`);
+    return;
   }
 
   if (commandName === "print-product-launch") {

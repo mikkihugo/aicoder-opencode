@@ -22,6 +22,7 @@ export type ParsedCommand =
   | { command: "select-models"; roleName: string; rawArgs: string[] }
   | { command: "manage-models" }
   | { command: "opencode-database-maintenance"; targetName: string | null; allTargets: boolean; mode: string | undefined }
+  | { command: "install"; targetName: string; dryRun: boolean }
   | { command: "help" };
 
 /**
@@ -260,6 +261,13 @@ export function parseCommand(argv: string[]): ParsedCommand {
     case "opencode-database-maintenance": {
       const { targetName, allTargets, mode } = parseDatabaseMaintenanceArgs(argv);
       return { command: "opencode-database-maintenance", targetName, allTargets, mode };
+    }
+
+    case "install": {
+      const targetName = requireTargetName(argv, 3);
+      if (!targetName) return { command: "help" };
+      const dryRun = argv.includes("--check");
+      return { command: "install", targetName, dryRun };
     }
 
     default:

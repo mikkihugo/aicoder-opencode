@@ -14,6 +14,8 @@ import {
   parseDatabaseMaintenanceArgs,
   parseCommand,
 } from "./cli/arg-parser.js";
+import { mkdtemp, mkdir, writeFile, symlink, rm, lstat, readlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 
 const execFileAsync = promisify(execFile);
 const CLI_ENTRY = path.resolve("src/cli.ts");
@@ -340,6 +342,21 @@ test("parseCommand_whenDbMaintenanceAllTargets_returnsAllTargetsAndMode", () => 
   });
 });
 
+test("parseCommand_whenInstall_returnsInstall", () => {
+  const result = parseCommand(["node", "cli.js", "install", "dr-repo"]);
+  assert.deepEqual(result, { command: "install", targetName: "dr-repo", dryRun: false });
+});
+
+test("parseCommand_whenInstallCheck_returnsDryRun", () => {
+  const result = parseCommand(["node", "cli.js", "install", "letta-workspace", "--check"]);
+  assert.deepEqual(result, { command: "install", targetName: "letta-workspace", dryRun: true });
+});
+
+test("parseCommand_whenInstallMissingTarget_returnsHelp", () => {
+  const result = parseCommand(["node", "cli.js", "install"]);
+  assert.deepEqual(result, { command: "help" });
+});
+
 test("parseCommand_whenUnknownCommand_returnsHelp", () => {
   const result = parseCommand(["node", "cli.js", "nonexistent-command"]);
   assert.deepEqual(result, { command: "help" });
@@ -529,4 +546,64 @@ test("integration_validatePlugins_lettaWorkspace_reportsMissingShims", async () 
 test("integration_validatePlugins_nonexistent_exitsWithError", async () => {
   const { exitCode } = await runCli("validate-target-plugins", "nonexistent-target-xyz");
   assert.notEqual(exitCode, 0);
+});
+
+// ─── install command integration tests ─────────────────────────────────
+
+test("integration_install_lettaWorkspace_createsOverlayAndSymlink", async () => {
+  const tempTargetRoot = await mkdtemp(path.join(tmpdir(), "aicoder-install-integ-"));
+
+  // Override letta-workspace root by creating a temporary target config is too invasive.
+  // Instead, use the real aicoder-opencode target against a temp dir by swapping the
+  // config file temporarily. Simpler: create a temp target config and install it.
+  const tempTargetName = `install-test-${Date.now()}`;
+  const tempConfigPath = path.resolve("config", "targets", `${tempTargetName}.yaml`);
+  await writeFile(
+    tempConfigPath,
+    `name: ${tempTargetName}\nkind: repo\nroot: ${tempTargetRoot}\ndefault_branch: main\nmaintenance_owner: test\ninstruction_path: README.md\n`,
+  );
+
+  try {
+    const { stdout, exitCode } = await runCli("install", tempTargetName);
+    assert.equal(exitCode, 0);
+    assert.ok(stdout.includes("agents:"));
+    assert.ok(stdout.includes("install complete"));
+
+    const agentsLink = path.join(tempTargetRoot, ".opencode", "agents");
+    const stats = await lstat(agentsLink);
+    assert.ok(stats.isSymbolicLink());
+    const resolved = await readlink(agentsLink);
+    assert.ok(resolved.includes(tempTargetName));
+  } finally {
+    await rm(tempConfigPath, { force: true });
+    await rm(tempTargetRoot, { recursive: true, force: true });
+  }
+});
+
+test("integration_installCheck_lettaWorkspace_reportsStatus", async () => {
+  const tempTargetRoot = await mkdtemp(path.join(tmpdir(), "aicoder-install-check-integ-"));
+  const tempTargetName = `install-check-test-${Date.now()}`;
+  const tempConfigPath = path.resolve("config", "targets", `${tempTargetName}.yaml`);
+  await writeFile(
+    tempConfigPath,
+    `name: ${tempTargetName}\nkind: repo\nroot: ${tempTargetRoot}\ndefault_branch: main\nmaintenance_owner: test\ninstruction_path: README.md\n`,
+  );
+
+  try {
+    // Before install, --check should report missing overlay/symlink
+    const { stdout: beforeStdout, exitCode: beforeExit } = await runCli("install", tempTargetName, "--check");
+    assert.notEqual(beforeExit, 0);
+    assert.ok(beforeStdout.includes("FAIL") || beforeStdout.includes("warn"));
+
+    // Install
+    await runCli("install", tempTargetName);
+
+    // After install, --check should pass
+    const { stdout: afterStdout, exitCode: afterExit } = await runCli("install", tempTargetName, "--check");
+    assert.equal(afterExit, 0);
+    assert.ok(afterStdout.includes("ok"), `expected ok in output: ${afterStdout}`);
+  } finally {
+    await rm(tempConfigPath, { force: true });
+    await rm(tempTargetRoot, { recursive: true, force: true });
+  }
 });

@@ -130,16 +130,30 @@ Completion Notes (2026-04-11):
 - Verified: type check clean, 118/118 tests pass, PAR GATE present in all 3 files
 - Files changed: `.opencode/agents/implementation_lead.md`, `targets/dr-repo/overlay/.opencode/agents/implementation_lead.md`, `targets/letta-workspace/overlay/.opencode/agents/implementation_lead.md`, `docs/AGENT_ROLES.md`
 
-### M10: `aicoder-opencode install <target>` command — propagate agent rules + plugins to target overlays `⬜ PENDING`
+### M10: `aicoder-opencode install <target>` command — propagate agent rules + plugins to target overlays `✅ COMPLETED`
 
-- Current state: `dr-repo/.opencode/agents` is a symlink into `aicoder-opencode/targets/dr-repo/overlay/.opencode/agents`, so editing the overlay in aicoder-opencode automatically reaches dr-repo. `letta-workspace/.opencode/` is gitignored with no overlay (see M8) — my edits there are ephemeral.
-- Desired: `aicoder-opencode` is the single source of truth for agent rules, plugins, and commands across all targets. An `install <target>` command should:
-  1. Verify the target's overlay directory exists under `targets/<target>/overlay/` in this repo
-  2. Seed it from the source directories (`.opencode/agents/`, `.opencode/plugins/`, `.opencode/commands/`) with any target-specific patches applied
-  3. Create or refresh symlinks in the target repo pointing into the overlay
-  4. Never edit target repos in-place for shared rules — only for target-specific overrides
-- Prereq: M8 (create letta-workspace overlay).
-- Also think about: a `--check` mode that verifies symlinks haven't been tampered with, and a CI check that flags drift between the live file and the overlay.
+Completion Notes (2026-04-15):
+- Added `install <target> [--check]` CLI command to `src/cli.ts`
+- Created `src/cli/install-command.ts` with `installTargetAssets()` and `checkTargetAssets()`:
+  - Merge-up copy semantics: copies canonical `.opencode/{agents,plugins,commands}/` into overlay, overwrites existing files, never deletes overlay extras
+  - Creates absolute symlinks in target repo pointing to overlay
+  - Repairs broken/wrong symlinks automatically
+  - Hard failure if target repo has a real file/directory blocking the symlink path
+- Updated `src/cli/arg-parser.ts` with `install` command parsing and `--check` dry-run flag
+- Added 9 unit tests in `src/cli/install-command.test.ts` covering overlay creation, idempotency, real-directory throw, symlink repair, overlay preservation, and check modes
+- Added 2 integration tests in `src/cli.test.ts` (install success and install --check before/after)
+- Verified: `npx tsx src/cli.ts install letta-workspace` creates overlay and symlinks; `install --check` returns 0 when correct, 1 when drift detected
+- Type check clean for new files; all new tests pass (pre-existing unrelated failures in letta-workspace integration tests remain)
+
+### M11: Conservative stale rotation and direct-first lead policy `✅ COMPLETED`
+
+Completion Notes (2026-04-13):
+- Fixed `session_has_stale_assistant_run()` in the canonical control-plane launcher so it no longer references an undefined `this_session`.
+- Tightened stale rotation across the canonical launcher and both target overlays: a root is no longer rotated stale while it still has accepted artifacts (`summary.files/additions/deletions > 0`) or fresh child-session heartbeat.
+- Removed the Letta launcher post-prompt session-id retarget block that could overwrite the session pointer by title lookup after the prompt already landed.
+- Updated all three maintenance prompt templates to make direct implementation the default path and helper branches the exception for ambiguity, risk, or cross-boundary work.
+- Updated shared `implementation_lead` contracts so the lead implements directly when repo evidence is already sufficient, instead of reflexively opening planner/reviewer branches.
+- Updated control-plane and Letta workspace docs to make the takeover intake boundary explicit: Letta takes operator-truth work; OpenCode-era launcher law stays canonical here until replaced.
 
 ### M7: Shared plugin propagation verification `✅ COMPLETED`
 
@@ -179,6 +193,79 @@ Completion Notes (2026-04-11):
 - **Verification**: `npx tsc -p tsconfig.json --noEmit` clean, `node --import tsx --test 'src/**/*.test.ts'` 119/119 pass (118 existing + 1 new).
 - **Files**: `src/plugins/model-registry.ts` (loadAuthKeys + hasUsableCredential + initializeProviderHealthState check), `src/plugins/model-registry.keyless.test.ts` (new real-schema test).
 - **Rebuilt `dist/plugins/model-registry.js`** so dr-repo and letta-workspace overlay shims pick up the fix on next service start.
+
+### M149: In-browser interactive terminal on :3013 — full PTY with codex on PATH `⬜ PENDING`
+
+- **Gap**: the singularity-matrix UI at :3013 has no execution channel. To run `codex exec …`, `codex -c model_reasoning_effort=high …`, or any interactive `codex` REPL the operator has to shell in from a separate terminal, losing the dashboard context window. M148 adds buttons for unit lifecycle; this slice adds a live shell.
+- **Desired state**: the UI has a terminal tab (or a detachable pane) that opens a real PTY on the host, running the operator's default shell (`$SHELL`, bash fallback), cwd defaulting to `~/code/aicoder-opencode` with a dropdown to switch to the other two triad roots. `codex`, `kimi`, `gemini`, `opencode`, and `aichat` are already on `$PATH` and Just Work inside it. Output streams live via xterm.js; input streams back over the same socket.
+- **Backend** (extend `singularity-matrix-backend.mjs`, mirror to `bin/opencode-triad-dashboard.mjs`):
+  - Add `ws` dependency. Upgrade path `/api/ops/terminal?cwd=<allow-listed-root>` from HTTP to WebSocket on the same 127.0.0.1:3012 bind — do NOT open a new port.
+  - Per-connection: spawn a PTY via `@lydell/node-pty` (or `node-pty` if it builds cleanly on the host's Node), `file: process.env.SHELL || "/bin/bash"`, `args: ["-l"]`, `cwd: <allow-listed>`, `env: {...process.env, TERM: "xterm-256color", COLORTERM: "truecolor"}`, initial `cols/rows` from the client's first frame.
+  - Bidirectional byte stream: pty stdout → websocket binary frame; websocket text frame → pty stdin. Resize messages (`{type:"resize", cols, rows}`) proxied to `pty.resize()`.
+  - `cwd` allow-list is the same triad triple M148 uses — `~/code/aicoder-opencode`, `~/code/dr-repo`, `~/code/letta-workspace`. Reject anything else with a `close(1008, "cwd not allowed")`.
+  - Idle kill: if no bytes either direction for 30 min, send SIGHUP and close. Max 3 concurrent PTYs per process to bound fork-bomb blast radius; 4th upgrade attempt gets `close(1013, "pty cap reached")`.
+  - Journal every PTY session's stdin+stdout to `~/.opencode/state/terminals/<iso-timestamp>-<pid>.log` so a browser reload can `GET /api/ops/terminal/replay?file=<name>` and replay the tail — don't lose the session to a refresh.
+- **Frontend** (`letta-workspace/singularity-matrix` components):
+  - Add `xterm.js` + `xterm-addon-fit` + `xterm-addon-web-links`. New route/tab "Terminal" next to the existing backends/timers view.
+  - `cwd` dropdown with the three roots; switching spawns a new PTY (old one closes).
+  - Copy-on-select, paste-on-middle-click standard xterm conventions.
+  - Reconnect button that hits `/api/ops/terminal/replay` to pull the last N bytes of the journal before reconnecting the live socket, so a flaky wifi drop doesn't lose context.
+  - Font: match the existing monospace stack; no emoji reshaping.
+- **Security** (this is the load-bearing part — a browser terminal on a local port is a code-execution surface):
+  - Bind stays 127.0.0.1 only. Refuse to start if `OPENCODE_TRIAD_DASHBOARD_HOST` is set to anything non-loopback; fail loud at service start, not at first websocket.
+  - Add a `X-Local-Origin` check: only accept upgrades where `Origin` header is `http://127.0.0.1:3013` or missing (direct curl). Reject `file://` and any remote origin.
+  - Do NOT proxy this through any tunnel, reverse proxy, or VS Code port-forward without re-reading this entry first — loopback-only means loopback-only.
+  - Document explicitly: anything a browser tab on `http://127.0.0.1:3013` can POST to `/api/ops/terminal` gets a full shell. A malicious local webpage loaded in the same browser could attempt a CSRF-style websocket upgrade — the Origin check is the only thing stopping it. Keep the check tight.
+  - No auth token in M149 because binding is loopback; revisit if anyone ever wants to port-forward the UI.
+- **codex UX affordances** (lightweight, not another full feature):
+  - Quick-insert buttons above the terminal that stuff a prebuilt `codex exec --full-auto -m <model> "<prompt>"` into the input line (do NOT auto-send, operator hits Enter). Models from the CLAUDE.md catalog: `gpt-5.3-codex-spark`, `gpt-5.4`, `gpt-5.4` high-reasoning.
+  - Same for `kimi -p "…" --plan`, `gemini -m gemini-3-pro-preview -p "…" --approval-mode plan`.
+  - These are literal command-insert helpers, not execution wrappers — the PTY is still a real shell, nothing is intercepted.
+- **Acceptance**:
+  1. Opening the Terminal tab in :3013 drops into a real bash prompt at `~/code/aicoder-opencode`. `pwd`, `ls`, `echo $SHELL` all work.
+  2. `codex exec --full-auto -m gpt-5.3-codex-spark "echo hello from codex"` runs to completion and the output streams live.
+  3. An interactive `codex` REPL session survives a browser tab refresh via the replay endpoint (last ~64KB of the log reloaded, live stream resumes — subject to PTY still being alive on the server side).
+  4. Resizing the browser window resizes the PTY (`stty size` inside reflects the new cols/rows within one frame).
+  5. A websocket upgrade from `Origin: https://evil.example.com` is rejected with `close(1008)` and NO pty is spawned (verify: no child process, no log file).
+  6. Spawning a 4th concurrent PTY gets `close(1013, "pty cap reached")`, existing 3 continue uninterrupted.
+  7. 30-minute idle PTY gets SIGHUP'd; replay file still readable after close.
+- **Prereq**: M148 (the M148 routes establish the `/api/ops/*` path namespace and the unit-name allow-list pattern we extend here with the cwd allow-list). Land M148 first so both features share one consistent admission-control convention.
+- **Out of scope for M149**: multi-tab tabbed terminals (one pty per connection is fine to start), shared sessions between multiple browser tabs, recording/playback UI (the journal is written but there's no scrubber), `scp`-style file upload, xterm themes, SSH passthrough.
+- **Explicit non-goal**: this is NOT a codex execution wrapper. It's a shell. The operator types `codex …` themselves. No silent prompt rewriting, no model auto-selection, no "helpful" middleware — that path leads to magic surprise behavior and we already have CLAUDE.md as the curated command catalog.
+
+### M148: UI control surface — start/stop/restart triad backends and maintenance timers from :3013 `⬜ PENDING`
+
+- **Gap**: the singularity-matrix UI at :3013 is read-only. `singularity-matrix-backend.mjs` only exposes GET routes (`/api/status`, `/api/backends`, `/api/llm-stats`, `/api/canary-status`, `/api/ops/status`). To start/stop any of the nine triad units (`aicoder-opencode-main.service`, `dr-repo-main.service`, `letta-workspace-main.service`, `aicoder-opencode-maintenance.timer`, `dr-repo-maintenance.timer`, `letta-workspace-maintenance.timer`, plus each `*-maintenance.service` oneshot) the operator has to shell in and run `systemctl --user …`. That makes "pause the autopilot", "restart a crashed backend", and "fire a maintenance iteration now" all manual context-switches away from the dashboard the operator is already watching.
+- **Desired state**: the UI exposes exactly the operator actions that match the current shell flow —
+  1. start / stop / restart a backend main service (aicoder / dr / letta)
+  2. start / stop a maintenance timer (pause / unpause the cron cadence)
+  3. fire a maintenance service *once* (trigger the oneshot without arming the timer)
+  4. disable / enable a maintenance timer (persist across reboot)
+  5. tail the last N lines of the journal for any of the nine units
+  6. tail the maintenance-autonomous-start log per backend
+- **Backend routes** (append to `singularity-matrix-backend.mjs`, mirror into `bin/opencode-triad-dashboard.mjs` per the letta↔aicoder migration memory):
+  - `POST /api/ops/units/:unit/start`
+  - `POST /api/ops/units/:unit/stop`
+  - `POST /api/ops/units/:unit/restart`
+  - `POST /api/ops/units/:unit/enable`
+  - `POST /api/ops/units/:unit/disable`
+  - `GET  /api/ops/units/:unit/journal?lines=200`
+  - Enforce an allow-list of unit names at the top of the file — never shell out on arbitrary input. Allow-list reuses the same triple (aicoder / dr / letta) that the existing `/api/ops/status` walk already encodes.
+- **Control helper**: one Node `child_process.execFile` call into `systemctl --user <action> <unit>` with a 5s timeout; stdout/stderr bubbled up as JSON (`{ok, exitCode, stdout, stderr}`). No shell, no interpolation, no `exec`.
+- **UI affordances** (in `letta-workspace/singularity-matrix` frontend):
+  - Each backend card gets `[Restart] [Stop]` buttons and a paused badge when main service is inactive
+  - Each timer card gets `[Pause]` / `[Unpause]` toggle, `[Fire now]` button, `[Disable on boot]` toggle
+  - All buttons optimistically disabled while the POST is in flight, revert on error, refresh `/api/ops/status` on success
+- **Security**: the backend only binds to 127.0.0.1 (confirmed in the unit file), so the attack surface is local-only. Do NOT expose these routes on any non-loopback interface. Add a test that `POST`ing a unit name outside the allow-list returns 400 without calling systemctl and without shell-quoting the input.
+- **Acceptance**:
+  1. From :3013 the operator can stop and restart `aicoder-opencode-main.service` without touching a shell.
+  2. From :3013 the operator can pause `letta-workspace-maintenance.timer` and see the card flip to "paused" within one refresh cycle.
+  3. From :3013 the operator can click "Fire now" on aicoder and watch the maintenance service run (even if it's still broken by the bash heredoc bug — that's a separate slice).
+  4. A `POST` with `unit=aicoder-opencode-main.service;rm -rf /` is rejected by the allow-list with zero shell involvement.
+  5. The journal tail endpoint returns the last 200 lines from `journalctl --user -u <unit>` as JSON.
+- **Prereq**: none — purely additive to backend and frontend. File edit fan-out: `letta-workspace/bin/singularity-matrix-backend.mjs` (new routes, live copy), `aicoder-opencode/bin/opencode-triad-dashboard.mjs` (tracked mirror per migration convention), and the singularity-matrix frontend components under `letta-workspace/singularity-matrix/`.
+- **Out of scope for M148**: global "pause all timers" convenience button (add after the per-unit primitive lands), auth (localhost-only binding is sufficient), mobile layout, websocket push (polling `/api/ops/status` at the existing cadence is fine to start).
+- **Related observation that motivated this slice**: during the 2026-04-13 ops-check loop the letta-workspace-maintenance.timer went from "firing every 2m" to "inactive" between ticks without any operator action visible on the dashboard. A UI control surface would have let the operator both (a) see the state flip earlier as a clickable unit card and (b) hit "Start" or "Fire now" to recover without shelling in.
 
 ### M146: the `finalizeHungSessionStateAndRecordPenalty` three orthogonal wrapper-ritual invariants — three structurally-independent surfaces (`if (result === null) return;` null-guard protecting the `result.*` dereferences inside the async-isolated hang-timer `setTimeout` closure / `result.routeKey` passed as the 3rd positional arg to `recordRouteHealthPenalty` so the penalty lands at the composite key readers query via `composeRouteKey` / `persistFn` forwarded as the 5th positional arg so the M35 disk-durability JSONL append survives plugin restart) that the three pre-existing M77 scenario pins (hung → write+persist+clear / completed → no-write+no-persist / within-budget → no-write+no-persist+session-intact) cannot isolate with asymmetric precision because every pre-existing pin bundles multiple scenario post-conditions in one body — a single sabotage fires multiple assertions across multiple pins, and the failure output cannot localise which of the three orthogonal invariants broke `✅ COMPLETED`
 
