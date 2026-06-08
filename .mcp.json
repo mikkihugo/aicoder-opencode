@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "gsd-workflow": {
+      "command": "/nix/store/a6wmp2d9v6s39lbsvsb8dssdahdbfc05-nodejs-24.14.1/bin/node",
+      "args": [
+        "/home/mhugo/.npm-global/lib/node_modules/gsd-pi/packages/mcp-server/dist/cli.js"
+      ],
+      "cwd": "/home/mhugo/code/aicoder-opencode",
+      "env": {
+        "GSD_CLI_PATH": "/home/mhugo/.npm-global/bin/gsd",
+        "GSD_WORKFLOW_EXECUTORS_MODULE": "/home/mhugo/.gsd/agent/extensions/gsd/tools/workflow-tool-executors.js",
+        "GSD_WORKFLOW_WRITE_GATE_MODULE": "/home/mhugo/.gsd/agent/extensions/gsd/bootstrap/write-gate.js",
+        "GSD_PERSIST_WRITE_GATE_STATE": "1",
+        "GSD_WORKFLOW_PROJECT_ROOT": "/home/mhugo/code/aicoder-opencode"
+      }
+    }
+  }
+}
