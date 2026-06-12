@@ -1,4 +1,4 @@
-.PHONY: help install build check targets show-dr-repo show-letta-workspace show-dr-repo-instructions show-letta-workspace-instructions validate-dr-repo validate-letta-workspace print-dr-repo-launch debug-dr-repo-sandbox doom-loop-dr-repo show-aicoder-opencode show-aicoder-opencode-instructions validate-aicoder-opencode self-check openportal-start openportal-stop openportal-status openportal-list openportal-clean opencode-db-maintenance-start opencode-db-maintenance-status opencode-db-checkpoint-now opencode-db-backup-now opencode-db-vacuum validate-plugins-dr-repo validate-plugins-letta-workspace validate-plugins
+.PHONY: help install build check targets show-dr-repo show-letta-workspace show-dr-repo-instructions show-letta-workspace-instructions validate-dr-repo validate-letta-workspace print-dr-repo-launch debug-dr-repo-sandbox doom-loop-dr-repo show-aicoder-opencode show-aicoder-opencode-instructions validate-aicoder-opencode self-check opencode-db-maintenance-start opencode-db-maintenance-status opencode-db-checkpoint-now opencode-db-backup-now opencode-db-vacuum validate-plugins-dr-repo validate-plugins-letta-workspace validate-plugins
 
 # Prefer bun when installed, fall back to npm/npx.
 RUNNER := $(shell command -v bun >/dev/null 2>&1 && echo "bun" || echo "npm")
@@ -26,11 +26,6 @@ help:
 	@echo "  make validate-plugins-letta-workspace   - Validate letta-workspace plugin shim sync"
 	@echo "  make validate-plugins                   - Validate plugin shim sync for all targets"
 	@echo "  make self-check                         - Run build + tests on the control plane"
-	@echo "  make openportal-start                  - Start the control-plane OpenPortal instance"
-	@echo "  make openportal-stop                   - Stop the control-plane OpenPortal instance"
-	@echo "  make openportal-status                 - Show control-plane OpenPortal instance status"
-	@echo "  make openportal-list                   - List OpenPortal instances"
-	@echo "  make openportal-clean                  - Clean stale OpenPortal entries"
 	@echo "  make opencode-db-maintenance-start     - Enable OpenCode SQLite checkpoint/backup timers"
 	@echo "  make opencode-db-maintenance-status    - Show OpenCode SQLite maintenance timers"
 	@echo "  make opencode-db-checkpoint-now        - Run one OpenCode SQLite checkpoint pass now"
@@ -97,21 +92,6 @@ validate-plugins:
 
 self-check:
 	@$(RUNNER) run check
-
-openportal-start:
-	@AICODER_OPENPORTAL_PORT=3091 AICODER_OPENPORTAL_OPENCODE_PORT=4091 ./bin/aicoder-opencode-openportal-service start
-
-openportal-stop:
-	@./bin/aicoder-opencode-openportal-service stop
-
-openportal-status:
-	@./bin/aicoder-opencode-openportal-service status
-
-openportal-list:
-	@./bin/aicoder-opencode-openportal list
-
-openportal-clean:
-	@./bin/aicoder-opencode-openportal clean
 
 opencode-db-maintenance-start:
 	@./bin/aicoder-opencode-opencode-database-maintenance-service start
