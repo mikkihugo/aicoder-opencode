@@ -254,7 +254,7 @@ make debug-[target-name]-sandbox
 **1. Add to monitoring:**
 ```bash
 # Edit monitoring configuration
-vim monitoring/openportal/config/thresholds.yaml
+echo "Edit the active monitoring thresholds source for this deployment"
 
 # Add target-specific alerts
 - name: [target-name]_validation_failure
