@@ -48,7 +48,7 @@ resolve_real_opencode_binary() {
   local fallback_path=""
   local candidate_path=""
 
-  fallback_path="$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+  fallback_path="$HOME/.opencode/bin:$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
   candidate_path="$(build_path_without_wrapper_dir "${PATH:-}")"
   PATH="$fallback_path:$candidate_path" command -v opencode 2>/dev/null || true
 }
@@ -67,6 +67,12 @@ resolve_go_binary() {
   if [[ -n "$fallback_go_binary" ]]; then
     printf '%s\n' "$fallback_go_binary"
   fi
+}
+
+current_working_directory_is_inside_repo() {
+  local current_working_directory=""
+  current_working_directory="$(pwd -P)"
+  [[ "$current_working_directory" == "$REPO_ROOT" || "$current_working_directory" == "$REPO_ROOT/"* ]]
 }
 
 load_repo_opencode_environment() {
@@ -91,6 +97,7 @@ load_repo_opencode_environment() {
     "/run/current-system/sw/bin" \
     "$HOME/go/bin" \
     "$HOME/.cargo/bin" \
+    "$HOME/.opencode/bin" \
     "$HOME/.npm-global/bin" \
     "$HOME/.local/bin" \
     "/usr/local/bin" \
@@ -128,7 +135,9 @@ if [[ -z "$REAL_OPENCODE" ]]; then
   exit 1
 fi
 
-load_repo_opencode_environment
+if current_working_directory_is_inside_repo; then
+  load_repo_opencode_environment
+fi
 
 for argument in "$@"; do
   if [[ "$argument" == "--pure" ]]; then
