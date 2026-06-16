@@ -1,30 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Canonical source: /home/mhugo/code/aicoder-opencode/targets/letta-workspace/overlay/.opencode/bin/letta-workspace-maintenance-start
+# Edit the control-plane copy first, then mirror here.
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
-MAINTENANCE_SERVICE_NAME="${LETTA_WORKSPACE_MAINTENANCE_SERVICE_NAME:-aicoder-opencode-main.service}"
-MAINTENANCE_SERVER_URL="${LETTA_WORKSPACE_MAINTENANCE_SERVER_URL:-${LETTA_MAINTENANCE_SERVER_URL:-http://127.0.0.1:8080}}"
+MAINTENANCE_SERVICE_NAME="${LETTA_WORKSPACE_MAINTENANCE_SERVICE_NAME:-letta-workspace-main.service}"
+MAINTENANCE_SERVER_URL="${LETTA_WORKSPACE_MAINTENANCE_SERVER_URL:-${LETTA_MAINTENANCE_SERVER_URL:-http://127.0.0.1:8084}}"
 MAINTENANCE_AUTOMATION_USERNAME="${LETTA_WORKSPACE_MAINTENANCE_AUTOMATION_USERNAME:-${LETTA_MAINTENANCE_AUTOMATION_USERNAME:-opencode}}"
 MAINTENANCE_PASSWORD_PATH="${LETTA_WORKSPACE_MAINTENANCE_PASSWORD_PATH:-$REPO_ROOT/.opencode/state/maintenance-web/server-password}"
 LOG_DIRECTORY="$REPO_ROOT/.opencode/state/maintenance"
 LOG_PATH="$LOG_DIRECTORY/maintenance-start.log"
-START_MESSAGE="${1:-Maintenance iteration for letta-workspace. Follow this workflow strictly:
+START_MESSAGE_TEMPLATE=$(cat <<'PROMPT'
+Maintenance iteration for letta-workspace. Follow this workflow strictly:
 1. Consult roadmap_keeper for the next highest-value slice (read STATUS.md, ROADMAP.md, active plans, recent checkpoints, monorepo subproject state).
-2. Dispatch planning_analyst and consumer_advocate in parallel for that slice. Planning must produce a Critical Files list; consumer_advocate must surface user-facing friction and unsafe defaults.
-3. For every non-trivial slice, run a concrete partner/combatant pair in parallel before coding: use codebase_explorer or architecture_consultant as the supportive read helper, and use critical_reviewer or oracle as the adversarial read helper. Synthesize both reports yourself before editing.
-4. Implement the change yourself, or delegate one tightly scoped implementation_worker task with exact paths, exact change, and one-sentence why.
-5. Run verifier after changes. If regression or security risk is material, run critical_reviewer or security_reviewer as an additional read-only pass.
-6. Commit when verified. Loop to step 1 for the next slice. Never ask the user unless the next move is destructive or irreversible; otherwise record the assumption in the checkpoint and continue.
-7. Keep the session title and checkpoints clean and specific to letta-workspace maintenance.
-8. **PDD Purpose gate — emit BEFORE any edit.** For every non-trivial slice, emit the 6-line Purpose block (OBSERVED: / PURPOSE: / WHY: / IF/THEN: / CONFIDENCE: 0.0-1.0 / GATE:) as specified in implementation_lead.md BEFORE touching code. Trivial reversible slices may emit a one-line RATIONALE: instead. CONFIDENCE < 0.7 blocks proceeding without an adversarial subagent pass (critical_reviewer / oracle / security_reviewer). The Purpose block is your visible proof the gate was run.
-9. **Subagent output guard.** If any dispatched specialist returns zero text (step-start + step-finish with no content parts), treat it as a failed MCP 503 dispatch, NOT as no feedback. Retry with a different-lineage model. Never synthesize on empty input. Record reviewer=empty, retried=MODEL in slice notes.
+2. If the slice is straightforward, reversible, and local, read the repo evidence and implement it directly. Do not open helper branches just to satisfy process.
+3. Only when the slice is ambiguous, risky, or crosses boundaries, pick exactly one supportive helper for the current blind spot. Default to planning_analyst. Use consumer_advocate only for user-visible workflow or unsafe-default questions. Use codebase_explorer or architecture_consultant only when ownership or structure is unclear.
+4. If you opened a supportive helper, run exactly one adversarial helper in parallel with it. Default to critical_reviewer. Use oracle or security_reviewer only when the slice specifically needs that pressure.
+5. If you spawned branches, write a parent synthesis note with USED:, DISCARDED:, and NEXT: before spawning any more branches. Do not dispatch a second planner/reviewer round until that synthesis exists.
+6. Implement the change yourself, or delegate one tightly scoped implementation_worker task with exact paths, exact change, and one-sentence why. At most one writer branch at a time.
+7. Run verifier after changes. If regression or security risk is material, run critical_reviewer or security_reviewer as an additional read-only pass.
+8. Commit when verified. Loop to step 1 for the next slice. Never ask the user unless the next move is destructive or irreversible; otherwise record the assumption in the checkpoint and continue.
+9. Keep the session title and checkpoints clean and specific to Letta platform work.
+10. **PDD Purpose gate — emit BEFORE any edit.** For every non-trivial slice, emit the 6-line Purpose block (OBSERVED: / PURPOSE: / WHY: / IF/THEN: / CONFIDENCE: 0.0-1.0 / GATE:) as specified in implementation_lead.md BEFORE touching code. Trivial reversible slices may emit a one-line RATIONALE: instead. CONFIDENCE < 0.7 blocks proceeding without an adversarial subagent pass (critical_reviewer / oracle / security_reviewer). The Purpose block is your visible proof the gate was run.
+11. **Subagent output guard.** If any dispatched specialist returns zero text (step-start + step-finish with no content parts), treat it as a failed MCP 503 dispatch, NOT as no feedback. Retry with a different-lineage model. If a branch emits only tool traces or no explicit conclusion, treat it as unusable in the same way. Never synthesize on empty input. Record reviewer=empty, retried=MODEL in slice notes.
+12. **Stale-session salvage is read-only first.** If an older or stale root contains edits, checkpoints, or reviewer output, salvage the artifact/blocker into the current live root and compare it against current repo state before editing. Never reopen or overwrite a newer live slice unless repo evidence shows the stale work is still unresolved.
+13. **Read-only specialists must not write.** `planning_analyst`, `roadmap_keeper`, `consumer_advocate`, `codebase_explorer`, `architecture_consultant`, `critical_reviewer`, `security_reviewer`, `verifier`, `documentation_researcher`, `long_context_reader`, `reliability_consultant`, and `oracle` are evidence-only. If any of them emits a patch or file delta, treat it as invalid, discard it, record the violation in the checkpoint, and continue only through `implementation_lead`, `implementation_worker`, or `small_change_worker`.
 
-Spec-kit is the canonical scaffold: shape every non-trivial slice as /specify (spec from .specify/templates/spec-template.md) -> /plan (plan from plan-template.md) -> /tasks (tasks from tasks-template.md) -> /implement. PM skills (pm-outcome-roadmap, pm-create-prd, pm-brainstorm-okrs, pm-prioritization-frameworks, pm-pre-mortem) feed the spec; planning_analyst feeds the plan; implementation_lead executes tasks.}"
-SESSION_TITLE="${LETTA_WORKSPACE_MAINTENANCE_SESSION_TITLE:-${LETTA_MAINTENANCE_SESSION_TITLE:-letta-workspace-maintenance}}"
+Spec-kit is the canonical scaffold: shape every non-trivial slice as /specify (spec from .specify/templates/spec-template.md) -> /plan (plan from plan-template.md) -> /tasks (tasks from tasks-template.md) -> /implement. PM skills (pm-outcome-roadmap, pm-create-prd, pm-brainstorm-okrs, pm-prioritization-frameworks, pm-pre-mortem) feed the spec; planning_analyst feeds the plan; implementation_lead executes tasks.
+PROMPT
+)
+START_MESSAGE="${1:-$START_MESSAGE_TEMPLATE}"
+SESSION_TITLE="${LETTA_WORKSPACE_MAINTENANCE_SESSION_TITLE:-${LETTA_MAINTENANCE_SESSION_TITLE:-letta-workspace}}"
 SESSION_ID_FILE="$LOG_DIRECTORY/session-id"
 RUNNER_UNIT_NAME="${LETTA_WORKSPACE_MAINTENANCE_RUNNER_UNIT_NAME:-letta-workspace-maintenance-run.service}"
-GENERIC_MAINTENANCE_TITLE_REGEX="${LETTA_WORKSPACE_MAINTENANCE_GENERIC_TITLE_REGEX:-${LETTA_MAINTENANCE_GENERIC_TITLE_REGEX:-\`?letta-workspace\`? maintenance|\`?letta-workspace\`? autonomous maintenance mode}}"
+GENERIC_MAINTENANCE_TITLE_REGEX="${LETTA_WORKSPACE_MAINTENANCE_GENERIC_TITLE_REGEX:-${LETTA_MAINTENANCE_GENERIC_TITLE_REGEX:-\`?letta-workspace\`? maintenance|\`?letta-platform\`?|\`?letta-workspace\`?|\`?letta-workspace / main / platform\`?|\`?letta-workspace\`? autonomous maintenance mode}}"
 REMOTE_MESSAGE_READ_TIMEOUT_SECONDS="${LETTA_WORKSPACE_REMOTE_MESSAGE_READ_TIMEOUT_SECONDS:-120}"
 ACTIVE_RUN_STALE_SECONDS="${LETTA_WORKSPACE_ACTIVE_RUN_STALE_SECONDS:-1200}"
 
@@ -78,6 +89,46 @@ if password_path.exists():
 with urllib.request.urlopen(request, timeout=5):
     pass
 PY
+}
+
+rename_remote_session() {
+  local session_id="$1"
+  local session_title="$2"
+  python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" "$session_id" "$session_title" <<'PY'
+import base64
+import json
+import sys
+import urllib.request
+from pathlib import Path
+
+server_url = sys.argv[1].rstrip("/")
+username = sys.argv[2]
+password_path = Path(sys.argv[3])
+session_id = sys.argv[4]
+session_title = sys.argv[5]
+request = urllib.request.Request(
+    f"{server_url}/session/{session_id}",
+    data=json.dumps({"title": session_title}).encode("utf-8"),
+    method="PATCH",
+)
+request.add_header("Content-Type", "application/json")
+request.add_header("Accept", "application/json")
+
+if password_path.exists():
+    password = password_path.read_text(encoding="utf-8").strip()
+    if password:
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        request.add_header("Authorization", f"Basic {token}")
+
+with urllib.request.urlopen(request, timeout=5):
+    pass
+PY
+}
+
+archive_remote_session() {
+  local session_id="$1"
+  local session_title="$2"
+  rename_remote_session "$session_id" "[STALE] ${session_title} — ${session_id}"
 }
 
 wait_for_remote_server() {
@@ -242,6 +293,106 @@ raise SystemExit(1)
 PY
 }
 
+session_has_blocked_assistant_run() {
+  local session_id="$1"
+  python3 - "$MAINTENANCE_SERVER_URL" "$MAINTENANCE_AUTOMATION_USERNAME" "$MAINTENANCE_PASSWORD_PATH" "$session_id" <<'PY'
+import base64
+import json
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+server_url = sys.argv[1].rstrip("/")
+username = sys.argv[2]
+password_path = Path(sys.argv[3])
+session_id = sys.argv[4]
+request = urllib.request.Request(f"{server_url}/session/{session_id}/message")
+
+if password_path.exists():
+    password = password_path.read_text(encoding="utf-8").strip()
+    if password:
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        request.add_header("Authorization", f"Basic {token}")
+
+try:
+    with urllib.request.urlopen(request, timeout=30) as response:
+        messages = json.loads(response.read().decode("utf-8"))
+except urllib.error.URLError:
+    raise SystemExit(1)
+
+last_assistant = None
+for message in reversed(messages):
+    info = message.get("info") or {}
+    if info.get("role") == "assistant":
+        last_assistant = (message, info)
+        break
+
+if not last_assistant:
+    raise SystemExit(1)
+
+message, info = last_assistant
+if info.get("finish"):
+    raise SystemExit(1)
+
+parts = message.get("parts")
+if not isinstance(parts, list):
+    parts = info.get("parts")
+if not isinstance(parts, list):
+    parts = []
+
+
+def _is_empty_pending_tool(part):
+    if not isinstance(part, dict):
+        return False
+    if part.get("type") != "tool":
+        return False
+    if str(part.get("status", "")).lower() != "pending":
+        return False
+    arguments = part.get("input") or part.get("arguments") or part.get("args") or part.get("parameters") or part.get("payload")
+    if arguments is None:
+        return True
+    if isinstance(arguments, str):
+        return not arguments.strip()
+    if isinstance(arguments, (list, tuple, dict)):
+        return len(arguments) == 0
+    return False
+
+
+def _has_substantive_content(part):
+    if not isinstance(part, dict):
+        return False
+    part_type = str(part.get("type", "")).lower()
+    if part_type in {"step-start", "step-finish"}:
+        return False
+    for key in ("text", "content", "message", "output", "result", "diff", "body", "error"):
+        value = part.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, (list, dict)) and value:
+            return True
+    if part_type == "tool":
+        status = str(part.get("status", "")).lower()
+        if status and status != "pending":
+            return bool(part.get("result")) or bool(part.get("output"))
+        arguments = part.get("input") or part.get("arguments") or part.get("args") or part.get("parameters") or part.get("payload")
+        if isinstance(arguments, str):
+            return bool(arguments.strip())
+        if arguments:
+            return True
+    return False
+
+is_empty_pending_tool = any(_is_empty_pending_tool(part) for part in parts)
+has_substantive_content = any(_has_substantive_content(part) for part in parts)
+
+if not parts or (is_empty_pending_tool and not has_substantive_content):
+    print("assistant-blocked")
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
 session_has_stale_assistant_run() {
   local session_id="$1"
   local stale_after_seconds="$2"
@@ -299,6 +450,8 @@ if isinstance(finish, str) and finish:
     raise SystemExit(1)
 
 session_updated_ms = None
+sessions = []
+this_session = None
 session_req = urllib.request.Request(
     f"{server_url}/session?directory={quote(repo_root, safe='/')}"
 )
@@ -308,10 +461,31 @@ try:
         sessions = json.loads(response.read().decode("utf-8"))
     for session in sessions:
         if session.get("id") == session_id:
+            this_session = session
             session_updated_ms = (session.get("time") or {}).get("updated")
             break
 except urllib.error.URLError:
     session_updated_ms = None
+
+summary = (this_session or {}).get("summary") or {}
+has_code_artifact = any(
+    isinstance(summary.get(field_name), (int, float)) and summary.get(field_name) > 0
+    for field_name in ("files", "additions", "deletions")
+)
+if has_code_artifact:
+    raise SystemExit(1)
+
+child_heartbeat_ms = 0
+for sibling_session in sessions:
+    if sibling_session.get("parentID") != session_id:
+        continue
+    sibling_time = sibling_session.get("time") or {}
+    sibling_updated = sibling_time.get("updated")
+    sibling_created = sibling_time.get("created")
+    if isinstance(sibling_updated, (int, float)):
+        child_heartbeat_ms = max(child_heartbeat_ms, int(sibling_updated))
+    elif isinstance(sibling_created, (int, float)):
+        child_heartbeat_ms = max(child_heartbeat_ms, int(sibling_created))
 
 if isinstance(session_updated_ms, (int, float)):
     heartbeat_ms = int(session_updated_ms)
@@ -320,6 +494,9 @@ else:
     heartbeat_ms = int(created) if isinstance(created, (int, float)) else 0
 
 now_ms = int(time.time() * 1000)
+if child_heartbeat_ms > 0 and now_ms - child_heartbeat_ms < stale_after_seconds * 1000:
+    raise SystemExit(1)
+
 if heartbeat_ms > 0 and now_ms - heartbeat_ms >= stale_after_seconds * 1000:
     print("assistant-stale")
     raise SystemExit(0)
@@ -410,8 +587,6 @@ matching_sessions = [
     and str(session.get("directory", "")) == repo_root
 ]
 matching_sessions.sort(key=lambda item: int(item.get("time", {}).get("updated", 0)), reverse=True)
-selected = matching_sessions[0]["id"] if matching_sessions else ""
-duplicates = [session["id"] for session in matching_sessions[1:]]
 generic_conflicts = [
     session["id"]
     for session in sessions
@@ -419,25 +594,16 @@ generic_conflicts = [
     and str(session.get("title", "")) != session_title
     and generic_title_regex.search(str(session.get("title", "")))
 ]
-print(json.dumps({"selected": selected, "duplicates": duplicates, "genericConflicts": generic_conflicts}))
+print(json.dumps({"matching": [session["id"] for session in matching_sessions], "genericConflicts": generic_conflicts}))
 PY
 )"
 
-EXISTING_SESSION_ID="$(python3 - "$SESSION_SELECTION_JSON" <<'PY'
+CANDIDATE_SESSION_IDS="$(python3 - "$SESSION_SELECTION_JSON" <<'PY'
 import json
 import sys
 
 selection = json.loads(sys.argv[1])
-print(selection.get("selected", ""))
-PY
-)"
-
-DUPLICATE_SESSION_IDS="$(python3 - "$SESSION_SELECTION_JSON" <<'PY'
-import json
-import sys
-
-selection = json.loads(sys.argv[1])
-for session_id in selection.get("duplicates", []):
+for session_id in selection.get("matching", []):
     print(session_id)
 PY
 )"
@@ -462,25 +628,52 @@ cleanup_session_ids() {
     if [[ -z "$session_id" ]]; then
       continue
     fi
-    delete_remote_session "$session_id"
+    archive_remote_session "$session_id" "$SESSION_TITLE"
   done <<<"$session_ids"
 }
 
-cleanup_session_ids "$DUPLICATE_SESSION_IDS"
-cleanup_session_ids "$GENERIC_CONFLICT_SESSION_IDS"
+cleanup_session_ids_except_selected() {
+  local session_ids="${1:-}"
+  local selected_session_id="${2:-}"
+  if [[ -z "$session_ids" ]]; then
+    return
+  fi
+
+  while IFS= read -r session_id; do
+    [[ -z "$session_id" ]] && continue
+    [[ "$session_id" == "$selected_session_id" ]] && continue
+    archive_remote_session "$session_id" "$SESSION_TITLE"
+  done <<<"$session_ids"
+}
+
+EXISTING_SESSION_ID=""
+if [[ -n "$CANDIDATE_SESSION_IDS" ]]; then
+  while IFS= read -r session_id; do
+    [[ -z "$session_id" ]] && continue
+    if session_has_active_assistant_run "$session_id"; then
+      EXISTING_SESSION_ID="$session_id"
+      break
+    fi
+    if [[ -z "$EXISTING_SESSION_ID" ]]; then
+      EXISTING_SESSION_ID="$session_id"
+    fi
+  done <<<"$CANDIDATE_SESSION_IDS"
+fi
+
+cleanup_session_ids_except_selected "$GENERIC_CONFLICT_SESSION_IDS" "$EXISTING_SESSION_ID"
 if [[ -n "$EXISTING_SESSION_ID" ]]; then
   if session_requires_rotation "$EXISTING_SESSION_ID" "implementation_lead"; then
     echo "[$(date -Iseconds)] letta-workspace-maintenance: rotating polluted session $EXISTING_SESSION_ID"
-    delete_remote_session "$EXISTING_SESSION_ID"
+    archive_remote_session "$EXISTING_SESSION_ID" "$SESSION_TITLE"
     EXISTING_SESSION_ID=""
   fi
 fi
 
 if [[ -n "$EXISTING_SESSION_ID" ]]; then
-  if session_has_stale_assistant_run "$EXISTING_SESSION_ID" "$ACTIVE_RUN_STALE_SECONDS"; then
-    echo "[$(date -Iseconds)] letta-workspace-maintenance: rotating stale active session $EXISTING_SESSION_ID"
-    delete_remote_session "$EXISTING_SESSION_ID"
-    EXISTING_SESSION_ID=""
+  if session_has_blocked_assistant_run "$EXISTING_SESSION_ID"; then
+    echo "[$(date -Iseconds)] letta-workspace-maintenance: resuming blocked session $EXISTING_SESSION_ID"
+  elif session_has_stale_assistant_run "$EXISTING_SESSION_ID" "$ACTIVE_RUN_STALE_SECONDS"; then
+    echo "[$(date -Iseconds)] letta-workspace-maintenance: resuming stale session $EXISTING_SESSION_ID"
   elif session_has_active_assistant_run "$EXISTING_SESSION_ID"; then
     echo "[$(date -Iseconds)] letta-workspace-maintenance: assistant still running in session $EXISTING_SESSION_ID"
     printf '%s\n' "$EXISTING_SESSION_ID" >"$SESSION_ID_FILE"
@@ -499,22 +692,6 @@ stop_legacy_runner
 echo "[$(date -Iseconds)] letta-workspace-maintenance: prompting session $EXISTING_SESSION_ID via $MAINTENANCE_SERVER_URL"
 PROMPT_RESULT="$(send_remote_prompt "$EXISTING_SESSION_ID" "implementation_lead" "$START_MESSAGE")"
 echo "[$(date -Iseconds)] letta-workspace-maintenance: prompt completed $PROMPT_RESULT"
-NEW_SESSION_ID="$(python3 - "$(list_remote_sessions)" "$SESSION_TITLE" <<'PY'
-import json
-import sys
-
-sessions = json.loads(sys.argv[1]) if sys.argv[1].strip() else []
-session_title = sys.argv[2]
-for session in sessions:
-    if session.get("title") == session_title:
-        print(session["id"])
-        break
-PY
-)"
-
-if [[ -n "$NEW_SESSION_ID" ]]; then
-  printf '%s\n' "$NEW_SESSION_ID" >"$SESSION_ID_FILE"
-fi
 
 echo "letta-workspace-maintenance: seeded via $MAINTENANCE_SERVER_URL"
 echo "log: $LOG_PATH"
