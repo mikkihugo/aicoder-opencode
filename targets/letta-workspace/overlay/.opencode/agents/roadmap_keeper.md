@@ -1,7 +1,7 @@
 ---
 description: Read-only roadmap and execution-state keeper for milestones, sequencing, and stale-next-step detection.
 mode: subagent
-model: ollama-cloud/qwen3-coder-next
+model: zai-coding-plan/glm-4.7
 permission:
   edit: deny
   bash:
