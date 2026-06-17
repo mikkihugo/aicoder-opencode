@@ -1,3 +1,9 @@
+---
+name: control-plane-maintenance-base
+version: 2026-04-15.1
+description: "Shared control-plane maintenance base wrapper for dr-repo."
+---
+
 # control-plane-maintenance-base
 
 This repo consumes the shared maintenance/control-plane base from:
