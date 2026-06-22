@@ -54,6 +54,16 @@ bin/
 
 `aicoder-opencode` is the maintenance host. Product repositories remain external targets.
 
+## Current Transition
+
+- `aicoder-opencode` remains the canonical source of truth for shared launchers, agent contracts, overlays, and model-routing law.
+- OpenCode is still the temporary execution substrate underneath parts of that flow.
+- `letta-workspace` is the active autonomous workstream, the takeover target, and the home of Singularity Matrix.
+- `aicoder-opencode` itself is paused as an autonomous lane and stays up only as shared sidecar infrastructure.
+- `dr-repo` stays a product target and paused canary workload, not the source of shared control-plane policy.
+
+Read this repo as infrastructure that helps Letta take over cleanly, not as a second product that should keep growing forever.
+
 ## Basic commands
 
 ```bash
@@ -64,9 +74,6 @@ make validate-dr-repo
 make print-dr-repo-launch
 make debug-dr-repo-sandbox
 make doom-loop-dr-repo
-make openportal-start
-make openportal-status
-make openportal-list
 ```
 
 `make debug-dr-repo-sandbox` should show empty overlays for `.opencode`,
@@ -98,12 +105,19 @@ The shell provides:
 The flake is for toolchain provisioning. Project JavaScript dependencies still
 come from `package-lock.json` via `npm ci`.
 
-## Control-plane portal
+## Operator surface
 
-- URL: `http://127.0.0.1:3091/`
-- OpenCode server port: `4091`
-- Host process: `openportal`
-- Instance list: `make openportal-list`
+The only operator surface in use is Singularity Matrix:
+
+- backend adapter: `3012`
+- UI: `3013`
+- lanes supervised by the control plane: `8080`, `8082`, `8084`
+
+Current operating mode:
+
+- `8084` (`letta-workspace`) is the only lane expected to be actively doing autonomous work
+- `8080` (`aicoder-opencode`) stays available for shared control-plane servicing but should normally have no active autonomous root
+- `8082` (`dr-repo`) stays available as a paused canary lane
 
 ## Model routing
 
@@ -161,6 +175,14 @@ For `dr-repo`, the source-of-truth runtime now lives under:
 
 `dr-repo` keeps only local runtime state, caches, and thin symlinked entrypoints
 needed for OpenCode to load from repo-local paths.
+
+For shared maintenance files, edit the canonical copies here first, then mirror
+to target runtime copies:
+
+- `.opencode/agents/`
+- `.opencode/bin/`
+- `targets/dr-repo/overlay/.opencode/`
+- `targets/letta-workspace/overlay/.opencode/`
 
 ## dr-memory plugin
 
