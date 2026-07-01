@@ -10,11 +10,31 @@ const DEFAULT_PORT = 3012;
 const STATUS_TIMEOUT_MS = 6000;
 const API_TIMEOUT_MS = 8000;
 const LLM_STATS_CACHE_TTL_MS = 30000;
+const MODEL_CANARY_CACHE_TTL_MS = 5 * 60 * 1000;
+const MODEL_CANARY_TIMEOUT_MS = 25000;
 const LLM_STATS_FETCH_BATCH_SIZE = 4;
+const SESSION_STATUS_CACHE_TTL_MS = 30000;
+const ACTIVE_SESSION_WINDOW_MS = 45 * 60 * 1000;
+const RECENT_SESSION_WINDOW_MS = 72 * 60 * 60 * 1000;
+const STALLED_SESSION_WINDOW_MS = 20 * 60 * 1000;
+const COMPLETED_SUBAGENT_REPORT_WINDOW_MS = 30 * 60 * 1000;
 const EMPTY_STRING = "";
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const NO_STORE_CACHE_CONTROL = "no-store, max-age=0";
 const execFile = promisify(execFileCallback);
+const MODEL_CANARY_PROMPT = "reply with exactly OK";
+const OPENCODE_CLI_PATH = process.env.OPENCODE_CLI_PATH?.trim() || "/home/mhugo/.npm-global/bin/opencode";
+const MODEL_CANARY_ENV = {
+  ...process.env,
+  HOME: process.env.HOME || "/home/mhugo",
+  USER: process.env.USER || "mhugo",
+  LOGNAME: process.env.LOGNAME || "mhugo",
+  XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME || "/home/mhugo/.config",
+  XDG_DATA_HOME: process.env.XDG_DATA_HOME || "/home/mhugo/.local/share",
+  PATH:
+    process.env.PATH ||
+    "/home/mhugo/.npm-global/bin:/home/mhugo/.nix-profile/bin:/usr/local/bin:/usr/bin:/bin",
+};
 const BACKENDS = [
   {
     id: "aicoder",
@@ -48,11 +68,79 @@ const MAIN_SERVICE_BY_BACKEND_ID = {
   dr: "dr-repo-main.service",
   letta: "letta-workspace-main.service",
 };
+const MODEL_CANARY_ROUTES = [
+  { route: "xiaomi-token-plan-ams/mimo-v2-pro", title: "mimo lead", lane: "primary" },
+  { route: "kimi-for-coding/kimi-k2-thinking", title: "kimi planner", lane: "primary" },
+  { route: "zai-coding-plan/glm-4.7", title: "glm implementor", lane: "primary" },
+  { route: "zai-coding-plan/glm-5.1", title: "glm architect", lane: "primary" },
+  { route: "minimax/MiniMax-M2.7", title: "minimax reader", lane: "primary" },
+  { route: "ollama-cloud/qwen3-coder:480b", title: "qwen reviewer", lane: "primary" },
+  { route: "ollama-cloud/qwen3-coder-next", title: "qwen verifier", lane: "primary" },
+  { route: "qwen/qwen-3.6-plus", title: "qwen direct", lane: "experimental" },
+];
 const BACKEND_PORT_BY_ID = {
   aicoder: 8080,
   dr: 8082,
   letta: 8084,
 };
+const ROOT_SESSION_TITLE_BY_BACKEND_ID = {
+  aicoder: "aicoder-opencode",
+  dr: "dr-repo",
+  letta: "letta-workspace",
+};
+// LW6 supervision projection: letta-server (not the OpenCode listener on 8084)
+// exposes GET /v1/runs/<run_id>/slices returning RunSliceRecord[]. The matrix
+// backend proxies that through /api/letta/runs/:runId/slices so the browser
+// can stay on the same origin as the rest of the matrix API.
+const LETTA_SERVER_BASE_URL = process.env.LETTA_SERVER_BASE_URL ?? "http://127.0.0.1:8283";
+// LW8 quota collector — llm-gateway-sidecar publishes a batch /quota endpoint
+// on port 4001 with one row per provider (vendor billing URL or subprocess CLI
+// probe). The matrix backend proxies it through /api/quota so the dashboard
+// can stay on the same origin as the rest of the matrix API.
+const SIDECAR_QUOTA_BASE_URL = process.env.SIDECAR_QUOTA_BASE_URL ?? "http://127.0.0.1:4001";
+const COMMIT_SESSION_TITLE_PATTERN = /^\[COMMIT\]\s*/;
+const ANALYZED_SESSION_TITLE_PATTERN = /^\[ANALYZED\]\s*/;
+const STALE_SESSION_TITLE_PATTERN = /^\[STALE\]\s*/;
+const GENERATED_SESSION_TITLE_PATTERNS = [
+  /^New session - /,
+  /^probe-/,
+  /^verify-/,
+  /^OK$/,
+  /^AutoLetta$/,
+];
+const READ_ONLY_AGENT_NAMES = new Set([
+  "architecture_consultant",
+  "codebase_explorer",
+  "consumer_advocate",
+  "critical_reviewer",
+  "documentation_researcher",
+  "long_context_reader",
+  "oracle",
+  "planning_analyst",
+  "reliability_consultant",
+  "roadmap_keeper",
+  "security_reviewer",
+  "verifier",
+]);
+const SUBAGENT_TITLE_AGENT_PATTERN = /\(@([^)]+)\s+subagent\)$/;
+const READ_TOOL_NAMES = new Set(["read", "glob", "grep", "find"]);
+const DISPATCH_TOOL_NAMES = new Set(["task"]);
+const PLANNING_TOOL_NAMES = new Set(["todowrite"]);
+const PATCH_PART_TYPE = "patch";
+const BRANCH_DISPOSITION_PENDING = "pending";
+const BRANCH_DISPOSITION_USED = "used";
+const BRANCH_DISPOSITION_DISCARDED = "discarded";
+const PARENT_PROGRESS_PHASES = new Set(["editing", "verifying", "committed", "waiting"]);
+const NON_ACTIONABLE_BRANCH_ARTIFACT_LABELS = new Set([
+  "invalid read-only write",
+  "run failed",
+  "run stalled",
+  "session read failed",
+]);
+const VERIFICATION_HINT_PATTERN =
+  /\b(verify|verification|verifier|pytest|pyright|ruff|golangci-lint|go test|bun run build|npm test)\b/i;
+const FAILURE_HINT_PATTERN =
+  /\b(APIError|HTTP \d{3}|timed out|timeout|failed|error|exception|traceback)\b/i;
 const SYSTEMCTL_TIMER_PROPERTIES = [
   "ActiveState",
   "UnitFileState",
@@ -81,6 +169,10 @@ const bindPort = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : DE
 let llmStatsCacheValue = null;
 let llmStatsCacheExpiresAt = 0;
 let llmStatsCacheInFlight = null;
+let modelCanaryCacheValue = null;
+let modelCanaryCacheExpiresAt = 0;
+let modelCanaryCacheInFlight = null;
+const sessionStatusCacheByKey = new Map();
 
 function escapeHtml(value) {
   return String(value)
@@ -95,8 +187,655 @@ function backendById(backendID) {
   return BACKENDS.find((backend) => backend.id === backendID) ?? null;
 }
 
+function sessionActivityTimestamp(session) {
+  const updated = session?.time?.updated;
+  if (typeof updated === "number" && Number.isFinite(updated)) {
+    return updated;
+  }
+  const created = session?.time?.created;
+  if (typeof created === "number" && Number.isFinite(created)) {
+    return created;
+  }
+  return 0;
+}
+
+function sessionIsArchivedByTitle(session) {
+  const title = typeof session?.title === "string" ? session.title.trim() : EMPTY_STRING;
+  if (title === EMPTY_STRING) {
+    return false;
+  }
+  return (
+    STALE_SESSION_TITLE_PATTERN.test(title) ||
+    COMMIT_SESSION_TITLE_PATTERN.test(title) ||
+    ANALYZED_SESSION_TITLE_PATTERN.test(title) ||
+    GENERATED_SESSION_TITLE_PATTERNS.some((pattern) => pattern.test(title))
+  );
+}
+
+function sessionHasCodeArtifact(session) {
+  const summary = session?.summary;
+  const fileCount = typeof summary?.files === "number" && Number.isFinite(summary.files) ? summary.files : 0;
+  const additions = typeof summary?.additions === "number" && Number.isFinite(summary.additions) ? summary.additions : 0;
+  const deletions = typeof summary?.deletions === "number" && Number.isFinite(summary.deletions) ? summary.deletions : 0;
+  return fileCount > 0 || additions > 0 || deletions > 0;
+}
+
+function sessionHasPatchArtifact(messages) {
+  for (const message of Array.isArray(messages) ? messages : []) {
+    for (const part of Array.isArray(message?.parts) ? message.parts : []) {
+      if (part?.type === PATCH_PART_TYPE) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function extractSessionAgentName(session, messages) {
+  const orderedMessages = normalizeMessages(messages);
+  for (let index = orderedMessages.length - 1; index >= 0; index -= 1) {
+    const agentName = orderedMessages[index]?.info?.agent;
+    if (typeof agentName === "string" && agentName.trim() !== EMPTY_STRING) {
+      return agentName.trim();
+    }
+  }
+
+  const title = typeof session?.title === "string" ? session.title.trim() : EMPTY_STRING;
+  const titleMatch = SUBAGENT_TITLE_AGENT_PATTERN.exec(title);
+  if (titleMatch?.[1]) {
+    return titleMatch[1].trim();
+  }
+
+  return null;
+}
+
+function detectReadOnlyWriteViolation(session, messages) {
+  const agentName = extractSessionAgentName(session, messages);
+  if (!agentName || !READ_ONLY_AGENT_NAMES.has(agentName)) {
+    return null;
+  }
+
+  const hasPatchArtifact = sessionHasPatchArtifact(messages);
+  const hasCodeArtifact = sessionHasCodeArtifact(session);
+  if (!hasPatchArtifact && !hasCodeArtifact) {
+    return null;
+  }
+
+  return {
+    agentName,
+    hasPatchArtifact,
+    hasCodeArtifact,
+  };
+}
+
+function sessionShouldArchiveAsCompletedReport(session, sessionStatus) {
+  if (!session?.parentID) {
+    return false;
+  }
+  if (sessionStatus?.status !== "completed") {
+    return false;
+  }
+  if (sessionHasCodeArtifact(session)) {
+    return false;
+  }
+  const activityTimestamp = sessionActivityTimestamp(session);
+  if (activityTimestamp <= 0) {
+    return true;
+  }
+  return Date.now() - activityTimestamp > COMPLETED_SUBAGENT_REPORT_WINDOW_MS;
+}
+
+function deriveSessionState(session, sessionStatus = null) {
+  if (sessionIsArchivedByTitle(session)) {
+    return "archived";
+  }
+  if (sessionShouldArchiveAsCompletedReport(session, sessionStatus)) {
+    return "archived";
+  }
+  const now = Date.now();
+  const activityTimestamp = sessionActivityTimestamp(session);
+  if (activityTimestamp <= 0) {
+    return "archived";
+  }
+  const idleMs = Math.max(0, now - activityTimestamp);
+  if (idleMs <= ACTIVE_SESSION_WINDOW_MS) {
+    return "active";
+  }
+  if (idleMs <= RECENT_SESSION_WINDOW_MS) {
+    return "recent";
+  }
+  return "archived";
+}
+
+function displaySessionTitle(session, backendID) {
+  const rawTitle = typeof session?.title === "string" ? session.title.trim() : EMPTY_STRING;
+  if (!rawTitle) {
+    return rawTitle;
+  }
+
+  const sessionState = deriveSessionState(session);
+
+  if (
+    backendID === "aicoder" &&
+    (
+      rawTitle === "aicoder-maintenance" ||
+      rawTitle === "aicoder-control-plane" ||
+      rawTitle === "aicoder-opencode / main / control-plane"
+    ) &&
+    sessionState === "active"
+  ) {
+    return ROOT_SESSION_TITLE_BY_BACKEND_ID.aicoder;
+  }
+  if (
+    backendID === "dr" &&
+    (
+      rawTitle === "dr-repo-maintenance" ||
+      rawTitle === "dr-repo-delivery" ||
+      rawTitle === "dr-repo / main / delivery" ||
+      rawTitle === "dr-repo / main / product"
+    ) &&
+    sessionState === "active"
+  ) {
+    return ROOT_SESSION_TITLE_BY_BACKEND_ID.dr;
+  }
+  if (
+    backendID === "letta" &&
+    (
+      rawTitle === "letta-workspace-maintenance" ||
+      rawTitle === "letta-platform" ||
+      rawTitle === "letta-workspace / main / platform"
+    ) &&
+    sessionState === "active"
+  ) {
+    return ROOT_SESSION_TITLE_BY_BACKEND_ID.letta;
+  }
+
+  return rawTitle;
+}
+
+function latestMessageTimestamp(message) {
+  const completed = message?.info?.time?.completed;
+  if (typeof completed === "number" && Number.isFinite(completed)) {
+    return completed;
+  }
+  const created = message?.info?.time?.created;
+  if (typeof created === "number" && Number.isFinite(created)) {
+    return created;
+  }
+  return 0;
+}
+
+function extractTokenCount(message, tokenKey) {
+  const tokenValue = message?.info?.tokens?.[tokenKey];
+  return typeof tokenValue === "number" && Number.isFinite(tokenValue) ? tokenValue : null;
+}
+
+function normalizeMessages(messages) {
+  return [...(Array.isArray(messages) ? messages : [])].sort(
+    (leftMessage, rightMessage) => latestMessageTimestamp(leftMessage) - latestMessageTimestamp(rightMessage),
+  );
+}
+
+function findLatestAssistantMessage(messages) {
+  const orderedMessages = normalizeMessages(messages);
+  for (let index = orderedMessages.length - 1; index >= 0; index -= 1) {
+    const message = orderedMessages[index];
+    if (message?.info?.role === "assistant") {
+      return message;
+    }
+  }
+  return null;
+}
+
+function listToolNames(message) {
+  const toolNames = [];
+  for (const part of Array.isArray(message?.parts) ? message.parts : []) {
+    if (part?.type === "tool" && typeof part.tool === "string" && part.tool.trim() !== EMPTY_STRING) {
+      toolNames.push(part.tool.trim());
+    }
+  }
+  return toolNames;
+}
+
+function extractMessageTextLines(message) {
+  const textLines = [];
+  for (const part of Array.isArray(message?.parts) ? message.parts : []) {
+    if (typeof part?.text === "string" && part.text.trim() !== EMPTY_STRING) {
+      textLines.push(part.text.trim());
+    }
+  }
+  return textLines;
+}
+
+function extractLatestMessageSnippet(message) {
+  const textLines = extractMessageTextLines(message);
+  if (textLines.length === 0) {
+    return null;
+  }
+  const prioritizedLine =
+    textLines.find((textLine) => FAILURE_HINT_PATTERN.test(textLine)) ?? textLines[textLines.length - 1];
+  return prioritizedLine.replace(/\s+/g, " ").slice(0, 160);
+}
+
+function summarizeToolNames(message) {
+  const toolNames = listToolNames(message);
+  if (toolNames.length === 0) {
+    return null;
+  }
+
+  const toolCountsByName = new Map();
+  for (const toolName of toolNames) {
+    toolCountsByName.set(toolName, (toolCountsByName.get(toolName) ?? 0) + 1);
+  }
+
+  return [...toolCountsByName.entries()]
+    .sort((leftEntry, rightEntry) => {
+      if (rightEntry[1] !== leftEntry[1]) {
+        return rightEntry[1] - leftEntry[1];
+      }
+      return leftEntry[0].localeCompare(rightEntry[0]);
+    })
+    .slice(0, 3)
+    .map(([toolName, count]) => (count > 1 ? `${toolName}×${count}` : toolName))
+    .join(" · ");
+}
+
+function extractLatestRouteLabel(messages) {
+  const orderedMessages = normalizeMessages(messages);
+  for (let index = orderedMessages.length - 1; index >= 0; index -= 1) {
+    const message = orderedMessages[index];
+    if (message?.info?.role !== "assistant") {
+      continue;
+    }
+
+    const routeLabel = buildRouteLabel(message?.info?.providerID, message?.info?.modelID);
+    if (routeLabel !== "none yet") {
+      return routeLabel;
+    }
+  }
+
+  return null;
+}
+
+function sessionSummaryHasCodeArtifact(session) {
+  const fileCount = typeof session?.summary?.files === "number" ? session.summary.files : 0;
+  const additions = typeof session?.summary?.additions === "number" ? session.summary.additions : 0;
+  const deletions = typeof session?.summary?.deletions === "number" ? session.summary.deletions : 0;
+  return fileCount > 0 || additions > 0 || deletions > 0;
+}
+
+function sessionSummaryHasUsableBranchOutput(session) {
+  if (sessionSummaryHasCodeArtifact(session)) {
+    return true;
+  }
+  const artifactLabel = typeof session?.artifactLabel === "string" ? session.artifactLabel : null;
+  if (!artifactLabel) {
+    return false;
+  }
+  return !NON_ACTIONABLE_BRANCH_ARTIFACT_LABELS.has(artifactLabel);
+}
+
+function deriveBranchDisposition(session, sessionsByID) {
+  if (!session?.parentID) {
+    return {
+      branchDisposition: null,
+      branchDispositionReason: null,
+    };
+  }
+
+  const parentSession = sessionsByID.get(session.parentID) ?? null;
+  if (!parentSession) {
+    return {
+      branchDisposition: BRANCH_DISPOSITION_DISCARDED,
+      branchDispositionReason: "missing parent session",
+    };
+  }
+
+  const childUpdatedAt = sessionActivityTimestamp(session);
+  const parentUpdatedAt = sessionActivityTimestamp(parentSession);
+  const hasUsableOutput = sessionSummaryHasUsableBranchOutput(session);
+  const artifactLabel = typeof session?.artifactLabel === "string" ? session.artifactLabel : null;
+
+  if (artifactLabel === "invalid read-only write") {
+    return {
+      branchDisposition: BRANCH_DISPOSITION_DISCARDED,
+      branchDispositionReason: "discarded invalid write",
+    };
+  }
+
+  if (session?.status === "failed" || session?.status === "stalled") {
+    return {
+      branchDisposition: BRANCH_DISPOSITION_DISCARDED,
+      branchDispositionReason: session.status === "failed" ? "discarded failed branch" : "discarded stalled branch",
+    };
+  }
+
+  if (session?.status === "completed" && !hasUsableOutput) {
+    return {
+      branchDisposition: BRANCH_DISPOSITION_DISCARDED,
+      branchDispositionReason: "discarded empty result",
+    };
+  }
+
+  if (session?.state === "archived" && !hasUsableOutput) {
+    return {
+      branchDisposition: BRANCH_DISPOSITION_DISCARDED,
+      branchDispositionReason: "discarded archived noise",
+    };
+  }
+
+  if (
+    hasUsableOutput &&
+    parentUpdatedAt >= childUpdatedAt &&
+    PARENT_PROGRESS_PHASES.has(parentSession?.phase ?? EMPTY_STRING)
+  ) {
+    return {
+      branchDisposition: BRANCH_DISPOSITION_USED,
+      branchDispositionReason: "parent advanced after branch output",
+    };
+  }
+
+  return {
+    branchDisposition: BRANCH_DISPOSITION_PENDING,
+    branchDispositionReason: hasUsableOutput ? "awaiting parent synthesis" : "awaiting usable output",
+  };
+}
+
+function buildChangeSummary(session) {
+  const fileCount = typeof session?.summary?.files === "number" ? session.summary.files : 0;
+  const additions = typeof session?.summary?.additions === "number" ? session.summary.additions : 0;
+  const deletions = typeof session?.summary?.deletions === "number" ? session.summary.deletions : 0;
+
+  if (fileCount <= 0 && additions <= 0 && deletions <= 0) {
+    return {
+      label: null,
+      detail: null,
+    };
+  }
+
+  const fileLabel = `${fileCount} ${fileCount === 1 ? "file" : "files"} changed`;
+  const deltaLabel =
+    additions > 0 || deletions > 0 ? `+${additions} -${deletions}` : null;
+
+  return {
+    label: fileLabel,
+    detail: deltaLabel,
+  };
+}
+
+function deriveSessionPhaseAndArtifact(session, messages, sessionStatus) {
+  const title = typeof session?.title === "string" ? session.title.trim() : EMPTY_STRING;
+  const latestAssistantMessage = findLatestAssistantMessage(messages);
+  const toolNames = listToolNames(latestAssistantMessage);
+  const toolSummary = summarizeToolNames(latestAssistantMessage);
+  const latestSnippet = extractLatestMessageSnippet(latestAssistantMessage);
+  const latestAssistantHasPatch = Array.isArray(latestAssistantMessage?.parts)
+    ? latestAssistantMessage.parts.some((part) => part?.type === PATCH_PART_TYPE)
+    : false;
+  const changeSummary = buildChangeSummary(session);
+  const dispatchCount = toolNames.filter((toolName) => DISPATCH_TOOL_NAMES.has(toolName)).length;
+  const planningCount = toolNames.filter((toolName) => PLANNING_TOOL_NAMES.has(toolName)).length;
+  const readCount = toolNames.filter((toolName) => READ_TOOL_NAMES.has(toolName)).length;
+  const verificationHint = latestSnippet ? VERIFICATION_HINT_PATTERN.test(latestSnippet) : false;
+
+  if (sessionStatus.readOnlyWriteViolation) {
+    return {
+      phase: "blocked",
+      artifactLabel: "invalid read-only write",
+      artifactDetail:
+        `${sessionStatus.readOnlyWriteViolation.agentName} emitted ${
+          sessionStatus.readOnlyWriteViolation.hasPatchArtifact ? "patch output" : "file-change summary"
+        }`,
+    };
+  }
+
+  if (COMMIT_SESSION_TITLE_PATTERN.test(title)) {
+    return {
+      phase: "committed",
+      artifactLabel: "commit recorded",
+      artifactDetail: title.replace(COMMIT_SESSION_TITLE_PATTERN, EMPTY_STRING).trim() || null,
+    };
+  }
+
+  if (sessionIsArchivedByTitle(session)) {
+    return {
+      phase: "waiting",
+      artifactLabel: changeSummary.label ?? "archived session",
+      artifactDetail: changeSummary.detail ?? latestSnippet ?? toolSummary,
+    };
+  }
+
+  if (sessionStatus.status === "failed" || sessionStatus.status === "stalled") {
+    return {
+      phase: "blocked",
+      artifactLabel: sessionStatus.status === "failed" ? "run failed" : "run stalled",
+      artifactDetail:
+        sessionStatus.error ?? latestSnippet ?? changeSummary.label ?? toolSummary ?? "needs operator attention",
+    };
+  }
+
+  if (latestAssistantHasPatch || changeSummary.label) {
+    return {
+      phase: "editing",
+      artifactLabel: changeSummary.label ?? "patch emitted",
+      artifactDetail: changeSummary.detail ?? toolSummary,
+    };
+  }
+
+  if (verificationHint) {
+    return {
+      phase: "verifying",
+      artifactLabel: "verification running",
+      artifactDetail: latestSnippet ?? toolSummary,
+    };
+  }
+
+  if (dispatchCount > 0) {
+    return {
+      phase: "dispatching",
+      artifactLabel: `${dispatchCount} ${dispatchCount === 1 ? "subagent request" : "subagent requests"}`,
+      artifactDetail: toolSummary,
+    };
+  }
+
+  if (readCount > 0 || planningCount > 0) {
+    return {
+      phase: "gathering",
+      artifactLabel: planningCount > 0 ? "slice planning" : "reading context",
+      artifactDetail: toolSummary,
+    };
+  }
+
+  if (sessionStatus.status === "completed") {
+    if (session?.parentID && !sessionHasCodeArtifact(session)) {
+      return {
+        phase: "gathering",
+        artifactLabel: "report complete",
+        artifactDetail: latestSnippet ?? toolSummary,
+      };
+    }
+    return {
+      phase: "waiting",
+      artifactLabel: changeSummary.label,
+      artifactDetail: changeSummary.detail,
+    };
+  }
+
+  return {
+    phase: "waiting",
+    artifactLabel: toolSummary,
+    artifactDetail: latestSnippet,
+  };
+}
+
+function deriveSessionStatus(session, messages) {
+  const orderedMessages = [...(Array.isArray(messages) ? messages : [])].sort(
+    (leftMessage, rightMessage) => latestMessageTimestamp(leftMessage) - latestMessageTimestamp(rightMessage),
+  );
+  const latestMessage = orderedMessages[orderedMessages.length - 1] ?? null;
+  const latestMessageRole = latestMessage?.info?.role ?? null;
+  const latestFinish = typeof latestMessage?.info?.finish === "string" ? latestMessage.info.finish : null;
+  const latestUpdatedAt = sessionActivityTimestamp(session);
+  const idleMs = latestUpdatedAt > 0 ? Math.max(0, Date.now() - latestUpdatedAt) : Number.POSITIVE_INFINITY;
+  const outputTokens = extractTokenCount(latestMessage, "output");
+  const readOnlyWriteViolation = detectReadOnlyWriteViolation(session, messages);
+  const selectedAgent = extractSessionAgentName(session, messages);
+  const selectedModelRoute = extractLatestRouteLabel(messages);
+  const completedAt =
+    typeof latestMessage?.info?.time?.completed === "number" && Number.isFinite(latestMessage.info.time.completed)
+      ? latestMessage.info.time.completed
+      : null;
+
+  if (!latestMessage) {
+    return {
+      status: "waiting",
+      needsAttention: false,
+      lastFinish: null,
+      selectedAgent,
+      selectedModelRoute,
+      completedAt,
+    };
+  }
+
+  if (sessionIsArchivedByTitle(session)) {
+    return {
+      status: "completed",
+      needsAttention: false,
+      lastFinish: latestFinish,
+      selectedAgent,
+      selectedModelRoute,
+      completedAt,
+    };
+  }
+
+  if (readOnlyWriteViolation) {
+    return {
+      status: "failed",
+      needsAttention: true,
+      lastFinish: latestFinish,
+      error: `${readOnlyWriteViolation.agentName} attempted to write despite read-only role`,
+      readOnlyWriteViolation,
+      selectedAgent,
+      selectedModelRoute,
+      completedAt,
+    };
+  }
+
+  if (latestMessageRole === "user") {
+    return {
+      status: idleMs > STALLED_SESSION_WINDOW_MS ? "stalled" : "waiting",
+      needsAttention: idleMs > STALLED_SESSION_WINDOW_MS,
+      lastFinish: null,
+      selectedAgent,
+      selectedModelRoute,
+      completedAt,
+    };
+  }
+
+  if (latestMessageRole !== "assistant") {
+    return {
+      status: idleMs > STALLED_SESSION_WINDOW_MS ? "stalled" : "waiting",
+      needsAttention: idleMs > STALLED_SESSION_WINDOW_MS,
+      lastFinish: latestFinish,
+      selectedAgent,
+      selectedModelRoute,
+      completedAt,
+    };
+  }
+
+  if (latestMessage?.info?.time?.completed == null) {
+    return {
+      status: idleMs > STALLED_SESSION_WINDOW_MS ? "stalled" : "running",
+      needsAttention: idleMs > STALLED_SESSION_WINDOW_MS,
+      lastFinish: latestFinish,
+      selectedAgent,
+      selectedModelRoute,
+      completedAt,
+    };
+  }
+
+  if (outputTokens === 0) {
+    return {
+      status: "failed",
+      needsAttention: true,
+      lastFinish: latestFinish,
+      selectedAgent,
+      selectedModelRoute,
+      completedAt,
+    };
+  }
+
+  if (latestFinish === "stop") {
+    return {
+      status: "completed",
+      needsAttention: false,
+      lastFinish: latestFinish,
+      selectedAgent,
+      selectedModelRoute,
+      completedAt,
+    };
+  }
+
+  if (latestFinish === "tool-calls") {
+    return {
+      status: idleMs > STALLED_SESSION_WINDOW_MS ? "stalled" : "running",
+      needsAttention: idleMs > STALLED_SESSION_WINDOW_MS,
+      lastFinish: latestFinish,
+      selectedAgent,
+      selectedModelRoute,
+      completedAt,
+    };
+  }
+
+  return {
+    status: "failed",
+    needsAttention: true,
+    lastFinish: latestFinish,
+    selectedAgent,
+    selectedModelRoute,
+    completedAt,
+  };
+}
+async function readSessionStatus(backend, session) {
+  const cacheKey = `${backend.id}:${session.id}:${sessionActivityTimestamp(session)}`;
+  const cachedStatus = sessionStatusCacheByKey.get(cacheKey);
+  if (cachedStatus && cachedStatus.expiresAt > Date.now()) {
+    return cachedStatus.value;
+  }
+
+  let nextValue;
+  try {
+    const messages = await readBackendMessages(backend, session.id);
+    const sessionStatus = deriveSessionStatus(session, messages);
+    nextValue = {
+      ...sessionStatus,
+      ...deriveSessionPhaseAndArtifact(session, messages, sessionStatus),
+    };
+  } catch (error) {
+    nextValue = {
+      status: "failed",
+      phase: "blocked",
+      needsAttention: true,
+      lastFinish: null,
+      artifactLabel: "session read failed",
+      artifactDetail: error instanceof Error ? error.message : String(error),
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  sessionStatusCacheByKey.set(cacheKey, {
+    expiresAt: Date.now() + SESSION_STATUS_CACHE_TTL_MS,
+    value: nextValue,
+  });
+  return nextValue;
+}
+
 function normalizeSessionList(sessions) {
-  return (Array.isArray(sessions) ? sessions : []).slice(0, 20);
+  return [...(Array.isArray(sessions) ? sessions : [])]
+    .sort(
+      (leftSession, rightSession) =>
+        sessionActivityTimestamp(rightSession) - sessionActivityTimestamp(leftSession),
+    );
 }
 
 function createEmptyLlmStats() {
@@ -115,6 +854,106 @@ function createEmptyLlmStats() {
 function buildRouteLabel(providerID, modelID) {
   const rawRouteLabel = [providerID, modelID].filter(Boolean).join("/");
   return rawRouteLabel || "none yet";
+}
+
+function parseJsonLines(rawOutput) {
+  return String(rawOutput ?? EMPTY_STRING)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+function summarizeCanaryEvents(events) {
+  let finishReason = null;
+  let tokens = null;
+  const textParts = [];
+
+  for (const event of events) {
+    if (!event || typeof event !== "object") continue;
+    const part = event.part;
+    if (event.type === "text" && part && typeof part.text === "string") {
+      textParts.push(part.text.trim());
+      continue;
+    }
+    if (event.type === "step_finish" && part && typeof part === "object") {
+      finishReason = typeof part.reason === "string" ? part.reason : null;
+      tokens = part.tokens && typeof part.tokens === "object" ? part.tokens : null;
+    }
+  }
+
+  return {
+    text: textParts.filter(Boolean).join("\n").trim(),
+    finishReason,
+    tokens,
+  };
+}
+
+async function runModelCanaryProbe(modelCanary) {
+  const startedAt = Date.now();
+  const commandArguments = [
+    "run",
+    "--format",
+    "json",
+    "-m",
+    modelCanary.route,
+    MODEL_CANARY_PROMPT,
+  ];
+
+  try {
+    const { stdout, stderr } = await execFile(OPENCODE_CLI_PATH, commandArguments, {
+      cwd: "/tmp",
+      env: MODEL_CANARY_ENV,
+      timeout: MODEL_CANARY_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024,
+    });
+    const { text, finishReason, tokens } = summarizeCanaryEvents(parseJsonLines(stdout));
+    return {
+      route: modelCanary.route,
+      title: modelCanary.title,
+      lane: modelCanary.lane,
+      ok:
+        text === "OK" &&
+        finishReason === "stop" &&
+        tokens &&
+        typeof tokens.output === "number" &&
+        tokens.output > 0,
+      text,
+      finishReason,
+      tokens,
+      durationMs: Date.now() - startedAt,
+      stderr: String(stderr ?? EMPTY_STRING).trim() || null,
+      error: null,
+    };
+  } catch (error) {
+    const stdout = typeof error?.stdout === "string" ? error.stdout : EMPTY_STRING;
+    const stderr = typeof error?.stderr === "string" ? error.stderr : EMPTY_STRING;
+    const { text, finishReason, tokens } = summarizeCanaryEvents(parseJsonLines(stdout));
+    return {
+      route: modelCanary.route,
+      title: modelCanary.title,
+      lane: modelCanary.lane,
+      ok: false,
+      text,
+      finishReason,
+      tokens,
+      durationMs: Date.now() - startedAt,
+      stderr: stderr.trim() || null,
+      error:
+        error && typeof error === "object" && error.killed
+          ? `timeout after ${MODEL_CANARY_TIMEOUT_MS}ms`
+          : error instanceof Error
+            ? error.message
+            : String(error),
+    };
+  }
 }
 
 function mergeRouteCounts(targetRouteCounts, sourceRouteCounts) {
@@ -579,6 +1418,33 @@ async function runMaintenanceTimerAction(unit, action) {
   return readMaintenanceTimerStatus(unit);
 }
 
+async function runBackendServiceAction(backendId, action) {
+  const serviceName = MAIN_SERVICE_BY_BACKEND_ID[backendId];
+  if (!serviceName) {
+    throw new Error(`unknown backend: ${backendId}`);
+  }
+  if (action !== "start" && action !== "stop" && action !== "restart") {
+    throw new Error(`unsupported action: ${action}`);
+  }
+
+  if (action === "restart") {
+    // Sequential stop + start so failure is explicit and mid-state is observable
+    await execFile("systemctl", ["--user", "stop", serviceName]);
+    await execFile("systemctl", ["--user", "start", serviceName]);
+  } else {
+    await execFile("systemctl", ["--user", action, serviceName]);
+  }
+
+  const mainPid = await readMainServicePid(serviceName);
+  return {
+    service: serviceName,
+    backendId,
+    action,
+    mainPid,
+    running: mainPid != null,
+  };
+}
+
 async function readBackendConfig(backend) {
   return fetchBackendJson(backend, "/config");
 }
@@ -666,11 +1532,46 @@ async function collectBackendSummary() {
 
       try {
         const [config, sessions] = await Promise.all([readBackendConfig(backend), listBackendSessions(backend)]);
+        const normalizedSessions = normalizeSessionList(sessions);
+        const sessionsWithStatus = await mapInBatches(
+          normalizedSessions,
+          LLM_STATS_FETCH_BATCH_SIZE,
+          async (session) => {
+            const sessionStatus = await readSessionStatus(backend, session);
+            const sessionState = deriveSessionState(session, sessionStatus);
+            return {
+              ...session,
+              title: displaySessionTitle(session, backend.id),
+              state: sessionState,
+              status: sessionStatus.status,
+              phase: sessionStatus.phase,
+              needsAttention: sessionState === "archived" ? false : sessionStatus.needsAttention,
+              lastFinish: sessionStatus.lastFinish,
+              artifactLabel: sessionStatus.artifactLabel,
+              artifactDetail: sessionStatus.artifactDetail,
+              selectedAgent: sessionStatus.selectedAgent ?? null,
+              selectedModelRoute: sessionStatus.selectedModelRoute ?? null,
+              completedAt: sessionStatus.completedAt ?? null,
+            };
+          },
+        );
+        const sessionsByID = new Map(sessionsWithStatus.map((session) => [session.id, session]));
+        const sessionsWithDisposition = sessionsWithStatus.map((session) => {
+          const branchDisposition = deriveBranchDisposition(session, sessionsByID);
+          const branchNeedsAttention = branchDisposition.branchDisposition === BRANCH_DISPOSITION_DISCARDED
+            ? false
+            : session.needsAttention;
+          return {
+            ...session,
+            ...branchDisposition,
+            needsAttention: branchNeedsAttention,
+          };
+        });
         return {
           ...status,
           defaultAgent: config.default_agent ?? null,
           agentNames: Object.keys(config.agent ?? {}),
-          sessions: normalizeSessionList(sessions),
+          sessions: sessionsWithDisposition,
         };
       } catch (error) {
         return {
@@ -684,6 +1585,87 @@ async function collectBackendSummary() {
       }
     }),
   );
+}
+
+function summarizeRunBranches(branchSessions) {
+  const branchCounts = {
+    total: 0,
+    pending: 0,
+    used: 0,
+    discarded: 0,
+    attention: 0,
+  };
+
+  for (const branchSession of branchSessions) {
+    branchCounts.total += 1;
+
+    if (branchSession.branchDisposition === BRANCH_DISPOSITION_PENDING) {
+      branchCounts.pending += 1;
+    } else if (branchSession.branchDisposition === BRANCH_DISPOSITION_USED) {
+      branchCounts.used += 1;
+    } else if (branchSession.branchDisposition === BRANCH_DISPOSITION_DISCARDED) {
+      branchCounts.discarded += 1;
+    }
+
+    if (branchSession.needsAttention) {
+      branchCounts.attention += 1;
+    }
+  }
+
+  return branchCounts;
+}
+
+function buildRunSummary(backend, rootSession, branchSessions) {
+  return {
+    id: rootSession.id,
+    sessionID: rootSession.id,
+    backendID: backend.id,
+    projectID: backend.id,
+    title: rootSession.title ?? rootSession.id,
+    directory: rootSession.directory ?? backend.directory,
+    state: rootSession.state,
+    status: rootSession.status,
+    phase: rootSession.phase,
+    needsAttention: rootSession.needsAttention,
+    artifactLabel: rootSession.artifactLabel ?? null,
+    artifactDetail: rootSession.artifactDetail ?? null,
+    selectedAgent: rootSession.selectedAgent ?? null,
+    selectedModelRoute: rootSession.selectedModelRoute ?? null,
+    branchCounts: summarizeRunBranches(branchSessions),
+    time: rootSession.time ?? {},
+    completedAt: rootSession.completedAt ?? null,
+  };
+}
+
+async function collectRunsSummary() {
+  const backends = await collectBackendSummary();
+  return {
+    generatedAt: Date.now(),
+    backends: backends.map((backend) => {
+      const branchSessionsByParentID = new Map();
+      for (const session of backend.sessions) {
+        if (!session.parentID) {
+          continue;
+        }
+
+        const branchSessions = branchSessionsByParentID.get(session.parentID) ?? [];
+        branchSessions.push(session);
+        branchSessionsByParentID.set(session.parentID, branchSessions);
+      }
+
+      return {
+        id: backend.id,
+        title: backend.title,
+        role: backend.role,
+        ok: backend.ok,
+        status: backend.status,
+        error: backend.error ?? null,
+        runs: backend.sessions
+          .filter((session) => !session.parentID)
+          .map((rootSession) => buildRunSummary(backend, rootSession, branchSessionsByParentID.get(rootSession.id) ?? [])),
+      };
+    }),
+  };
 }
 
 async function collectBackendLlmStats(backend) {
@@ -830,6 +1812,45 @@ async function collectLlmStatsSummary() {
     return await llmStatsCacheInFlight;
   } finally {
     llmStatsCacheInFlight = null;
+  }
+}
+
+async function collectModelCanaryStatus({ forceRefresh = false } = {}) {
+  const currentTimestamp = Date.now();
+  if (!forceRefresh && modelCanaryCacheValue && currentTimestamp < modelCanaryCacheExpiresAt) {
+    return modelCanaryCacheValue;
+  }
+  if (!forceRefresh && modelCanaryCacheInFlight) {
+    return modelCanaryCacheInFlight;
+  }
+
+  modelCanaryCacheInFlight = (async () => {
+    const probes = [];
+    for (const modelCanary of MODEL_CANARY_ROUTES) {
+      probes.push(await runModelCanaryProbe(modelCanary));
+    }
+
+    const okCount = probes.filter((probe) => probe.ok).length;
+    const payload = {
+      generatedAt: currentTimestamp,
+      cacheTtlMs: MODEL_CANARY_CACHE_TTL_MS,
+      prompt: MODEL_CANARY_PROMPT,
+      probes,
+      total: {
+        okCount,
+        failCount: probes.length - okCount,
+      },
+    };
+
+    modelCanaryCacheValue = payload;
+    modelCanaryCacheExpiresAt = Date.now() + MODEL_CANARY_CACHE_TTL_MS;
+    return payload;
+  })();
+
+  try {
+    return await modelCanaryCacheInFlight;
+  } finally {
+    modelCanaryCacheInFlight = null;
   }
 }
 
@@ -1220,6 +2241,18 @@ function renderDashboard() {
         }
       }
 
+      async function runServiceAction(backendID, action) {
+        state.errorsByBackend[backendID] = "";
+        render();
+        try {
+          await readJson("/api/ops/services/" + backendID + "/" + action, { method: "POST" });
+          await refreshBackends();
+        } catch (error) {
+          state.errorsByBackend[backendID] = error.message;
+          render();
+        }
+      }
+
       function renderSessionList(backend, selectedSessionID) {
         if (backend.sessions.length === 0) {
           const empty = document.createElement("div");
@@ -1411,6 +2444,32 @@ function renderDashboard() {
           count.textContent = backend.sessions.length + " sessions";
           actions.appendChild(count);
 
+          // Service control buttons — start/stop/restart the backend's main systemd service
+          const serviceActionsWrapper = document.createElement("div");
+          serviceActionsWrapper.style.display = "flex";
+          serviceActionsWrapper.style.gap = "0.4rem";
+          serviceActionsWrapper.style.marginLeft = "auto";
+
+          const restartServiceButton = document.createElement("button");
+          restartServiceButton.type = "button";
+          restartServiceButton.textContent = "restart";
+          restartServiceButton.addEventListener("click", () => runServiceAction(backend.id, "restart"));
+          serviceActionsWrapper.appendChild(restartServiceButton);
+
+          const stopServiceButton = document.createElement("button");
+          stopServiceButton.type = "button";
+          stopServiceButton.textContent = "stop";
+          stopServiceButton.addEventListener("click", () => runServiceAction(backend.id, "stop"));
+          serviceActionsWrapper.appendChild(stopServiceButton);
+
+          const startServiceButton = document.createElement("button");
+          startServiceButton.type = "button";
+          startServiceButton.textContent = "start";
+          startServiceButton.addEventListener("click", () => runServiceAction(backend.id, "start"));
+          serviceActionsWrapper.appendChild(startServiceButton);
+
+          actions.appendChild(serviceActionsWrapper);
+
           card.appendChild(actions);
 
           const body = document.createElement("div");
@@ -1505,9 +2564,103 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (requestURL.pathname === "/api/runs") {
+    sendJson(response, 200, await collectRunsSummary());
+    return;
+  }
+
   if (requestURL.pathname === "/api/llm-stats") {
     sendJson(response, 200, await collectLlmStatsSummary());
     return;
+  }
+
+  // LW6 supervision projection — proxy GET /api/letta/runs/<run_id>/slices to
+  // letta-server's authoritative GET /v1/runs/<run_id>/slices endpoint.
+  const lettaRunSlicesMatch = requestURL.pathname.match(/^\/api\/letta\/runs\/([^/]+)\/slices$/);
+  if (lettaRunSlicesMatch && request.method === "GET") {
+    const runId = lettaRunSlicesMatch[1];
+    try {
+      const upstream = await fetch(`${LETTA_SERVER_BASE_URL}/v1/runs/${encodeURIComponent(runId)}/slices`, {
+        headers: { Accept: "application/json" },
+      });
+      const body = await upstream.text();
+      response.statusCode = upstream.status;
+      response.setHeader("Content-Type", upstream.headers.get("content-type") ?? "application/json");
+      response.end(body);
+      return;
+    } catch (error) {
+      sendJson(response, 502, {
+        error: "letta slices proxy failed",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+  }
+
+  // LW10 Slice 4 — proxy GET /api/selfhost/status to letta-server's
+  // authoritative GET /v1/selfhost/status. Returns aggregated effective
+  // state (agents counts, memfs runtime health, repair surface metadata)
+  // for the dashboard self-host tile.
+  if (requestURL.pathname === "/api/selfhost/status" && request.method === "GET") {
+    try {
+      const upstream = await fetch(`${LETTA_SERVER_BASE_URL}/v1/selfhost/status`, {
+        headers: { Accept: "application/json" },
+      });
+      const body = await upstream.text();
+      response.statusCode = upstream.status;
+      response.setHeader(
+        "Content-Type",
+        upstream.headers.get("content-type") ?? "application/json",
+      );
+      response.end(body);
+      return;
+    } catch (error) {
+      sendJson(response, 502, {
+        error: "letta selfhost status proxy failed",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+  }
+
+  // LW8 quota collector — proxy GET /api/quota to the sidecar's batch
+  // /quota endpoint so the dashboard can read provider quota in one shot.
+  if (requestURL.pathname === "/api/quota" && request.method === "GET") {
+    try {
+      const upstream = await fetch(`${SIDECAR_QUOTA_BASE_URL}/quota`, {
+        headers: { Accept: "application/json" },
+      });
+      const body = await upstream.text();
+      response.statusCode = upstream.status;
+      response.setHeader("Content-Type", upstream.headers.get("content-type") ?? "application/json");
+      response.end(body);
+      return;
+    } catch (error) {
+      sendJson(response, 502, {
+        error: "sidecar quota proxy failed",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+  }
+
+  if (requestURL.pathname === "/api/canary-status") {
+    try {
+      sendJson(
+        response,
+        200,
+        await collectModelCanaryStatus({
+          forceRefresh: requestURL.searchParams.get("refresh") === "1",
+        }),
+      );
+      return;
+    } catch (error) {
+      sendJson(response, 500, {
+        error: "canary status failed",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
   }
 
   const createSessionMatch = requestURL.pathname.match(/^\/api\/backends\/([^/]+)\/sessions$/);
@@ -1632,6 +2785,22 @@ const server = http.createServer(async (request, response) => {
       const message = error instanceof Error ? error.message : String(error);
       const statusCode = message.startsWith("unit not in whitelist") ? 400 : 502;
       sendJson(response, statusCode, { error: "timer action failed", detail: message });
+      return;
+    }
+  }
+
+  const serviceActionMatch = requestURL.pathname.match(/^\/api\/ops\/services\/([^/]+)\/(start|stop|restart)$/);
+  if (serviceActionMatch && request.method === "POST") {
+    const backendId = serviceActionMatch[1];
+    const action = serviceActionMatch[2];
+    try {
+      const status = await runBackendServiceAction(backendId, action);
+      sendJson(response, 200, { backendId, action, status });
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const statusCode = message.startsWith("unknown backend") ? 400 : 502;
+      sendJson(response, statusCode, { error: "service action failed", detail: message });
       return;
     }
   }
