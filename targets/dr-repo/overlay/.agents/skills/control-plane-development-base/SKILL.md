@@ -1,3 +1,9 @@
+---
+name: control-plane-development-base
+version: 2026-04-15.1
+description: "Shared control-plane development base wrapper for dr-repo."
+---
+
 # control-plane-development-base
 
 This repo consumes the shared development base from:
