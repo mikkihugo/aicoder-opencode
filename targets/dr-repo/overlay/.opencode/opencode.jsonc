@@ -25,5 +25,13 @@
     "file:./.opencode/plugins/dr-memory",
     "file:./.opencode/plugins/dr-public-code-search",
     "file:./.opencode/plugins/dr-ast-grep-search"
-  ]
+  ],
+  "permission": {
+    "read": {
+      "/home/mhugo/code/dr-repo/.opencode/get-shit-done/*": "allow"
+    },
+    "external_directory": {
+      "/home/mhugo/code/dr-repo/.opencode/get-shit-done/*": "allow"
+    }
+  }
 }
