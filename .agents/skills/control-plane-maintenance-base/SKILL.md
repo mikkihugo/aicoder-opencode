@@ -41,7 +41,7 @@ Use this skill when work is about:
 - `aicoder-opencode` on `8080`
 - `dr-repo` on `8082`
 - `letta-workspace` on `8084`
-- OpenChamber attaches to one repo server at a time
+- Singularity Matrix is the only operator surface
 
 ## Shared Base
 
