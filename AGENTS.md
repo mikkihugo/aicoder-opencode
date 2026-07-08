@@ -67,3 +67,11 @@ Instead, the control plane's state is derived from:
 - Target repo work? → Checkpoints + active-slice.md in target repo
 - Shared infrastructure work? → OpenCode plugins, shared skills, config
 - Product plans or specs? → Not here — keep in target repos
+## Nix Environment
+
+If this repo has `flake.nix`, `shell.nix`, or `default.nix`, run project
+commands inside the Nix environment. At task start, check `IN_NIX_SHELL`.
+`IN_NIX_SHELL=impure` from direnv is valid. If it is empty, use
+`direnv exec . <command>` or `nix develop -c <command>`; do not silently fall
+back to host tools. Scripts, Make targets, and agent entrypoints that require
+repo tooling should fail loudly when they are not running under Nix.
