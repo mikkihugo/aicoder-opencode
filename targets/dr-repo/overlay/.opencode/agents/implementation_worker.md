@@ -1,10 +1,10 @@
 ---
 description: Hard implementation and debugging specialist for bounded slices.
 mode: subagent
-model: xiaomi-token-plan-ams/mimo-v2-pro
+model: zai-coding-plan/glm-4.7
 models:
-  - zai-coding-plan/glm-4.7
-  - qwen/qwen-3.6-plus
+  - kimi-for-coding/kimi-k2-thinking
+  - ollama-cloud/qwen3-coder:480b
   - ollama-cloud/qwen3-coder-next
 routing_role: implementation_worker
 routing_complexity: medium
