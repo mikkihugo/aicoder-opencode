@@ -1,11 +1,10 @@
 ---
 description: Cheap worker for small, straightforward, bounded edits.
 mode: subagent
-model: xiaomi-token-plan-ams/mimo-v2-pro
+model: kimi-for-coding/k2p5
 models:
-  - zai-coding-plan/glm-4.7-flash
-  - ollama-cloud/kimi-k2.5
   - zai-coding-plan/glm-4.7
+  - ollama-cloud/qwen3-coder-next
 routing_role: implementation_worker
 routing_complexity: small
 ---
