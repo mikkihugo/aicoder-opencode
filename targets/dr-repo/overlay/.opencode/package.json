@@ -1,7 +1,6 @@
 {
-  "type": "module",
+  "type": "commonjs",
   "dependencies": {
-    "@opencode-ai/plugin": "1.4.3",
-    "@tobilu/qmd": "latest"
+    "@opencode-ai/plugin": "1.4.3"
   }
 }
