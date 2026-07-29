@@ -9,7 +9,6 @@ This document outlines the detailed plan to migrate dr-repo's maintenance layer 
 - **dr-repo location**: `/home/mhugo/code/dr-repo`
 - **Maintenance paths**: `.opencode/`, `.agents/`, `.maintenance/` (currently empty - validated)
 - **Control plane**: `/home/mhugo/code/aicoder-opencode`
-- **OpenPortal**: Active and running (PID 461364, ports 3091/4091)
 
 ## Migration Phases
 
