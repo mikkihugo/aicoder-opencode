@@ -2,7 +2,6 @@ dist/
 node_modules/
 .direnv/
 .state/
-.claude/worktrees/
 .opencode/node_modules/
 .opencode/state/
 targets/dr-repo/overlay/.opencode/xdg-*/
